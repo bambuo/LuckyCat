@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { IconDelete } from '@arco-design/web-vue/es/icon'
+import { IconDelete, IconLaunch } from '@arco-design/web-vue/es/icon'
 import { createExchange, updateExchange } from '../api'
 import { EXCHANGE_PRESETS, exchangeLetter, getExchangePreset } from '../exchanges'
 import type { ExchangeAccount, ExchangeType, ExchangeUpsertRequest } from '../types'
@@ -160,6 +160,19 @@ function removeFromForm() {
             {{ needsPassphrase ? '需要 API Key、Secret 与 Passphrase' : '需要 API Key 与 Secret' }}
           </div>
         </div>
+        <!-- 邀请注册入口：仅在添加流程展示，安静的次级样式，新标签页打开，不影响填写与保存 -->
+        <a
+          v-if="!isEdit && preset.inviteUrl"
+          class="ex-invite"
+          :href="preset.inviteUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          :title="`通过邀请链接注册 ${preset.label}`"
+        >
+          <span class="ex-invite-question">还没有账号？</span>
+          <span class="ex-invite-link">邀请注册</span>
+          <IconLaunch class="ex-invite-icon" />
+        </a>
       </div>
 
       <a-alert v-if="error" type="error" style="margin-bottom: 12px">{{ error }}</a-alert>
@@ -321,6 +334,27 @@ function removeFromForm() {
 .ex-head-sub {
   font-size: 12px;
   color: var(--color-text-3);
+}
+
+/* 邀请注册：次级灰色文本，悬停才提亮为主色——不抢表单与主按钮的注意力 */
+.ex-invite {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-3);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.ex-invite:hover {
+  color: rgb(var(--primary-6));
+}
+
+.ex-invite-icon {
+  font-size: 12px;
 }
 
 .ex-hint {
