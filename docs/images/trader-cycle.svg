@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 720" width="980" height="720" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="cyc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="980" height="720" fill="#ffffff"/>
+  <text x="40" y="42" font-size="18" font-weight="700" fill="#0f172a">交易员决策周期（每轮）</text>
+
+  <!-- ① 周期触发 -->
+  <rect x="120" y="70" width="740" height="64" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <circle cx="152" cy="102" r="14" fill="#3b82f6"/>
+  <text x="152" y="107" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="180" y="96" font-size="14" font-weight="700" fill="#0f172a">周期触发</text>
+  <text x="180" y="116" font-size="11.5" fill="#475569">扫描间隔到点自动开启新一轮；交易员启动后由后台循环驱动</text>
+
+  <!-- ② 数据准备 -->
+  <rect x="120" y="162" width="740" height="64" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <circle cx="152" cy="194" r="14" fill="#0ea5e9"/>
+  <text x="152" y="199" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="180" y="188" font-size="14" font-weight="700" fill="#0f172a">数据准备</text>
+  <text x="180" y="208" font-size="11.5" fill="#475569">多周期 K 线 · 技术指标 · 持仓量 OI · 情绪/新闻 · 账户与持仓；失败则记失败轮次，不伪造提示词与响应</text>
+
+  <!-- ③ 提示词组装 -->
+  <rect x="120" y="254" width="740" height="64" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <circle cx="152" cy="286" r="14" fill="#6366f1"/>
+  <text x="152" y="291" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="180" y="280" font-size="14" font-weight="700" fill="#0f172a">提示词组装</text>
+  <text x="180" y="300" font-size="11.5" fill="#475569">策略配置 + 指标快照 + 决策记忆 + 风控纪律（规则与记忆均带版本指纹，可追溯）</text>
+
+  <!-- ④ AI 决策 -->
+  <rect x="120" y="346" width="740" height="64" rx="10" fill="#faf5ff" stroke="#d8b4fe"/>
+  <circle cx="152" cy="378" r="14" fill="#8b5cf6"/>
+  <text x="152" y="383" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+  <text x="180" y="372" font-size="14" font-weight="700" fill="#0f172a">AI 决策</text>
+  <text x="180" y="392" font-size="11.5" fill="#475569">经 M.E.AI 调用模型：输出 buy / sell / close / hold 与入场·止损·止盈·信心度（严格 JSON）</text>
+
+  <!-- ⑤ 风控校验 -->
+  <rect x="120" y="438" width="740" height="64" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+  <circle cx="152" cy="470" r="14" fill="#f59e0b"/>
+  <text x="152" y="475" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+  <text x="180" y="464" font-size="14" font-weight="700" fill="#0f172a">风控校验</text>
+  <text x="180" y="484" font-size="11.5" fill="#475569">杠杆 · 仓位 · 单笔风险 · 总保证金占用 · 连亏锁 · 最小金额；被拒绝则本轮方案作废</text>
+
+  <!-- ⑥ 执行 -->
+  <rect x="120" y="530" width="740" height="64" rx="10" fill="#ecfdf5" stroke="#6ee7b7"/>
+  <circle cx="152" cy="562" r="14" fill="#10b981"/>
+  <text x="152" y="567" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+  <text x="180" y="556" font-size="14" font-weight="700" fill="#0f172a">执行</text>
+  <text x="180" y="576" font-size="11.5" fill="#475569">实盘 / 演练双模式：开仓 · 平仓 · 保护单；hold 不动仓</text>
+
+  <!-- ⑦ 落库与推送 -->
+  <rect x="120" y="622" width="740" height="64" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <circle cx="152" cy="654" r="14" fill="#64748b"/>
+  <text x="152" y="659" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+  <text x="180" y="648" font-size="14" font-weight="700" fill="#0f172a">落库与推送</text>
+  <text x="180" y="668" font-size="11.5" fill="#475569">决策记录（原始响应 · token · 耗时）落库，并经 SSE 秒推到交易看板</text>
+
+  <!-- 阶段箭头 -->
+  <line x1="490" y1="134" x2="490" y2="156" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <line x1="490" y1="226" x2="490" y2="248" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <line x1="490" y1="318" x2="490" y2="340" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <line x1="490" y1="410" x2="490" y2="432" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <line x1="490" y1="502" x2="490" y2="524" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <line x1="490" y1="594" x2="490" y2="616" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+
+  <!-- 回环 -->
+  <path d="M 120 654 H 76 V 102 H 114" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#cyc-arrow)"/>
+  <text transform="translate(60 400) rotate(-90)" text-anchor="middle" font-size="11" fill="#94a3b8">下一轮：成交与净值回写决策记忆</text>
+</svg>

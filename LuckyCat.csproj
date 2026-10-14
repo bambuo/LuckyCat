@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Tests/**" />
+    <Content Remove="Tests/**" />
+    <None Remove="Tests/**" />
+    <InternalsVisibleTo Include="LuckyCat.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
+    <PackageReference Include="CryptoClients.Net" Version="5.9.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.10.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.10.1" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.10.0" />
+    <PackageReference Include="OllamaSharp" Version="5.5.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.19.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.19.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.19.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 700" width="1180" height="700" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="700" fill="#ffffff"/>
+  <text x="40" y="44" font-size="18" font-weight="700" fill="#0f172a">LuckyCat 系统架构</text>
+
+  <!-- 前端 -->
+  <rect x="40" y="72" width="760" height="76" rx="12" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="64" y="105" font-size="14.5" font-weight="700" fill="#1e40af">浏览器 · Vue 3 + Arco Design</text>
+  <text x="64" y="127" font-size="11.5" fill="#3b82f6">单页应用 · Vite 构建</text>
+  <rect x="452" y="90" width="104" height="32" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+  <text x="504" y="110" font-size="12" fill="#1d4ed8" text-anchor="middle">AI 交易员</text>
+  <rect x="568" y="90" width="104" height="32" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+  <text x="620" y="110" font-size="12" fill="#1d4ed8" text-anchor="middle">策略工作室</text>
+  <rect x="684" y="90" width="114" height="32" rx="8" fill="#ffffff" stroke="#bfdbfe"/>
+  <text x="741" y="110" font-size="12" fill="#1d4ed8" text-anchor="middle">交易看板</text>
+
+  <!-- 前端 → 宿主 -->
+  <line x1="420" y1="148" x2="420" y2="182" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="436" y="172" font-size="11.5" fill="#64748b">REST /api · SSE 流（开发期 Vite :5173 代理 → :5210）</text>
+
+  <!-- 宿主 -->
+  <rect x="40" y="188" width="760" height="268" rx="12" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <text x="64" y="217" font-size="14.5" font-weight="700" fill="#5b21b6">ASP.NET Core · Minimal API（:5210）</text>
+  <text x="64" y="252" font-size="12" font-weight="700" fill="#7c3aed">HTTP 端点</text>
+  <rect x="64" y="260" width="118" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="123" y="279" font-size="11.5" fill="#6d28d9" text-anchor="middle">/api/providers</text>
+  <rect x="192" y="260" width="122" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="253" y="279" font-size="11.5" fill="#6d28d9" text-anchor="middle">/api/exchanges</text>
+  <rect x="324" y="260" width="122" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="385" y="279" font-size="11.5" fill="#6d28d9" text-anchor="middle">/api/strategies</text>
+  <rect x="456" y="260" width="110" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="511" y="279" font-size="11.5" fill="#6d28d9" text-anchor="middle">/api/traders</text>
+  <rect x="576" y="260" width="122" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="637" y="279" font-size="11.5" fill="#6d28d9" text-anchor="middle">SSE · 事件推送</text>
+
+  <text x="64" y="326" font-size="12" font-weight="700" fill="#7c3aed">后台服务</text>
+  <rect x="64" y="334" width="208" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="168" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">TraderRunnerService · 决策循环</text>
+  <rect x="282" y="334" width="232" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="398" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">PositionHistorySyncService · 仓位同步</text>
+  <rect x="524" y="334" width="228" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+  <text x="638" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">AccountStreamService · 账户实时流</text>
+
+  <text x="64" y="400" font-size="12" font-weight="700" fill="#7c3aed">决策与交易能力</text>
+  <rect x="64" y="408" width="146" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="137" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">行情快照 · 指标计算</text>
+  <rect x="220" y="408" width="94" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="267" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">提示词组装</text>
+  <rect x="324" y="408" width="80" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="364" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">决策记忆</text>
+  <rect x="414" y="408" width="80" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="454" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">风控政策</text>
+  <rect x="504" y="408" width="126" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="567" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">交易执行 · 保护单</text>
+  <rect x="640" y="408" width="112" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="696" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">净值与账户</text>
+
+  <!-- 宿主 → 存储 / 可观测性 -->
+  <line x1="800" y1="276" x2="826" y2="276" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="800" y1="420" x2="826" y2="420" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+
+  <!-- 存储 -->
+  <rect x="832" y="188" width="308" height="176" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+  <text x="856" y="217" font-size="14" font-weight="700" fill="#92400e">存储 · SQLite（EF Core）</text>
+  <text x="856" y="243" font-size="11.5" fill="#b45309">luckycat.db · 首次运行自动建库</text>
+  <text x="856" y="267" font-size="11.5" fill="#b45309">Providers · ExchangeAccounts</text>
+  <text x="856" y="291" font-size="11.5" fill="#b45309">Strategies · Traders</text>
+  <text x="856" y="315" font-size="11.5" fill="#b45309">DecisionRecords · TraderOrders</text>
+  <text x="856" y="339" font-size="11.5" fill="#b45309">仓位快照与历史 · 净值采样</text>
+
+  <!-- 可观测性 -->
+  <rect x="832" y="388" width="308" height="252" rx="12" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="856" y="417" font-size="14" font-weight="700" fill="#166534">可观测性 · OpenTelemetry</text>
+  <text x="856" y="443" font-size="11.5" fill="#15803d">Trace：trader.cycle / ai.call /</text>
+  <text x="856" y="460" font-size="11.5" fill="#15803d">exchange.fetch（含 GenAI 语义约定）</text>
+  <text x="856" y="484" font-size="11.5" fill="#15803d">Metrics：决策数 · AI 耗时 · token ·</text>
+  <text x="856" y="501" font-size="11.5" fill="#15803d">行情失败与重试</text>
+  <text x="856" y="525" font-size="11.5" fill="#15803d">Logs：EF Core 仅告警及以上导出</text>
+  <text x="856" y="549" font-size="11.5" fill="#15803d">导出端按环境变量启用：</text>
+  <text x="856" y="566" font-size="11.5" fill="#15803d">OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_CONSOLE</text>
+
+  <!-- 宿主 → 外部 -->
+  <line x1="420" y1="456" x2="420" y2="490" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="436" y="480" font-size="11.5" fill="#64748b">外部调用（HTTP · WebSocket · AI SDK）</text>
+
+  <!-- 外部依赖 -->
+  <rect x="40" y="496" width="760" height="168" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="64" y="524" font-size="14" font-weight="700" fill="#334155">外部依赖</text>
+
+  <rect x="64" y="536" width="225" height="108" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="82" y="562" font-size="12.5" font-weight="700" fill="#0f172a">AI 提供商（M.E.AI）</text>
+  <text x="82" y="586" font-size="11" fill="#475569">OpenAI 兼容 · Azure OpenAI</text>
+  <text x="82" y="605" font-size="11" fill="#475569">Ollama 本地模型</text>
+  <text x="82" y="624" font-size="11" fill="#475569">思维链三态 · 能力探测</text>
+
+  <rect x="307" y="536" width="225" height="108" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="325" y="562" font-size="12.5" font-weight="700" fill="#0f172a">加密交易所</text>
+  <text x="325" y="586" font-size="11" fill="#475569">CryptoClients.Net（Binance ·</text>
+  <text x="325" y="605" font-size="11" fill="#475569">Gate.io · Bybit · OKX · …）</text>
+  <text x="325" y="624" font-size="11" fill="#475569">REST 下单 · WS 持仓与行情</text>
+
+  <rect x="550" y="536" width="225" height="108" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="568" y="562" font-size="12.5" font-weight="700" fill="#0f172a">公开数据源</text>
+  <text x="568" y="586" font-size="11" fill="#475569">币种排行（成交额/波动评分）</text>
+  <text x="568" y="605" font-size="11" fill="#475569">持仓量 OI 变化榜</text>
+  <text x="568" y="624" font-size="11" fill="#475569">市场情绪与新闻</text>
+</svg>

@@ -1,0 +1,33 @@
+{
+  "strategyId": 9,
+  "name": "日内顺势回调（稳健验证）",
+  "checks": {
+    "ai_config_matches": true,
+    "inactive": true,
+    "traders_remain_on_strategy_8": true
+  },
+  "normalization": "运行服务省略gridConfig:null，回读恢复默认网格对象；strategyType=ai_trading时该块不使用。所有AI配置字段一致。",
+  "traders": [
+    {
+      "id": 3,
+      "strategyId": 8,
+      "isRunning": true,
+      "executionMode": "live"
+    },
+    {
+      "id": 2,
+      "strategyId": 8,
+      "isRunning": false,
+      "executionMode": "live"
+    },
+    {
+      "id": 1,
+      "strategyId": 8,
+      "isRunning": false,
+      "executionMode": "dry"
+    }
+  ],
+  "promptRevisionLatest": false,
+  "modelTested": false,
+  "ordersSubmitted": false
+}
