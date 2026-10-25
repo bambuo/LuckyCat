@@ -128,27 +128,29 @@ public class ExecutionGatewayTests
     [Fact]
     public async Task Place_rejects_non_positive_quantity_before_touching_exchange()
     {
-        var (ok, error, orderId) = await ExchangeTradingService.PlaceOrderAsync(
+        var result = await ExchangeTradingService.PlaceOrderAsync(
             Account(), Btc, isLong: true, quantity: 0m, orderType: SharedOrderType.Market, price: null,
             stopLossPrice: 95m, takeProfitPrice: 110m, crossMargin: true, positionSide: null,
             clientOrderId: "lc-open-1", CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("下单数量必须大于 0", error);
-        Assert.Null(orderId);
+        Assert.False(result.Ok);
+        Assert.Equal(PlaceOutcome.NotCreated, result.Outcome);
+        Assert.Equal("下单数量必须大于 0", result.Error);
+        Assert.Null(result.ExchangeOrderId);
     }
 
     [Fact]
     public async Task Place_rejects_limit_without_price_before_touching_exchange()
     {
-        var (ok, error, orderId) = await ExchangeTradingService.PlaceOrderAsync(
+        var result = await ExchangeTradingService.PlaceOrderAsync(
             Account(), Btc, isLong: true, quantity: 0.1m, orderType: SharedOrderType.Limit, price: null,
             stopLossPrice: 95m, takeProfitPrice: 110m, crossMargin: true, positionSide: null,
             clientOrderId: "lc-open-1", CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("限价单缺少有效价格", error);
-        Assert.Null(orderId);
+        Assert.False(result.Ok);
+        Assert.Equal(PlaceOutcome.NotCreated, result.Outcome);
+        Assert.Equal("限价单缺少有效价格", result.Error);
+        Assert.Null(result.ExchangeOrderId);
     }
 
     [Theory]
@@ -158,15 +160,16 @@ public class ExecutionGatewayTests
     {
         var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
 
-        var (ok, error, orderId, filled, averagePrice) = await gateway.PlaceAsync(
+        var result = await gateway.PlaceAsync(
             Btc, isLong: true, quantity: 0.1m, stopLossPrice: stopLoss, takeProfitPrice: 110m,
             leverage: 3m, orderType: "market", price: null, clientOrderId: "lc-open-1", CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("止损价必须大于 0", error);
-        Assert.Null(orderId);
-        Assert.Null(filled);
-        Assert.Null(averagePrice);
+        Assert.False(result.Ok);
+        Assert.Equal(PlaceOutcome.NotCreated, result.Outcome);
+        Assert.Equal("止损价必须大于 0", result.Error);
+        Assert.Null(result.ExchangeOrderId);
+        Assert.Null(result.FilledQuantity);
+        Assert.Null(result.AveragePrice);
     }
 
     [Fact]
@@ -174,13 +177,25 @@ public class ExecutionGatewayTests
     {
         var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
 
-        var (ok, error, orderId, _, _) = await gateway.PlaceAsync(
+        var result = await gateway.PlaceAsync(
             Btc, isLong: true, quantity: 0.1m, stopLossPrice: 95m, takeProfitPrice: -1m,
             leverage: 3m, orderType: "market", price: null, clientOrderId: "lc-open-1", CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("止盈价不能为负数", error);
-        Assert.Null(orderId);
+        Assert.False(result.Ok);
+        Assert.Equal(PlaceOutcome.NotCreated, result.Outcome);
+        Assert.Equal("止盈价不能为负数", result.Error);
+    }
+
+    [Fact]
+    public void Timeout_and_network_errors_are_ambiguous_but_exchange_rejections_are_not()
+    {
+        Assert.True(ExchangeTradingService.IsAmbiguousPlaceError(
+            new CryptoExchange.Net.Objects.TimeoutError("timeout", new TimeoutException())));
+        Assert.True(ExchangeTradingService.IsAmbiguousPlaceError(
+            new CryptoExchange.Net.Objects.CantConnectError()));
+        Assert.False(ExchangeTradingService.IsAmbiguousPlaceError(
+            new CryptoExchange.Net.Objects.ServerError(
+                CryptoExchange.Net.Objects.Errors.ErrorType.InsufficientBalance, "insufficient", new Exception())));
     }
 
     [Fact]

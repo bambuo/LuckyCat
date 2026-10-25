@@ -7,7 +7,7 @@ public class TraderOrder
     public int TraderId { get; set; }
     public DateTime At { get; set; }
     public string? Symbol { get; set; }
-    /// <summary>动作：buy | sell | close | skip</summary>
+    /// <summary>动作：open | close（读取兼容历史 buy | sell | skip）</summary>
     public required string Action { get; set; }
     public decimal? Quantity { get; set; }
     public decimal? Price { get; set; }

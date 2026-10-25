@@ -1,13 +1,14 @@
-using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CryptoExchange.Net.SharedApis;
 using LuckyCat.Contracts;
 using LuckyCat.Data;
 using LuckyCat.Models;
 using LuckyCat.Services;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace LuckyCat.Tools;
@@ -24,7 +25,8 @@ public sealed record ExecutionToolContext(
 /// 执行员写工具：<c>place_order</c> 按 LC-STD-02 §6 的 12 步硬闸执行，所有校验失败一律拒绝（fail-closed）。
 /// 复用 <see cref="ToolAuditor"/> 落 ToolInvocation/预算/工具 SSE（工具内部不再写第二份审计），
 /// 只在真实提交或演练成交后写 <see cref="TraderOrder"/> 并发布 order SSE。
-/// 账户写锁按账户 ID 进程内串行，覆盖账户重读、全部校验、提交与订单落库。
+/// 账户写锁在审计包装器外层获取，覆盖完整调用（账户重读、全部校验、提交、订单落库与 ToolInvocation 落库）。
+/// 单进程内按账户 ID 条纹串行（64 个信号量，容量有界）；跨进程互斥不在本设计范围，部署必须保持单进程。
 /// </summary>
 public sealed class ExecutionTools(
     AppDbContext db,
@@ -36,9 +38,14 @@ public sealed class ExecutionTools(
     ToolAuditor audit)
 {
     private const string Role = "executor";
+    private const string ExchangeRejectedMessage = "交易所拒绝下单，订单未创建";
+    private const string ExchangeUnknownMessage = "交易所结果未知，请人工核对";
+    private const int MaxInternalErrorChars = 300;
+    private const int AccountLockStripes = 64;
 
-    // 账户写锁：同一交易所账户的写工具串行执行（静态，跨周期共享；键为账户主键）。
-    private static readonly ConcurrentDictionary<int, SemaphoreSlim> AccountLocks = new();
+    // 账户写锁：同一交易所账户的完整写工具调用（含审计落库）串行执行。
+    // 固定 64 条纹，避免按账户 ID 无限增长；不同账户偶发共用一个条纹只影响吞吐，不影响正确性。
+    private static readonly SemaphoreSlim[] AccountLocks = CreateAccountLocks();
 
     private readonly AppDbContext _db = db;
     private readonly ExecutionToolContext _ctx = ctx;
@@ -52,7 +59,7 @@ public sealed class ExecutionTools(
     private int _attempt;
 
     [Description("在已批准提案的可执行边界内开仓；必须提供止损与止盈，参数必须与提案一致。")]
-    public Task<ToolEnvelope> PlaceOrderAsync(
+    public async Task<ToolEnvelope> PlaceOrderAsync(
         [Description("本周期已获批提案 ID")] string proposalId,
         [Description("标的，必须等于提案标的（如 BTC/USDT）")] string symbol,
         [Description("方向：long | short，必须等于提案方向")] string side,
@@ -67,7 +74,18 @@ public sealed class ExecutionTools(
     {
         var request = new OrderRequest(proposalId, symbol, side, orderType, quantity, price, leverage,
             stopLossPrice, takeProfitPrice, reason);
-        return _audit.RunAsync("place_order", Role, request, () => PlaceOrderCoreAsync(request, ct), ct);
+        // 锁覆盖 action + ToolInvocation 落库：同一账户的写调用（含审计）完全串行，
+        // 不允许「订单已提交但审计尚未落库」的窗口被并发调用穿过。
+        var accountLock = AccountLock(_ctx.Account.Id);
+        await accountLock.WaitAsync(ct);
+        try
+        {
+            return await _audit.RunAsync("place_order", Role, request, () => PlaceOrderCoreAsync(request, ct), ct);
+        }
+        finally
+        {
+            accountLock.Release();
+        }
     }
 
     /// <summary>一次 place_order 的不可变入参（也作为 ToolInvocation 的审计入参）。</summary>
@@ -110,6 +128,7 @@ public sealed class ExecutionTools(
             return Fail(ToolErrors.InvalidArgument, "开仓参数与提案不一致");
         if (proposal.EntryPrice is not > 0) return Fail(ToolErrors.ProposalNotApproved, "提案缺少有效入场价");
         if (proposal.Leverage is not > 0) return Fail(ToolErrors.ProposalNotApproved, "提案缺少有效杠杆");
+        if (proposal.PositionPct is not > 0) return Fail(ToolErrors.ProposalNotApproved, "提案缺少有效仓位");
         if (proposal.StopLossPrice != request.StopLossPrice)
             return Fail(ToolErrors.InvalidArgument, "止损价必须等于提案值");
         if (proposal.TakeProfitPrice != request.TakeProfitPrice)
@@ -126,23 +145,13 @@ public sealed class ExecutionTools(
             || verdict.MaxLeverage is not { } maxLeverage || maxLeverage <= 0)
             return Fail(ToolErrors.ProposalNotApproved, "裁决缺少批准边界");
 
-        // 5) 账户锁内重读账户与持仓，锁覆盖后续校验、提交与落库。
-        var accountLock = AccountLocks.GetOrAdd(_ctx.Account.Id, _ => new SemaphoreSlim(1, 1));
-        await accountLock.WaitAsync(ct);
-        try
-        {
-            return await PlaceOrderLockedAsync(request, proposal, verdict, maxPositionPct, maxLeverage, ct);
-        }
-        finally
-        {
-            accountLock.Release();
-        }
-    }
+        // 风控只能收紧：批准边界不得超过提案本身。
+        if (maxPositionPct > proposal.PositionPct.Value)
+            return Fail(ToolErrors.RiskPolicyViolation, "裁决仓位上限超过提案，拒绝执行");
+        if (maxLeverage > proposal.Leverage.Value)
+            return Fail(ToolErrors.LeverageExceeded, "裁决杠杆上限超过提案，拒绝执行");
 
-    private async Task<ToolEnvelope> PlaceOrderLockedAsync(OrderRequest request, TradeProposal proposal,
-        RiskVerdict verdict, decimal maxPositionPct, decimal maxLeverage, CancellationToken ct)
-    {
-        // 5) 账户重读：不信任任何早先缓存。
+        // 5) 账户锁已由 PlaceOrderAsync 持有；此处重读账户与持仓，不信任任何早先缓存。
         var account = await _accounts.GetAccountAsync(ct);
         var positions = await _accounts.GetPositionsAsync(ct);
         if (!account.Success || !positions.Success) return Fail(ToolErrors.DataUnavailable, "账户或持仓不可读", true);
@@ -166,6 +175,13 @@ public sealed class ExecutionTools(
             : await _gateway.GetPriceAsync(shared, ct);
         if (executionPrice is not > 0) return Fail(ToolErrors.DataUnavailable, "执行价格不可用", true);
 
+        // 执行价必须严格位于止损与止盈之间（多：stop < price < take；空：stop > price > take）。
+        var isLong = request.Side == "long";
+        if (isLong
+            ? request.StopLossPrice >= executionPrice.Value || executionPrice.Value >= request.TakeProfitPrice!.Value
+            : request.StopLossPrice <= executionPrice.Value || executionPrice.Value <= request.TakeProfitPrice!.Value)
+            return Fail(ToolErrors.InvalidArgument, "执行价必须严格位于止损与止盈之间");
+
         if (request.OrderType == "limit")
         {
             var limitPrice = request.Price!.Value;
@@ -186,56 +202,56 @@ public sealed class ExecutionTools(
         if (submittedMargin > approvedMargin) return Fail(ToolErrors.QuantityExceeded, "保证金超过批准上限");
         if (submittedMargin > account.UsdtAvailable) return Fail(ToolErrors.QuantityExceeded, "可用保证金不足");
 
-        // 10) 交易所边界（合约规格未知任何一项都不得提交）。
+        // 合约规格读取放在重跑风控之前，仅作为风控输入；任何未知/缺失都在第 10 步拒绝，绝不提前放行。
         var spec = await _gateway.GetFuturesSpecAsync(shared, ct);
-        if (spec is null) return Fail(ToolErrors.ExchangeUnknown, "合约规格未知，无法确认交易所能力");
-        if (!spec.Trading) return Fail(ToolErrors.ExchangeUnknown, "标的当前不可交易");
-        var exchangeMaxLeverage = request.Side == "long" ? spec.MaxLongLeverage : spec.MaxShortLeverage;
-        if (exchangeMaxLeverage is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所方向杠杆上限未知");
-        if (currentLeverage > exchangeMaxLeverage.Value) return Fail(ToolErrors.LeverageExceeded, "杠杆超过交易所上限");
-        if (spec.MaxTradeQuantity is { } maxTradeQuantity && request.Quantity > maxTradeQuantity)
-            return Fail(ToolErrors.QuantityExceeded, "数量超过交易所上限");
-        if (spec.QuantityStep is > 0 && request.Quantity % spec.QuantityStep.Value != 0)
-            return Fail(ToolErrors.InvalidArgument, "数量精度不符合交易所步长");
-        if (spec.MinTradeQuantity is { } minTradeQuantity && request.Quantity < minTradeQuantity)
-            return Fail(ToolErrors.InvalidArgument, "数量低于交易所最小下单量");
-        var notional = request.Quantity * executionPrice.Value;
-        if (spec.MinNotionalValue is { } minNotional && notional < minNotional)
-            return Fail(ToolErrors.InvalidArgument, "名义价值低于交易所最小下单金额");
-        if (request.OrderType == "limit" && spec.PriceStep is > 0
-            && request.Price!.Value % spec.PriceStep.Value != 0)
-            return Fail(ToolErrors.InvalidArgument, "价格精度不符合交易所步长");
+        var exchangeMaxLeverage = spec is null
+            ? null
+            : request.Side == "long" ? spec.MaxLongLeverage : spec.MaxShortLeverage;
 
-        // 7) 用最新账户/持仓/价格重跑风控。
+        // 7) 用最新账户/持仓/价格重跑风控；批准边界之外再按重跑计划收紧数量/杠杆/保证金。
         var discipline = await _accounts.GetDisciplineAsync(ct);
         var riskContext = new OpenRiskContext(account.UsdtEquity, account.UsdtAvailable,
             margin.UsedMargin, positions.Positions.Count,
             positions.Positions.Any(position => TradingRiskPolicy.BaseAsset(position.Symbol)
                 == TradingRiskPolicy.BaseAsset(request.Symbol)),
-            executionPrice.Value, exchangeMaxLeverage.Value, spec.QuantityStep ?? 0m,
-            spec.MinTradeQuantity ?? 0m, spec.MinNotionalValue ?? 0m, discipline);
-        if (ProposalRiskAdapter.ValidateOpen(proposal, _config.RiskControl, riskContext, out _) is { } riskError)
+            executionPrice.Value, exchangeMaxLeverage is > 0 ? exchangeMaxLeverage.Value : maxLeverage,
+            spec?.QuantityStep ?? 0m, spec?.MinTradeQuantity ?? 0m, spec?.MinNotionalValue ?? 0m, discipline);
+        if (ProposalRiskAdapter.ValidateOpen(proposal, _config.RiskControl, riskContext, out var plan) is { } riskError)
             return Fail(ToolErrors.RiskPolicyViolation, riskError);
+        if (plan is null) return Fail(ToolErrors.RiskPolicyViolation, "风控计划不可用，拒绝开仓");
+        if (currentLeverage > plan.Leverage) return Fail(ToolErrors.LeverageExceeded, "杠杆超过风控计划");
+        if (request.Quantity > plan.Quantity) return Fail(ToolErrors.QuantityExceeded, "数量超过风控计划");
+        if (submittedMargin > plan.Margin) return Fail(ToolErrors.QuantityExceeded, "保证金超过风控计划");
 
-        // 8) 行情新鲜度：执行标的采样不得超过 3 分钟。
+        // 8) 行情新鲜度：执行标的采样不得超过 3 分钟；未来时间戳同样视为不可信。
         var fresh = await _market.GetSnapshotAsync(_exchange, shared, _ctx.Timeframe, 2, 0, ct);
+        var now = DateTime.UtcNow;
         if (fresh.Source != "live" || fresh.AsOfUtc is not { } asOf
-            || DateTime.UtcNow - asOf > TimeSpan.FromMinutes(3))
-            return Fail(ToolErrors.StaleMarketData, "行情缺失或超过 3 分钟");
+            || asOf > now || now - asOf > TimeSpan.FromMinutes(3))
+            return Fail(ToolErrors.StaleMarketData, "行情缺失、时间戳异常或超过 3 分钟");
 
-        // 9) 重复与上限：同一提案已成功提交则幂等返回；同标的 10 秒内/本周期同标的最多 1 笔。
+        // 9) 重复与上限：同一提案已成功提交则幂等返回；未知结果阻止同账户同标的所有新开仓；
+        //    同标的 10 秒内/本周期同标的最多 1 笔；同一提案最多 2 次提交尝试（仅限明确未创建）。
         var existing = await _db.TraderOrders.AsNoTracking()
             .Where(o => o.CycleId == _ctx.CycleId && o.ProposalId == request.ProposalId
-                && o.Action == "open" && o.Success)
+                && (o.Action == "open" || o.Action == "buy" || o.Action == "sell") && o.Success)
             .OrderByDescending(o => o.Id)
             .FirstOrDefaultAsync(ct);
         if (existing is not null) return ExistingOrder(existing);
 
-        var now = DateTime.UtcNow;
-        var recent = await _db.TraderOrders.AsNoTracking()
-            .Where(o => o.ExchangeAccountId == _ctx.Account.Id && o.At >= now.AddSeconds(-10))
+        var unresolved = await _db.TraderOrders.AsNoTracking()
+            .Where(o => o.ExchangeAccountId == _ctx.Account.Id && o.Status == "unknown"
+                && (o.Action == "open" || o.Action == "buy" || o.Action == "sell"))
             .ToListAsync(ct);
-        if (recent.Any(order => IsEffectiveOpen(order) && SameBaseAsset(order.Symbol, request.Symbol)))
+        if (unresolved.Any(order => SameBaseAsset(order.Symbol, request.Symbol)))
+            return Fail(ToolErrors.ExchangeUnknown, "该账户标的存在结果未知的开仓，禁止再次开仓，请人工核对");
+
+        var at = DateTime.UtcNow;
+        var recent = await _db.TraderOrders.AsNoTracking()
+            .Where(o => o.ExchangeAccountId == _ctx.Account.Id && o.At >= at.AddSeconds(-10))
+            .ToListAsync(ct);
+        if (recent.Any(order => IsEffectiveOpen(order) && SameBaseAsset(order.Symbol, request.Symbol)
+                && !(_ctx.Mode == "live" && order.Simulated)))
             return Fail(ToolErrors.OrderLimitReached, "同一标的 10 秒内已提交开仓");
 
         var cycleOrders = await _db.TraderOrders.AsNoTracking()
@@ -247,8 +263,7 @@ public sealed class ExecutionTools(
             return Fail(ToolErrors.OrderLimitReached, "本周期该标的已提交过开仓");
 
         // 同一提案最多 2 次提交尝试：第二次仅用于交易所明确未创建订单的失败。
-        var submittedAttempts = await _db.TraderOrders.CountAsync(
-            o => o.CycleId == _ctx.CycleId && o.ProposalId == request.ProposalId, ct);
+        var submittedAttempts = cycleOrders.Count(order => order.ProposalId == request.ProposalId);
         if (submittedAttempts >= 2) return Fail(ToolErrors.OrderLimitReached, "同一提案最多提交 2 次");
 
         // 尝试序号按已落库尝试数推进，避免同一周期内重启工具实例后复用旧 clientOrderId。
@@ -259,7 +274,29 @@ public sealed class ExecutionTools(
                 o => o.CycleId == _ctx.CycleId && o.ClientOrderId == clientOrderId, ct))
             return Fail(ToolErrors.DuplicateOrder, "重复订单");
 
-        // 10) 实盘能力：止损为硬性保护、止盈为硬性目标，任一未知/不支持都不提交；演练可模拟。
+        // 10) 交易所校验：规格、能力与全部约束必须已知且满足；任何未知都不提交。
+        if (spec is null) return Fail(ToolErrors.ExchangeUnknown, "合约规格未知，无法确认交易所能力");
+        if (!spec.Trading) return Fail(ToolErrors.ExchangeUnknown, "标的当前不可交易");
+        if (exchangeMaxLeverage is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所方向杠杆上限未知");
+        if (currentLeverage > exchangeMaxLeverage.Value) return Fail(ToolErrors.LeverageExceeded, "杠杆超过交易所上限");
+        if (spec.MaxTradeQuantity is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所最大下单量未知");
+        if (request.Quantity > spec.MaxTradeQuantity.Value)
+            return Fail(ToolErrors.QuantityExceeded, "数量超过交易所上限");
+        if (spec.QuantityStep is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所数量步长未知");
+        if (request.Quantity % spec.QuantityStep.Value != 0)
+            return Fail(ToolErrors.InvalidArgument, "数量精度不符合交易所步长");
+        if (spec.MinTradeQuantity is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所最小下单量未知");
+        if (request.Quantity < spec.MinTradeQuantity.Value)
+            return Fail(ToolErrors.InvalidArgument, "数量低于交易所最小下单量");
+        if (spec.MinNotionalValue is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所最小名义价值未知");
+        var notional = request.Quantity * executionPrice.Value;
+        if (notional < spec.MinNotionalValue.Value)
+            return Fail(ToolErrors.InvalidArgument, "名义价值低于交易所最小下单金额");
+        if (spec.PriceStep is not > 0) return Fail(ToolErrors.ExchangeUnknown, "交易所价格步长未知");
+        if (request.Price is { } orderPrice && orderPrice % spec.PriceStep.Value != 0)
+            return Fail(ToolErrors.InvalidArgument, "价格精度不符合交易所步长");
+
+        // 实盘能力：止损为硬性保护、止盈为硬性目标，任一未知/不支持都不提交；演练可模拟。
         if (_ctx.Mode == "live")
         {
             var capability = _gateway.Audit();
@@ -268,39 +305,100 @@ public sealed class ExecutionTools(
             if (!capability.TakeProfitSupported) return Fail(ToolErrors.ExchangeUnknown, "交易所不支持附加止盈");
         }
 
-        // 11) 提交：演练只模拟成交，绝不调用下单；实盘透传工具生成的 clientOrderId。
+        // 11) 演练：使用新鲜最新价按配置滑点模拟成交，绝不调用下单接口。
         if (_ctx.Mode == "dry")
         {
-            var simulated = NewOrder(clientOrderId, request, executionPrice.Value, currentLeverage, "filled",
-                simulated: true, request.Quantity, executionPrice.Value, proposal.Id, verdict.Id, request.Reason);
-            _db.TraderOrders.Add(simulated);
-            await _db.SaveChangesAsync(ct);
+            if (fresh.LastPrice is not > 0)
+                return Fail(ToolErrors.DataUnavailable, "最新价不可用，无法模拟成交", true);
+            var fillPrice = SimulatedFillPrice(request, fresh.LastPrice.Value);
+            var fee = request.Quantity * fillPrice * _config.RiskControl.EstimatedFeePct / 100m;
+            var note = $"{request.Reason}（演练成交：参考价 {fresh.LastPrice.Value}，滑点 {_config.RiskControl.EstimatedSlippagePct}%，手续费 {fee:0.########} USDT）";
+            var simulated = NewOrder(clientOrderId, request, fillPrice, currentLeverage, "filled",
+                simulated: true, request.Quantity, fillPrice, proposal.Id, verdict.Id, note);
+            var (inserted, raced) = await TryInsertOrderAsync(simulated);
+            if (!inserted)
+                return raced is not null
+                    ? ExistingOrder(raced, "已存在相同的 clientOrderId，未重复提交；如状态未知请人工核对")
+                    : Fail(ToolErrors.DataUnavailable, "订单无法落库，未模拟成交", true);
             _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", simulated));
             return ToolEnvelope.Success(OrderData(simulated), DateTimeOffset.UtcNow, "live",
                 ["演练模式：成交为模拟，不代表交易所真实成交"]);
         }
 
-        var placed = await _gateway.PlaceAsync(shared, request.Side == "long", request.Quantity,
-            request.StopLossPrice, request.TakeProfitPrice, currentLeverage, request.OrderType,
-            request.OrderType == "limit" ? request.Price : null, clientOrderId, ct);
-        var status = !placed.Ok
-            ? placed.Error is null ? "unknown" : "failed"
-            : placed.FilledQuantity is null ? "submitted"
-            : placed.FilledQuantity >= request.Quantity ? "filled" : "partial";
+        // 11) 实盘：提交前先落 unknown 占位行（唯一索引兜底），提交开始后即使调用方取消/落库失败也保留记录。
+        ct.ThrowIfCancellationRequested();
+        var row = NewOrder(clientOrderId, request, executionPrice.Value, currentLeverage, "unknown",
+            simulated: false, null, null, proposal.Id, verdict.Id, request.Reason);
+        var (placeholderInserted, competing) = await TryInsertOrderAsync(row);
+        if (!placeholderInserted)
+            return competing is not null
+                ? ExistingOrder(competing, "已存在相同的 clientOrderId，未重复提交；如状态未知请人工核对")
+                : Fail(ToolErrors.DataUnavailable, "订单无法落库，未提交", true);
 
-        // 12) 落库与推送：实际提交（含失败/未知）都留痕；成功才返回成功回执。
-        var row = NewOrder(clientOrderId, request, executionPrice.Value, currentLeverage, status,
-            simulated: false, placed.FilledQuantity, placed.AveragePrice, proposal.Id, verdict.Id, request.Reason);
-        row.ExchangeOrderId = placed.ExchangeOrderId;
-        row.Error = Truncate(placed.Error, 500);
-        _db.TraderOrders.Add(row);
-        await _db.SaveChangesAsync(ct);
+        PlaceResult placed;
+        try
+        {
+            placed = await _gateway.PlaceAsync(shared, request.Side == "long", request.Quantity,
+                request.StopLossPrice, request.TakeProfitPrice, currentLeverage, request.OrderType,
+                request.OrderType == "limit" ? request.Price : null, clientOrderId, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 调用方取消：占位 unknown 行已落库，直接上抛；绝不删除唯一订单记录。
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // 网关抛异常（超时/网络/解析）无法确认订单是否创建，按未知处理。
+            LogGatewayError(PlaceOutcome.Unknown, ex.Message);
+            placed = PlaceResult.Unknown(ex.Message);
+        }
+        ct.ThrowIfCancellationRequested();
+
+        // 12) 落库与推送：只有交易所明确未创建才写 failed；未知一律 unknown 且不消耗重试机会。
+        if (placed.Outcome != PlaceOutcome.Created) LogGatewayError(placed.Outcome, placed.Error);
+        ApplyPlaceResult(row, placed, request.Quantity);
+        if (!await TryPersistOrderAsync(row))
+            return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
         _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
 
-        if (placed.Ok) return ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live");
-        return placed.Error is null
-            ? Fail(ToolErrors.ExchangeUnknown, "交易所结果未知，请人工核对")
-            : Fail(ToolErrors.ExchangeError, placed.Error);
+        return placed.Outcome switch
+        {
+            PlaceOutcome.Created => ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live"),
+            PlaceOutcome.NotCreated => Fail(ToolErrors.ExchangeError, ExchangeRejectedMessage),
+            _ => Fail(ToolErrors.ExchangeUnknown, ExchangeUnknownMessage)
+        };
+    }
+
+    /// <summary>演练成交价：一律以最新价为基准按配置滑点成交，不得直接使用限价充当成交价。</summary>
+    private decimal SimulatedFillPrice(OrderRequest request, decimal latestPrice)
+    {
+        var slippage = _config.RiskControl.EstimatedSlippagePct / 100m;
+        return request.Side == "long" ? latestPrice * (1m + slippage) : latestPrice * (1m - slippage);
+    }
+
+    private static string StatusFor(PlaceResult placed, decimal quantity) => placed.Outcome switch
+    {
+        PlaceOutcome.NotCreated => "failed",
+        PlaceOutcome.Unknown => "unknown",
+        _ when placed.FilledQuantity is null or <= 0 => "submitted",
+        _ when placed.FilledQuantity.Value >= quantity => "filled",
+        _ => "partial"
+    };
+
+    private static void ApplyPlaceResult(TraderOrder row, PlaceResult placed, decimal quantity)
+    {
+        row.Status = StatusFor(placed, quantity);
+        row.FilledQuantity = placed.FilledQuantity;
+        row.AveragePrice = placed.AveragePrice;
+        row.ExchangeOrderId = placed.ExchangeOrderId;
+        row.Success = row.Status is "submitted" or "filled" or "partial";
+        row.Error = placed.Outcome switch
+        {
+            PlaceOutcome.NotCreated => ExchangeRejectedMessage,
+            PlaceOutcome.Unknown => ExchangeUnknownMessage,
+            _ => null
+        };
     }
 
     private TraderOrder NewOrder(string clientOrderId, OrderRequest request, decimal price, decimal leverage,
@@ -327,12 +425,77 @@ public sealed class ExecutionTools(
         Simulated = simulated,
         Success = status is "submitted" or "filled" or "partial",
         Note = Truncate(reason, 500),
+        Error = status == "unknown" ? "提交已发起，结果待确认" : null,
         At = DateTime.UtcNow
     };
 
-    private static ToolEnvelope ExistingOrder(TraderOrder order) =>
+    /// <summary>插入唯一索引行；冲突时重读已有订单（绝不重复提交交易所）。</summary>
+    private async Task<(bool Inserted, TraderOrder? Existing)> TryInsertOrderAsync(TraderOrder row)
+    {
+        try
+        {
+            _db.TraderOrders.Add(row);
+            await _db.SaveChangesAsync(CancellationToken.None);
+            return (true, null);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            _db.Entry(row).State = EntityState.Detached;
+            var existing = await _db.TraderOrders.AsNoTracking()
+                .SingleOrDefaultAsync(o => o.CycleId == row.CycleId && o.ClientOrderId == row.ClientOrderId,
+                    CancellationToken.None);
+            return (false, existing);
+        }
+        catch
+        {
+            _db.Entry(row).State = EntityState.Detached;
+            return (false, null);
+        }
+    }
+
+    /// <summary>更新已落库订单；失败时回滚内存状态，数据库保留提交前的 unknown 占位行。</summary>
+    private async Task<bool> TryPersistOrderAsync(TraderOrder row)
+    {
+        try
+        {
+            await _db.SaveChangesAsync(CancellationToken.None);
+            return true;
+        }
+        catch
+        {
+            var entry = _db.Entry(row);
+            entry.CurrentValues.SetValues(entry.OriginalValues);
+            entry.State = EntityState.Unchanged;
+            return false;
+        }
+    }
+
+    private static bool IsUniqueViolation(DbUpdateException ex)
+    {
+        for (var inner = ex.InnerException; inner is not null; inner = inner.InnerException)
+            if (inner is SqliteException { SqliteErrorCode: 19 }) return true;
+        return false;
+    }
+
+    private static void LogGatewayError(PlaceOutcome outcome, string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return;
+        Console.WriteLine($"[place_order] {outcome} 原始错误：{Redact(raw)}");
+    }
+
+    /// <summary>内部日志脱敏：截断并移除 URL / 键值/令牌文本，绝不进入工具回执或订单错误字段。</summary>
+    private static string Redact(string raw)
+    {
+        var text = raw.Length <= MaxInternalErrorChars ? raw : raw[..MaxInternalErrorChars];
+        text = Regex.Replace(text, @"https?://\S+", "[url]", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, @"(?i)\b(api[-_ ]?key|secret|passphrase|token)\b\s*[:=]\s*\S+", "$1=[redacted]");
+        text = Regex.Replace(text, @"\b[A-Za-z0-9+/_=-]{24,}\b", "[redacted]");
+        return text;
+    }
+
+    private static ToolEnvelope ExistingOrder(TraderOrder order, string? warning = null) =>
         ToolEnvelope.Success(OrderData(order), DateTimeOffset.UtcNow, "live",
-            ["该提案已成功提交，返回已有订单"]);
+            [warning ?? "该提案已成功提交，返回已有订单"]);
 
     private static JsonElement OrderData(TraderOrder order) =>
         JsonSerializer.SerializeToElement(new
@@ -345,7 +508,7 @@ public sealed class ExecutionTools(
         }, ApiJson.Options);
 
     private static bool IsEffectiveOpen(TraderOrder order) =>
-        order.Action == "open" && (order.Success
+        order.Action is "open" or "buy" or "sell" && (order.Success
             || order.Status is "submitted" or "partial" or "filled");
 
     private static bool SameBaseAsset(string? left, string right) =>
@@ -360,6 +523,12 @@ public sealed class ExecutionTools(
             .ToLowerInvariant()[..8];
         return $"lc-{tail}-{hash}-{attempt}";
     }
+
+    private static SemaphoreSlim[] CreateAccountLocks() =>
+        Enumerable.Range(0, AccountLockStripes).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+
+    private static SemaphoreSlim AccountLock(int accountId) =>
+        AccountLocks[(int)((uint)accountId % AccountLockStripes)];
 
     private static string? Truncate(string? text, int max) =>
         text is null || text.Length <= max ? text : text[..max];

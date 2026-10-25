@@ -8,6 +8,7 @@ using LuckyCat.Services;
 using LuckyCat.Tools;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Xunit;
 
 namespace LuckyCat.Tests;
@@ -81,14 +82,14 @@ public class ExecutionToolsTests
     [Fact]
     public async Task Margin_uses_executor_leverage_and_current_equity()
     {
-        await using var env = await Env.CreateAsync(equity: 10_000m, approvedPct: 3m, approvedLeverage: 5m);
+        await using var env = await Env.CreateAsync(equity: 10_000m, approvedPct: 1m, approvedLeverage: 5m);
 
         var good = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
-            0.4m, 100m, 4m, 95m, 110m, "test", default); // 0.4*100/4 = 10 <= 3%*10000 = 300
+            0.4m, 100m, 4m, 95m, 110m, "test", default); // 0.4*100/4 = 10 <= 1%*10000 = 100
         Assert.True(good.Ok, good.Error?.Message);
 
         var bad = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
-            13m, 100m, 4m, 95m, 110m, "test", default); // 13*100/4 = 325 > 300
+            13m, 100m, 4m, 95m, 110m, "test", default); // 13*100/4 = 325 > 100
         Assert.False(bad.Ok);
         Assert.Equal(ToolErrors.QuantityExceeded, bad.Error!.Code);
         Assert.Single(await env.Db.TraderOrders.ToListAsync());
@@ -127,6 +128,50 @@ public class ExecutionToolsTests
     }
 
     [Fact]
+    public async Task Wider_position_verdict_is_rejected()
+    {
+        await using var env = await Env.CreateAsync(approvedPct: 3m); // 提案 1%，裁决 3% 属于放宽
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.RiskPolicyViolation, result.Error!.Code);
+        Assert.Contains("仓位上限超过提案", result.Error.Message);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Wider_leverage_verdict_is_rejected()
+    {
+        await using var env = await Env.CreateAsync(approvedLeverage: 6m); // 提案 5 倍，裁决 6 倍属于放宽
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.LeverageExceeded, result.Error!.Code);
+        Assert.Contains("杠杆上限超过提案", result.Error.Message);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Quantity_above_approved_plan_is_rejected()
+    {
+        await using var env = await Env.CreateAsync();
+
+        // 1% × 5 倍 = 名义 500，计划数量 5；5.001 已超过批准保证金/重跑计划。
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            5.001m, 100m, 5m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.QuantityExceeded, result.Error!.Code);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
     public async Task Limit_price_outside_approved_zone_is_rejected()
     {
         await using var env = await Env.CreateAsync(entryZoneMin: 98m, entryZoneMax: 102m);
@@ -137,6 +182,45 @@ public class ExecutionToolsTests
         Assert.False(result.Ok);
         Assert.Equal(ToolErrors.PriceOutOfBand, result.Error!.Code);
         Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("long", 95, 110, 95)]
+    [InlineData("long", 95, 110, 110)]
+    [InlineData("short", 105, 90, 105)]
+    [InlineData("short", 105, 90, 90)]
+    public async Task Execution_price_must_be_strictly_between_stop_and_take(string side,
+        decimal stopLoss, decimal takeProfit, decimal limitPrice)
+    {
+        await using var env = await Env.CreateAsync(entryZoneMin: 85m, entryZoneMax: 115m);
+        env.Proposal.Side = side;
+        env.Proposal.StopLossPrice = stopLoss;
+        env.Proposal.TakeProfitPrice = takeProfit;
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", side, "limit",
+            0.4m, limitPrice, 4m, stopLoss, takeProfit, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.InvalidArgument, result.Error!.Code);
+        Assert.Contains("止损与止盈之间", result.Error.Message);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Market_execution_price_must_be_between_stop_and_take()
+    {
+        await using var env = await Env.CreateAsync();
+        env.Gateway.Price = 95m; // 等于止损价
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "market",
+            0.4m, null, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.InvalidArgument, result.Error!.Code);
+        Assert.Contains("止损与止盈之间", result.Error.Message);
+        Assert.Equal(0, env.Gateway.PlaceCalls);
     }
 
     [Fact]
@@ -150,6 +234,78 @@ public class ExecutionToolsTests
         Assert.False(result.Ok);
         Assert.Equal(ToolErrors.StaleMarketData, result.Error!.Code);
         Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Future_market_timestamp_is_rejected()
+    {
+        await using var env = await Env.CreateAsync(marketAsOf: DateTime.UtcNow.AddMinutes(1));
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.StaleMarketData, result.Error!.Code);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Stale_market_and_unknown_spec_returns_stale_market_data()
+    {
+        await using var env = await Env.CreateAsync(marketAsOf: DateTime.UtcNow.AddMinutes(-4));
+        env.Gateway.Spec = null;
+
+        // §6 顺序：第 8 步行情新鲜度必须先于第 10 步交易所规格返回。
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.StaleMarketData, result.Error!.Code);
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Unknown_spec_with_fresh_market_is_rejected()
+    {
+        await using var env = await Env.CreateAsync();
+        env.Gateway.Spec = null;
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Theory]
+    [InlineData("max")]
+    [InlineData("min")]
+    [InlineData("notional")]
+    [InlineData("quantityStep")]
+    [InlineData("priceStep")]
+    public async Task Unknown_exchange_constraint_is_rejected(string field)
+    {
+        await using var env = await Env.CreateAsync();
+        env.Gateway.Spec = field switch
+        {
+            "max" => BuildSpec(maxTradeQuantity: null),
+            "min" => BuildSpec(minTradeQuantity: null),
+            "notional" => BuildSpec(minNotionalValue: null),
+            "quantityStep" => BuildSpec(quantityStep: null),
+            "priceStep" => BuildSpec(priceStep: null),
+            _ => throw new ArgumentOutOfRangeException(nameof(field))
+        };
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
     }
 
     [Fact]
@@ -185,6 +341,62 @@ public class ExecutionToolsTests
     }
 
     [Fact]
+    public async Task Legacy_buy_row_blocks_recent_duplicate()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Db.TraderOrders.Add(new TraderOrder
+        {
+            TraderId = TraderId,
+            At = DateTime.UtcNow.AddSeconds(-1),
+            Symbol = "BTC/USDT",
+            Action = "buy", // 过渡期旧行
+            Side = "long",
+            Quantity = 0.4m,
+            Price = 100m,
+            CycleId = Ids.NewUlid(),
+            ExchangeAccountId = AccountId,
+            Status = "filled",
+            Success = true
+        });
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.OrderLimitReached, result.Error!.Code);
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Simulated_rows_do_not_block_live_ten_second_check()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Db.TraderOrders.Add(new TraderOrder
+        {
+            TraderId = TraderId,
+            At = DateTime.UtcNow,
+            Symbol = "BTC/USDT",
+            Action = "open",
+            Side = "long",
+            Quantity = 0.4m,
+            Price = 100m,
+            CycleId = Ids.NewUlid(),
+            ExchangeAccountId = AccountId,
+            Status = "filled",
+            Simulated = true,
+            Success = true
+        });
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
     public async Task Dry_run_fills_simulation_and_audits_once()
     {
         await using var env = await Env.CreateAsync(mode: "dry");
@@ -208,14 +420,15 @@ public class ExecutionToolsTests
         Assert.Equal("long", order.Side);
         Assert.Equal("BTC/USDT", order.Symbol);
         Assert.Equal(0.4m, order.Quantity);
-        Assert.Equal(100m, order.Price);
+        Assert.Equal(100.05m, order.Price); // 最新价 100 × (1 + 0.05% 滑点)
         Assert.Equal(0.4m, order.FilledQuantity);
-        Assert.Equal(100m, order.AveragePrice);
+        Assert.Equal(100.05m, order.AveragePrice);
         Assert.Equal(4m, order.Leverage);
         Assert.Equal("filled", order.Status);
         Assert.True(order.Simulated);
         Assert.True(order.Success);
         Assert.Null(order.ExchangeOrderId);
+        Assert.Contains("手续费", order.Note);
         Assert.Equal(ClientOrderId(env.CycleId, env.ApprovedId), order.ClientOrderId);
 
         var invocation = Assert.Single(await env.Db.ToolInvocations.ToListAsync());
@@ -234,6 +447,26 @@ public class ExecutionToolsTests
         Assert.Equal(new[] { "executor" }, env.Budget.Roles);
         Assert.Equal(1, env.Accounts.AccountCalls);
         Assert.Equal(1, env.Accounts.PositionCalls);
+    }
+
+    [Fact]
+    public async Task Dry_fill_applies_configured_slippage_and_fee()
+    {
+        await using var env = await Env.CreateAsync(mode: "dry");
+        env.Config.RiskControl.EstimatedSlippagePct = 0.5m;
+        env.Config.RiskControl.EstimatedFeePct = 0.2m;
+        env.Market.LastPrice = 100m;
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal(100.5m, order.AveragePrice); // 最新价 × (1 + 0.5%)
+        Assert.Equal(0.4m, order.FilledQuantity);
+        Assert.Contains("滑点 0.5", order.Note);
+        Assert.Contains("手续费 0.0804", order.Note);
+        Assert.Equal(0, env.Gateway.PlaceCalls);
     }
 
     [Fact]
@@ -276,6 +509,23 @@ public class ExecutionToolsTests
     }
 
     [Fact]
+    public async Task Zero_filled_quantity_is_submitted_not_partial()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.FilledQuantity = 0m;
+        env.Gateway.AveragePrice = null;
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("submitted", order.Status);
+        Assert.NotEqual("partial", order.Status);
+        Assert.True(order.Success);
+    }
+
+    [Fact]
     public async Task Repeat_submission_returns_existing_order_without_reaching_exchange()
     {
         await using var env = await Env.CreateAsync(mode: "dry");
@@ -292,6 +542,23 @@ public class ExecutionToolsTests
         Assert.Single(await env.Db.TraderOrders.ToListAsync());
         Assert.Equal(0, env.Gateway.PlaceCalls);
         Assert.Equal(2, (await env.Db.ToolInvocations.ToListAsync()).Count);
+    }
+
+    [Fact]
+    public async Task Parallel_calls_are_serialized_by_the_account_lock()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+
+        var results = await Task.WhenAll(
+            env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+                0.4m, 100m, 4m, 95m, 110m, "test", default),
+            env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+                0.4m, 100m, 4m, 95m, 110m, "test", default));
+
+        Assert.All(results, result => Assert.True(result.Ok, result.Error?.Message));
+        Assert.Equal(1, env.Gateway.PlaceCalls);
+        Assert.Single(await env.Db.TraderOrders.AsNoTracking().ToListAsync());
+        Assert.Equal(2, (await env.Db.ToolInvocations.AsNoTracking().ToListAsync()).Count);
     }
 
     [Fact]
@@ -361,10 +628,43 @@ public class ExecutionToolsTests
     }
 
     [Fact]
+    public async Task Unknown_order_blocks_different_proposal_and_cycle()
+    {
+        await using var env = await Env.CreateAsync();
+        env.Db.TraderOrders.Add(new TraderOrder
+        {
+            TraderId = TraderId,
+            At = DateTime.UtcNow,
+            Symbol = "BTC/USDT",
+            Action = "open",
+            Side = "long",
+            Quantity = 0.4m,
+            Price = 100m,
+            CycleId = Ids.NewUlid(), // 另一个周期
+            ExchangeAccountId = AccountId,
+            ProposalId = env.UnapprovedId, // 另一个提案
+            VerdictId = env.VerdictId,
+            ClientOrderId = ClientOrderId(env.CycleId, env.UnapprovedId, 0),
+            Status = "unknown",
+            Success = false
+        });
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.Contains("结果未知的开仓", result.Error.Message);
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
     public async Task Exchange_rejection_is_persisted_as_failed_without_simulation()
     {
         await using var env = await Env.CreateAsync(mode: "live");
-        env.Gateway.PlaceOk = false;
+        env.Gateway.Outcome = PlaceOutcome.NotCreated;
+        env.Gateway.Error = "exchange rejected";
 
         var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
             0.4m, 100m, 4m, 95m, 110m, "test", default);
@@ -376,8 +676,167 @@ public class ExecutionToolsTests
         Assert.False(order.Simulated);
         Assert.False(order.Success);
         Assert.Null(order.ExchangeOrderId);
-        Assert.Equal("exchange rejected", order.Error);
+        Assert.Equal("交易所拒绝下单，订单未创建", order.Error);
     }
+
+    [Fact]
+    public async Task Unknown_outcome_is_persisted_as_unknown_and_blocks_retry()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.Outcome = PlaceOutcome.Unknown;
+        env.Gateway.Error = "下单超时";
+
+        var first = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(first.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, first.Error!.Code);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Equal("交易所结果未知，请人工核对", order.Error);
+
+        var retry = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+        Assert.False(retry.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, retry.Error!.Code);
+        Assert.Equal(1, env.Gateway.PlaceCalls); // 未知结果不得重试
+        Assert.Single(await env.Db.TraderOrders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Gateway_exception_is_persisted_as_unknown()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.PlaceException = new TimeoutException("request timed out");
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Equal(1, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_gateway_keeps_unknown_order_row()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.Outcome = PlaceOutcome.Unknown;
+        using var cts = new CancellationTokenSource();
+        env.Gateway.OnPlace = cts.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => env.Tools.PlaceOrderAsync(
+            env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", cts.Token));
+
+        var order = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Equal(1, env.Gateway.PlaceCalls);
+        Assert.Empty(await env.Db.ToolInvocations.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task Save_failure_after_gateway_keeps_unknown_order_row()
+    {
+        var interceptor = new FailSaveInterceptor();
+        await using var env = await Env.CreateAsync(mode: "live", interceptor: interceptor);
+        interceptor.FailAfter(1); // 放行 unknown 占位行，第二次（结果回写）失败
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        var order = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Equal(1, env.Gateway.PlaceCalls);
+    }
+
+    [Fact]
+    public async Task Gateway_error_text_is_not_forwarded()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.Outcome = PlaceOutcome.NotCreated;
+        env.Gateway.Error =
+            "POST https://api.binance.com/fapi/v1/order failed; apiKey=secret-api-key; SELECT * FROM accounts";
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeError, result.Error!.Code);
+        Assert.DoesNotContain("http", result.Error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", result.Error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SELECT", result.Error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(result.Error.Message.Length <= 200);
+
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("交易所拒绝下单，订单未创建", order.Error);
+        Assert.True(order.Error!.Length <= 500);
+    }
+
+    [Fact]
+    public async Task Unique_client_order_id_race_returns_existing_order_without_second_submit()
+    {
+        var interceptor = new RaceInterceptor();
+        await using var env = await Env.CreateAsync(mode: "live", interceptor: interceptor);
+        var competingId = 0;
+        interceptor.BeforeSave = async () =>
+        {
+            await using var other = new AppDbContext(env.Options);
+            var competing = new TraderOrder
+            {
+                TraderId = TraderId,
+                At = DateTime.UtcNow,
+                Symbol = "BTC/USDT",
+                Action = "open",
+                Side = "long",
+                Quantity = 0.4m,
+                Price = 100m,
+                CycleId = env.CycleId,
+                ExchangeAccountId = AccountId,
+                ProposalId = env.ApprovedId,
+                VerdictId = env.VerdictId,
+                ClientOrderId = ClientOrderId(env.CycleId, env.ApprovedId),
+                Status = "unknown",
+                Success = false
+            };
+            other.TraderOrders.Add(competing);
+            await other.SaveChangesAsync();
+            competingId = competing.Id;
+        };
+
+        var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
+            0.4m, 100m, 4m, 95m, 110m, "test", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(competingId, result.Data!.Value.GetProperty("orderId").GetInt32());
+        Assert.Equal("unknown", result.Data.Value.GetProperty("status").GetString());
+        Assert.Equal(0, env.Gateway.PlaceCalls);
+        Assert.Single(await env.Db.TraderOrders.AsNoTracking().ToListAsync());
+    }
+
+    private static SharedFuturesSymbol BuildSpec(
+        decimal? maxTradeQuantity = 1_000m,
+        decimal? minTradeQuantity = 0.001m,
+        decimal? minNotionalValue = 5m,
+        decimal? quantityStep = 0.001m,
+        decimal? priceStep = 0.01m) => new(TradingMode.PerpetualLinear, "BTC", "USDT", "BTCUSDT", true)
+    {
+        MaxLongLeverage = 20m,
+        MaxShortLeverage = 20m,
+        MaxTradeQuantity = maxTradeQuantity,
+        MinTradeQuantity = minTradeQuantity,
+        MinNotionalValue = minNotionalValue,
+        QuantityStep = quantityStep,
+        PriceStep = priceStep
+    };
 
     private static string ClientOrderId(string cycleId, string proposalId, int attempt = 0)
     {
@@ -394,17 +853,12 @@ public class ExecutionToolsTests
     private sealed class FakeGateway : IExecutionGateway
     {
         public TradingAudit AuditResult { get; set; } = new(true, true, true, true, true, false, []);
-        public SharedFuturesSymbol? Spec { get; set; } = new(TradingMode.PerpetualLinear, "BTC", "USDT", "BTCUSDT", true)
-        {
-            MaxLongLeverage = 20m,
-            MaxShortLeverage = 20m,
-            QuantityStep = 0.001m,
-            MinTradeQuantity = 0.001m,
-            MinNotionalValue = 5m,
-            PriceStep = 0.01m
-        };
+        public SharedFuturesSymbol? Spec { get; set; } = BuildSpec();
         public decimal? Price { get; set; } = 100m;
-        public bool PlaceOk { get; set; } = true;
+        public PlaceOutcome Outcome { get; set; } = PlaceOutcome.Created;
+        public string? Error { get; set; }
+        public Exception? PlaceException { get; set; }
+        public Action? OnPlace { get; set; }
         public string? ExchangeOrderId { get; set; } = "EX-123";
         public decimal? FilledQuantity { get; set; } = 0.4m;
         public decimal? AveragePrice { get; set; } = 100m;
@@ -423,15 +877,21 @@ public class ExecutionToolsTests
         public Task<SharedPositionMode?> GetPositionModeAsync(CancellationToken ct) =>
             Task.FromResult<SharedPositionMode?>(SharedPositionMode.HedgeMode);
 
-        public Task<(bool Ok, string? Error, string? ExchangeOrderId, decimal? FilledQuantity, decimal? AveragePrice)> PlaceAsync(
+        public Task<PlaceResult> PlaceAsync(
             SharedSymbol symbol, bool isLong, decimal quantity, decimal stopLossPrice, decimal? takeProfitPrice,
             decimal leverage, string orderType, decimal? price, string? clientOrderId, CancellationToken ct)
         {
             PlaceCalls++;
             LastPlace = new PlaceCall(symbol, isLong, quantity, stopLossPrice, takeProfitPrice, leverage,
                 orderType, price, clientOrderId);
-            return Task.FromResult((PlaceOk, PlaceOk ? null : "exchange rejected",
-                PlaceOk ? ExchangeOrderId : null, PlaceOk ? FilledQuantity : null, PlaceOk ? AveragePrice : null));
+            OnPlace?.Invoke();
+            if (PlaceException is not null) throw PlaceException;
+            return Task.FromResult(Outcome switch
+            {
+                PlaceOutcome.Created => PlaceResult.Created(ExchangeOrderId, FilledQuantity, AveragePrice),
+                PlaceOutcome.NotCreated => PlaceResult.NotCreated(Error),
+                _ => PlaceResult.Unknown(Error)
+            });
         }
 
         public Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> CloseAsync(
@@ -530,12 +990,52 @@ public class ExecutionToolsTests
         }
     }
 
+    private sealed class FailSaveInterceptor : SaveChangesInterceptor
+    {
+        private int _failAfter = -1;
+        private int _saves;
+
+        public void FailAfter(int saves)
+        {
+            _saves = 0;
+            _failAfter = saves;
+        }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (_failAfter >= 0 && ++_saves > _failAfter)
+            {
+                _failAfter = -1;
+                throw new InvalidOperationException("forced save failure");
+            }
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    private sealed class RaceInterceptor : SaveChangesInterceptor
+    {
+        public Func<Task>? BeforeSave { get; set; }
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            var hook = BeforeSave;
+            BeforeSave = null;
+            if (hook is not null) await hook();
+            return await base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
     private sealed class Env : IAsyncDisposable
     {
         public required AppDbContext Db { get; init; }
+        public required DbContextOptions<AppDbContext> Options { get; init; }
         public required FakeAccountReader Accounts { get; init; }
         public required FakeGateway Gateway { get; init; }
+        public required FakeMarketReader Market { get; init; }
         public required RecordingBudget Budget { get; init; }
+        public required StrategyConfig Config { get; init; }
         public required ExecutionTools Tools { get; init; }
         public required string CycleId { get; init; }
         public required string StageRunId { get; init; }
@@ -550,18 +1050,22 @@ public class ExecutionToolsTests
             string mode = "dry",
             decimal equity = 10_000m,
             decimal available = 9_000m,
-            decimal approvedPct = 3m,
+            decimal approvedPct = 1m,
             decimal approvedLeverage = 5m,
             IReadOnlyList<SymbolPosition>? positions = null,
             decimal entryZoneMin = 95m,
             decimal entryZoneMax = 105m,
             bool allowMarket = true,
             DateTime? marketAsOf = null,
-            string marketSource = "live")
+            string marketSource = "live",
+            SaveChangesInterceptor? interceptor = null)
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
-            var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connection).Options);
+            var builder = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connection);
+            if (interceptor is not null) builder.AddInterceptors(interceptor);
+            var options = builder.Options;
+            var db = new AppDbContext(options);
             await db.Database.EnsureCreatedAsync();
 
             var cycleId = Ids.NewUlid();
@@ -649,9 +1153,12 @@ public class ExecutionToolsTests
             return new Env
             {
                 Db = db,
+                Options = options,
                 Accounts = accounts,
                 Gateway = gateway,
+                Market = market,
                 Budget = budget,
+                Config = config,
                 Tools = tools,
                 CycleId = cycleId,
                 StageRunId = stageRunId,

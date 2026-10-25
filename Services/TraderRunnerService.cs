@@ -155,7 +155,8 @@ public class TraderRunnerService(IServiceScopeFactory scopeFactory, PositionHist
         var positionRead = await trading.GetPositionSnapshotAsync(account, ct);
         var livePositions = positionRead.Positions;
         var openOrders = await db.TraderOrders
-            .Where(o => o.TraderId == trader.Id && o.Success && (o.Action == "buy" || o.Action == "sell"))
+            .Where(o => o.TraderId == trader.Id && o.Success
+                && (o.Action == "buy" || o.Action == "sell" || o.Action == "open"))
             .OrderByDescending(o => o.Id)
             .Take(50)
             .Select(o => new { o.Symbol, o.StopLossPrice, o.TakeProfitPrice })
@@ -341,7 +342,8 @@ public class TraderRunnerService(IServiceScopeFactory scopeFactory, PositionHist
             return;
         }
         var pendingSince = DateTime.UtcNow.AddSeconds(-10);
-        var recentOpen = await db.TraderOrders.AnyAsync(o => o.Success && (o.Action == "buy" || o.Action == "sell") && o.At >= pendingSince &&
+        var recentOpen = await db.TraderOrders.AnyAsync(o => o.Success
+            && (o.Action == "buy" || o.Action == "sell" || o.Action == "open") && o.At >= pendingSince &&
             db.Traders.Any(t => t.Id == o.TraderId && t.ExchangeAccountId == account.Id), ct);
         if (recentOpen)
         {

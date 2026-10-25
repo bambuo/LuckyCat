@@ -776,10 +776,12 @@ public class ExchangeTradingService
     }
 
     /// <summary>
-    /// 下单（市价/限价，可带止损/止盈参数）：返回交易所订单号；
+    /// 下单（市价/限价，可带止损/止盈参数）：返回带类型的结果与交易所订单号；
     /// 成交量/均价由成交回报异步确认，不在此伪造。positionSide 由持仓模式决定：双向传、单向 null。
+    /// 只有「交易所明确拒绝」才归类为 <see cref="PlaceOutcome.NotCreated"/>；超时、网络/解析异常与未知错误
+    /// 一律归类为 <see cref="PlaceOutcome.Unknown"/>（订单可能已创建，调用方不得重试）。
     /// </summary>
-    public static async Task<(bool Ok, string? Error, string? OrderId)> PlaceOrderAsync(
+    public static async Task<PlaceResult> PlaceOrderAsync(
         ExchangeAccount account,
         SharedSymbol symbol,
         bool isLong,
@@ -793,35 +795,50 @@ public class ExchangeTradingService
         string? clientOrderId,
         CancellationToken ct)
     {
-        if (quantity <= 0) return (false, "下单数量必须大于 0", null);
-        if (orderType is not (SharedOrderType.Market or SharedOrderType.Limit)) return (false, $"不支持的订单类型：{orderType}", null);
-        if (orderType == SharedOrderType.Limit && price is not > 0) return (false, "限价单缺少有效价格", null);
+        if (quantity <= 0) return PlaceResult.NotCreated("下单数量必须大于 0");
+        if (orderType is not (SharedOrderType.Market or SharedOrderType.Limit))
+            return PlaceResult.NotCreated($"不支持的订单类型：{orderType}");
+        if (orderType == SharedOrderType.Limit && price is not > 0)
+            return PlaceResult.NotCreated("限价单缺少有效价格");
 
         try
         {
             var client = ExchangeClientFactory.Get(account);
             var capability = client.GetCapability<IPlaceFuturesOrder>(ExchangeClientFactory.Name(account.ExchangeType), TradingMode.PerpetualLinear);
-            if (capability is null) return (false, "该交易所不支持永续下单", null);
+            if (capability is null) return PlaceResult.NotCreated("该交易所不支持永续下单");
 
             var request = BuildFuturesOrderRequest(account, symbol, isLong, quantity, orderType, price,
                 stopLossPrice, takeProfitPrice, crossMargin, positionSide, clientOrderId);
 
             var result = await capability.Capability.PlaceFuturesOrderAsync(request, ct).ConfigureAwait(false);
-            return result.Success
-                ? (true, null, result.Data?.Id)
-                : (false, result.Error?.ToString() ?? "下单失败", null);
+            if (result.Success) return PlaceResult.Created(result.Data?.Id);
+            if (result.Error is null) return PlaceResult.Unknown("下单失败且交易所未返回错误信息");
+            return IsAmbiguousPlaceError(result.Error)
+                ? PlaceResult.Unknown(result.Error.ToString())
+                : PlaceResult.NotCreated(result.Error.ToString());
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return (false, "下单超时", null);
+            // 请求超时：订单可能已在交易所创建，绝不能当作「未创建」。
+            return PlaceResult.Unknown("下单超时");
         }
         catch (Exception ex)
         {
-            return (false, ex.Message, null);
+            return PlaceResult.Unknown(ex.Message);
         }
     }
 
-    /// <summary>市价开仓（旧调用方兼容）：内部走 <see cref="PlaceOrderAsync"/>，订单号由详细重载返回。</summary>
+    /// <summary>网络/解析/超时类错误无法确认订单是否已创建，必须按未知处理。</summary>
+    internal static bool IsAmbiguousPlaceError(CryptoExchange.Net.Objects.Error? error) =>
+        error?.ErrorType is CryptoExchange.Net.Objects.Errors.ErrorType.Timeout
+            or CryptoExchange.Net.Objects.Errors.ErrorType.UnableToConnect
+            or CryptoExchange.Net.Objects.Errors.ErrorType.NetworkError
+            or CryptoExchange.Net.Objects.Errors.ErrorType.DeserializationFailed
+            or CryptoExchange.Net.Objects.Errors.ErrorType.Unknown
+            or CryptoExchange.Net.Objects.Errors.ErrorType.SystemError
+            or CryptoExchange.Net.Objects.Errors.ErrorType.CancellationRequested;
+
+    /// <summary>市价开仓（旧调用方兼容）：内部走 <see cref="PlaceOrderAsync"/>；未知结果不回显原始错误。</summary>
     public static async Task<(bool Ok, string? Error)> PlaceMarketAsync(
         ExchangeAccount account,
         SharedSymbol symbol,
@@ -833,10 +850,15 @@ public class ExchangeTradingService
         SharedPositionSide? positionSide,
         CancellationToken ct)
     {
-        var (ok, error, _) = await PlaceOrderAsync(account, symbol, isLong, quantityBase,
+        var placed = await PlaceOrderAsync(account, symbol, isLong, quantityBase,
             SharedOrderType.Market, null, stopLossPrice, takeProfitPrice, crossMargin, positionSide, null, ct)
             .ConfigureAwait(false);
-        return (ok, error);
+        return placed.Outcome switch
+        {
+            PlaceOutcome.Created => (true, (string?)null),
+            PlaceOutcome.NotCreated => (false, placed.Error),
+            _ => (false, "下单结果未知，请人工核对")
+        };
     }
 
     // —— 持仓模式（双向 HedgeMode / 单向 OneWay；10 分钟缓存，失败短缓存）——
