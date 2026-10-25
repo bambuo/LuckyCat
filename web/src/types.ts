@@ -14,6 +14,10 @@ export interface Provider {
   contextTokens: number
   maxOutputTokens: number
   autoCompressContext: boolean
+  /** 工具调用验证结果（null=未验证）；启动交易员与 test-run 前置校验依赖本字段（Contracts/ProviderContracts.cs ProviderDto） */
+  toolCallingSupported: boolean | null
+  /** 最近一次工具调用验证时间（同上） */
+  toolCallingVerifiedAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -452,4 +456,543 @@ export interface TraderDashboard {
   decisions: DashboardDecision[]
   history: DashboardHistory
   recentOrders: TraderOrder[]
+}
+
+// —— 新链路（Task 14 B 组）：统一包裹 / 周期 / 阶段 / 提案 / 裁决 / 订单 / SSE ——
+// 权威来源：Contracts/CycleContracts.cs、Contracts/TraderContracts.cs、Workflows/CycleEvents.cs。
+// 金额、数量、百分比、杠杆一律字符串（LC-STD-03 §1.1）；时间一律 UTC 字符串；null=未知/未提供。
+
+/** 统一 API 包裹（Contracts/ApiResponse.cs）：成功只带 data、失败只带 error；data 内部 null 是业务语义。 */
+export interface ApiResponse<T> {
+  success: boolean
+  data?: T
+  error?: { code: string; message: string }
+}
+
+/** 周期状态（Endpoints/CyclesEndpoints.cs CycleDtoMapper.CycleStatuses，LC-STD-03 §4.2）。 */
+export type CycleStatus = 'running' | 'completed' | 'failed' | 'skipped' | 'aborted'
+
+/** 阶段角色（Agents/AgentRole.cs：analyst/trader/risk/executor/reviewer）。 */
+export type StageRole = 'analyst' | 'trader' | 'risk' | 'executor' | 'reviewer'
+
+/** 阶段落库状态（Models/AgentStageRun.cs；in_progress 只出现在复盘结果层，不是阶段行状态）。 */
+export type StageStatus = 'completed' | 'failed' | 'skipped'
+
+/** 周期触发来源（Workflows/CycleEvents.cs、Endpoints/TradersEndpoints.cs：schedule/manual/test）。 */
+export type TriggerType = 'schedule' | 'manual' | 'test'
+
+/** 执行模式（Models/Trader.cs ExecutionMode：dry/live）。 */
+export type ExecutionMode = 'dry' | 'live'
+
+/** 提案动作（Models/TradeProposal.cs Action、PromptLibrary 输出契约：open/close/hold）。 */
+export type ProposalAction = 'open' | 'close' | 'hold'
+
+/** 风控裁决（Services/CycleRecorder.cs RecordVerdict：approved/rejected）。 */
+export type RiskDecision = 'approved' | 'rejected'
+
+/** 订单生命周期状态（Models/TraderOrder.cs、LC-STD-03 §2.2：含 cancelled；cancelled 仅用于撤单成功）。 */
+export type OrderStatus = 'submitted' | 'filled' | 'partial' | 'failed' | 'unknown' | 'cancelled'
+
+/** Contracts/CycleContracts.cs CycleInfoDto：GET /api/cycles/{id} 的 cycle 块与周期列表项。 */
+export interface CycleDto {
+  id: string
+  traderId: number | null
+  strategyId: number
+  providerId: number | null
+  exchangeAccountId: number | null
+  mode: ExecutionMode
+  trigger: TriggerType
+  status: CycleStatus
+  startedAt: string
+  completedAt: string | null
+  errorCode: string | null
+  error: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  elapsedMs: number | null
+}
+
+/** Contracts/CycleContracts.cs CycleStageDto：GET /api/cycles/{id} 的 stages[] 单项。 */
+export interface StageDto {
+  id: string
+  role: StageRole
+  status: StageStatus
+  elapsedMs: number
+  inputTokens: number | null
+  outputTokens: number | null
+  toolCalls: number
+  summary: string | null
+  error: string | null
+}
+
+/** Contracts/CycleContracts.cs TradeProposalDto：周期详情 proposal 与 SSE proposal 事件共用。 */
+export interface ProposalDto {
+  id: string
+  action: ProposalAction
+  symbol: string | null
+  side: 'long' | 'short' | null
+  confidence: string | null
+  entryPrice: string | null
+  stopLossPrice: string | null
+  takeProfitPrice: string | null
+  positionPct: string | null
+  leverage: string | null
+  thesis: string
+  invalidation: string | null
+}
+
+/** Contracts/CycleContracts.cs CycleVerdictDto：周期详情 verdict（仅 open 路径返回，无 cycleId/proposalId）。 */
+export interface VerdictDto {
+  id: string
+  decision: RiskDecision
+  reasons: string[]
+  maxPositionPct: string | null
+  maxLeverage: string | null
+  entryZoneMin: string | null
+  entryZoneMax: string | null
+  allowMarket: boolean | null
+  validUntilUtc: string | null
+}
+
+/**
+ * Contracts/CycleContracts.cs CycleOrderDto：GET /api/cycles/{id} 的 orders[] 与 SSE order 事件。
+ * 与 RecentOrderDto（看板 recentOrders 的旧链路形状）不是同一种订单，不可互换。
+ */
+export interface CycleOrderDto {
+  orderId: number
+  cycleId: string | null
+  traderId: number | null
+  exchangeAccountId: number | null
+  proposalId: string | null
+  action: string
+  side: string | null
+  symbol: string | null
+  quantity: string | null
+  filledQuantity: string | null
+  price: string | null
+  averagePrice: string | null
+  status: OrderStatus | null
+  simulated: boolean
+  note: string | null
+  at: string
+}
+
+/**
+ * Contracts/TraderContracts.cs TraderOrderDto：GET /api/traders/{id}/dashboard 的 recentOrders[]（旧链路形状）。
+ * 只有 id/quantity/price/note/error；没有 orderId/filledQuantity/status/simulated 等新链路字段。
+ */
+export interface RecentOrderDto {
+  id: number
+  at: string
+  symbol: string | null
+  action: string
+  quantity: string | null
+  price: string | null
+  note: string | null
+  error: string | null
+}
+
+/** Contracts/CycleContracts.cs CycleDetailDto：GET /api/cycles/{id} 的 data，也是看板 latestCycle 的形状。 */
+export interface CycleDetailDto {
+  cycle: CycleDto
+  stages: StageDto[]
+  proposal: ProposalDto | null
+  verdict: VerdictDto | null
+  orders: CycleOrderDto[]
+}
+
+/** Contracts/CycleContracts.cs PagedResult<T>：page 从 1 起；空列表 items=[]、total=0，不得为 null。 */
+export interface PagedDto<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+/** Contracts/CycleContracts.cs StageToolCallDto：阶段全文里的工具调用摘要（不含入参/回执全文）。 */
+export interface StageToolCallDto {
+  toolName: string
+  success: boolean
+  errorCode: string | null
+  elapsedMs: number
+  truncated: boolean
+  at: string
+}
+
+/** Contracts/CycleContracts.cs StageDetailDto：GET /api/cycles/{id}/stages/{stageRunId} 的 data。 */
+export interface StageDetailDto {
+  id: string
+  cycleId: string | null
+  traderId: number | null
+  role: StageRole
+  attempt: number
+  status: StageStatus
+  providerName: string
+  model: string
+  instructions: string
+  transcriptJson: string
+  outputJson: string | null
+  reasoning: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  elapsedMs: number
+  toolCallCount: number
+  error: string | null
+  truncated: boolean
+  createdAt: string
+  toolCalls: StageToolCallDto[]
+}
+
+/** Contracts/CycleContracts.cs ManualCloseRequest：POST /api/traders/{id}/close-position 请求体（金额字符串）。 */
+export interface ManualCloseRequest {
+  symbol: string
+  quantity?: string | null
+  orderType: 'market' | 'limit'
+  price?: string | null
+  reason: string
+}
+
+/** Contracts/CycleContracts.cs ManualCloseResultDto：order=null 时带出周期 errorCode/error 解释「什么都没发生」。 */
+export interface ManualCloseResultDto {
+  cycleId: string
+  order: CycleOrderDto | null
+  errorCode: string | null
+  error: string | null
+}
+
+/** Contracts/CycleContracts.cs ReviewRunDto：POST /api/traders/{id}/reviews/run 的 data（触发成功≠复盘成功）。 */
+export type ReviewRunStatus = 'completed' | 'failed' | 'skipped'
+
+export interface ReviewRunDto {
+  status: ReviewRunStatus
+  errorCode: string | null
+  stageRunId: string | null
+  elapsedMs: number
+  periodStart: string | null
+  periodEnd: string | null
+}
+
+/** Contracts/CycleContracts.cs ReviewListItemDto：GET /api/traders/{id}/reviews 列表项。 */
+export interface ReviewListItemDto {
+  id: string
+  status: StageStatus
+  attempt: number
+  providerName: string
+  model: string
+  elapsedMs: number
+  inputTokens: number | null
+  outputTokens: number | null
+  toolCalls: number
+  error: string | null
+  createdAt: string
+}
+
+/** Contracts/CycleContracts.cs LessonDto：GET /api/traders/{id}/lessons 列表项（正文 JSON 数组已解析）。 */
+export interface LessonDto {
+  id: number
+  traderId: number
+  stageRunId: string
+  periodStart: string
+  periodEnd: string
+  summary: string
+  strengths: string[]
+  mistakes: string[]
+  rules: string[]
+  evidence: string[]
+  createdAt: string
+}
+
+// —— SSE 载荷（LC-STD-03 §4.2；event: 帧名 + 单行 data JSON）——
+
+/** Contracts/CycleContracts.cs TraderStateEvent：连接建立与 start/stop 触发。 */
+export interface StateEventPayload {
+  isRunning: boolean
+  lastCycleStatus: CycleStatus | null
+  lastCycleAt: string | null
+}
+
+/** Workflows/CycleEvents.cs CycleStartedEvent/CycleCompletedEvent：不是 CycleDto（无 strategyId/errorCode/token/elapsed）。 */
+export interface CycleEventPayload {
+  cycleId: string
+  traderId: number | null
+  mode: ExecutionMode
+  trigger: TriggerType
+  status: CycleStatus
+  startedAt: string
+  completedAt: string | null
+  error: string | null
+}
+
+/** Workflows/CycleEvents.cs StageRecordedEvent：扁平载荷（无嵌套 StageDto、无 id 字段，阶段 id 名为 stageId）。 */
+export interface StageEventPayload {
+  cycleId: string
+  stageId: string
+  role: StageRole
+  status: StageStatus
+  attempt: number
+  elapsedMs: number
+  inputTokens: number | null
+  outputTokens: number | null
+  toolCalls: number
+  summary: string | null
+  error: string | null
+}
+
+/** Workflows/CycleEvents.cs VerdictRecordedEvent：比 CycleVerdictDto 多 cycleId/proposalId。 */
+export interface VerdictEventPayload {
+  id: string
+  cycleId: string
+  proposalId: string
+  decision: RiskDecision
+  reasons: string[]
+  maxPositionPct: string | null
+  maxLeverage: string | null
+  entryZoneMin: string | null
+  entryZoneMax: string | null
+  allowMarket: boolean | null
+  validUntilUtc: string | null
+}
+
+/** Tools/ToolAuditor.cs：写工具调用或工具失败；error 仅在 success=false 时非空（固定中文摘要）。 */
+export interface ToolEventPayload {
+  cycleId: string
+  stageId: string
+  tool: string
+  success: boolean
+  errorCode: string | null
+  error: string | null
+  elapsedMs: number
+  at: string
+}
+
+/** Endpoints/TradersEndpoints.cs：账户权益采样（金额字符串），仅该交易员绑定账户。 */
+export interface EquityEventPayload {
+  equity: string
+  at: string
+}
+
+/** Contracts/CycleContracts.cs PositionHistoryEventDto：平仓历史同步（盈亏字符串）。 */
+export interface PositionHistoryEventPayload {
+  positionHistoryId: number
+  symbol: string
+  realizedPnl: string
+  closeTime: string
+}
+
+/** Endpoints/TradersEndpoints.cs 心跳帧：{ at }。 */
+export interface PingEventPayload {
+  at: string
+}
+
+/** LC-STD-03 §4.2 的完整 SSE 事件集：type 由 event: 帧名注入，其余字段与 data JSON 逐字对齐。 */
+export type CycleEvent =
+  | ({ type: 'state' } & StateEventPayload)
+  | ({ type: 'cycle' } & CycleEventPayload)
+  | ({ type: 'stage' } & StageEventPayload)
+  | ({ type: 'proposal' } & ProposalDto)
+  | ({ type: 'verdict' } & VerdictEventPayload)
+  | ({ type: 'tool' } & ToolEventPayload)
+  | ({ type: 'order' } & CycleOrderDto)
+  | ({ type: 'equity' } & EquityEventPayload)
+  | ({ type: 'position-history' } & PositionHistoryEventPayload)
+  | ({ type: 'ping' } & PingEventPayload)
+
+// —— 看板 DTO（Contracts/TraderContracts.cs TraderDashboardDto；金额已字符串化）——
+// 旧 Dashboard* 接口保留给当前页面，名称加 Dto 后缀以区分，不可互换。
+
+/** Contracts/TraderContracts.cs DashboardTraderInfo：看板 trader 块（lastCycleStatus 已按白名单收敛）。 */
+export interface DashboardTraderInfoDto {
+  id: number
+  name: string
+  providerName: string
+  model: string
+  exchangeLabel: string
+  accountName: string
+  strategyName: string
+  strategyType: string
+  isRunning: boolean
+  executionMode: ExecutionMode
+  isCrossMargin: boolean
+  scanIntervalMinutes: number
+  initialBalance: string | null
+  startedAt: string | null
+  lastCycleAt: string | null
+  lastCycleStatus: CycleStatus | null
+  capabilityCanTrade: boolean
+  capabilityNotes: string[]
+  positionMode: string | null
+}
+
+/** Contracts/TraderContracts.cs DashboardAccount：账户块（金额字符串）。 */
+export interface DashboardAccountDto {
+  success: boolean
+  error: string | null
+  equity: string | null
+  available: string | null
+  totalPnl: string | null
+  pnlPct: string | null
+  positionCount: number
+  marginUsedPct: string | null
+  at: string
+}
+
+/** Contracts/TraderContracts.cs DashboardSample：净值样本（金额字符串）。 */
+export interface DashboardSampleDto {
+  at: string
+  equity: string
+}
+
+/** Contracts/TraderContracts.cs DashboardPosition：持仓（数量与价格字符串）。 */
+export interface DashboardPositionDto {
+  symbol: string
+  side: string
+  quantity: string
+  averageOpenPrice: string
+  unrealizedPnl: string | null
+  liquidationPrice: string | null
+  leverage: string | null
+}
+
+/** Contracts/TraderContracts.cs DashboardDecision：旧 DecisionRecord 链路（P7 移除），数值字符串。 */
+export interface DashboardDecisionDto {
+  id: number
+  at: string
+  action: string | null
+  symbol: string | null
+  confidence: string | null
+  entryPrice: string | null
+  stopLossPct: string | null
+  takeProfitPct: string | null
+  positionPct: string | null
+  leverage: string | null
+  reason: string | null
+  reasoning: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  elapsedMs: number | null
+  traderId: number | null
+  systemPrompt: string | null
+  userPrompt: string | null
+  status: string
+  failureStage: string | null
+  error: string | null
+  rawOutput: string | null
+  promptRevision: string | null
+  requestSent: boolean | null
+}
+
+/** Contracts/TraderContracts.cs DashboardMetrics：统计指标（除 totalTrades 外均为字符串）。 */
+export interface DashboardMetricsDto {
+  totalTrades: number
+  winRate: string
+  totalPnl: string
+  totalFee: string
+  netPnl: string
+  profitFactor: string
+  avgWin: string
+  avgLoss: string
+  maxDrawdownPct: string
+  sharpe: string
+}
+
+/** Contracts/TraderContracts.cs DashboardDirectionStat。 */
+export interface DashboardDirectionStatDto {
+  side: string
+  count: number
+  winRate: string
+  totalPnl: string
+  avgPnl: string
+}
+
+/** Contracts/TraderContracts.cs DashboardSymbolStat。 */
+export interface DashboardSymbolStatDto {
+  symbol: string
+  count: number
+  winRate: string
+  totalPnl: string
+}
+
+/** Contracts/TraderContracts.cs DashboardHistoryRow：历史仓位行（金额与数量字符串）。 */
+export interface DashboardHistoryRowDto {
+  symbol: string
+  side: string | null
+  entryPrice: string | null
+  exitPrice: string | null
+  quantity: string | null
+  leverage: string | null
+  realizedPnl: string
+  fee: string | null
+  closeTime: string
+}
+
+/** Contracts/TraderContracts.cs DashboardHistory：历史仓位聚合。 */
+export interface DashboardHistoryDto {
+  success: boolean
+  error: string | null
+  metrics: DashboardMetricsDto
+  directions: DashboardDirectionStatDto[]
+  symbols: DashboardSymbolStatDto[]
+  rows: DashboardHistoryRowDto[]
+  note: string | null
+}
+
+/**
+ * Contracts/TraderContracts.cs TraderDashboardDto：GET /api/traders/{id}/dashboard 的 data。
+ * recentOrders 是旧链路 RecentOrderDto，latestCycle.orders 是新链路 CycleOrderDto；两者不可混用。
+ */
+export interface TraderDashboardDto {
+  trader: DashboardTraderInfoDto
+  account: DashboardAccountDto | null
+  samples: DashboardSampleDto[]
+  positions: DashboardPositionDto[]
+  decisions: DashboardDecisionDto[]
+  history: DashboardHistoryDto
+  recentOrders: RecentOrderDto[]
+  latestCycle: CycleDetailDto | null
+}
+
+// —— 系统 / 余额 / 提示词预览 ——
+
+/** Endpoints/SystemEndpoints.cs GET /api/health：只含公开运行状态字段。 */
+export interface HealthDto {
+  status: 'ok' | 'degraded'
+  version: string
+  database: boolean
+  uptimeSeconds: number
+  timestamp: string
+}
+
+/** Endpoints/ExchangesEndpoints.cs GET /api/exchanges/{id}/balance：金额字符串。 */
+export interface ExchangeBalanceDto {
+  usdt: string
+  available: string
+}
+
+/** Contracts/StrategyContracts.cs RolePromptPreviewDto：preview-prompts 单角色产物（不调用模型）。 */
+export interface RolePromptPreview {
+  role: StageRole
+  prompt: string
+  estimatedTokens: number
+}
+
+/** Contracts/StrategyContracts.cs PromptPreviewResultDto。 */
+export interface PromptPreviewResult {
+  roles: RolePromptPreview[]
+}
+
+/** Contracts/StrategyContracts.cs StrategyValidationDto：通过时 200；不通过走 400 validation_failed。 */
+export interface StrategyValidationResult {
+  valid: boolean
+  errors: string[]
+}
+
+/** Contracts/StrategyContracts.cs StrategyRunTestRequest：POST /api/strategies/test-run 请求体（SSE 演练）。 */
+export interface TestRunRequest {
+  strategyId: number
+  providerId: number
+  /** 契约预留：B 组只支持合成账户演练，必须为空/省略 */
+  accountId?: number | null
+  /** 金额字符串；省略时后端按 "10000" 处理 */
+  testEquity?: string | null
+  includeMemory?: boolean
 }
