@@ -25,6 +25,9 @@ public static class TradersEndpoints
     /// <summary>复盘重复触发窗口（秒，LC-STD-03 §1.4/§6：60 秒内重复触发 → 409 review_in_progress）。</summary>
     private const int ReviewTriggerCooldownSeconds = 60;
 
+    /// <summary>分页页码上限（§1.3）：保证 (page-1)×pageSize 不会把 OFFSET 算成负数/溢出。</summary>
+    private const int MaxPageNumber = 10_000;
+
     extension(IEndpointRouteBuilder app)
     {
         public RouteGroupBuilder MapTraders()
@@ -209,6 +212,13 @@ public static class TradersEndpoints
                 var validationError = ValidateManualClose(request);
                 if (validationError is not null) return ApiResults.Fail("validation_failed", validationError, 400);
 
+                // 前置条件在调用 runner 之前归一为 400：PrepareCycleAsync 对缺失账户抛 InvalidOperationException，
+                // 落成 500 既误导又会在日志里制造「未预期异常」。
+                if (await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct) is null)
+                {
+                    return ApiResults.Fail("validation_failed", "绑定的交易所账户不存在", 400);
+                }
+
                 string cycleId;
                 try
                 {
@@ -296,7 +306,7 @@ public static class TradersEndpoints
                     CycleDtoMapper.Num(trader.InitialBalance),
                     trader.StartedAt,
                     trader.LastCycleAt,
-                    trader.LastCycleStatus,
+                    CycleDtoMapper.LastCycleStatus(trader.LastCycleStatus),
                     audit.CanTrade,
                     audit.Notes,
                     positionMode);
@@ -421,21 +431,27 @@ public static class TradersEndpoints
                 http.Response.Headers.CacheControl = "no-cache";
                 http.Response.Headers["X-Accel-Buffering"] = "no";
 
-                // 先订阅再播种：订阅之后产生的事件进入通道不丢失。
-                var (traderEvents, traderSubscription) = hub.Subscribe(SseChannels.Trader(id));
+                // 订阅创建与账户装配都放进守卫区：任何一步抛错，已创建的订阅都要释放（无界通道不泄漏）。
+                // AcquireAsync 先增引用计数再可能抛出——只要它被调用过，finally 就 Release 兜底。
+                IDisposable? traderSubscription = null;
+                ChannelReader<SseEvent> traderEvents;
                 ChannelReader<SseEvent>? accountEvents = null;
                 IDisposable? accountSubscription = null;
-                if (account is not null)
-                {
-                    (accountEvents, accountSubscription) = hub.Subscribe(SseChannels.Account(account.Id));
-                    await stream.AcquireAsync(account, ct); // 账户实时只读订阅（引用计数），不写业务数据
-                }
+                int? acquiredAccountId = null;
 
                 try
                 {
+                    // 先订阅再播种：订阅之后产生的事件进入通道不丢失。
+                    (traderEvents, traderSubscription) = hub.Subscribe(SseChannels.Trader(id));
+                    if (account is not null)
+                    {
+                        (accountEvents, accountSubscription) = hub.Subscribe(SseChannels.Account(account.Id));
+                        acquiredAccountId = account.Id;
+                        await stream.AcquireAsync(account, ct); // 账户实时只读订阅（引用计数），不写业务数据
+                    }
                     // state 种子帧（§4.2 触发列「连接建立」；API-10：lastCycleStatus 约定枚举或 null）。
                     await WriteFrameAsync(http, "state",
-                        new TraderStateEvent(trader.IsRunning, trader.LastCycleStatus,
+                        new TraderStateEvent(trader.IsRunning, CycleDtoMapper.LastCycleStatus(trader.LastCycleStatus),
                             CycleDtoMapper.Utc(trader.LastCycleAt)), ct);
 
                     var lastVersion = -1;
@@ -483,9 +499,9 @@ public static class TradersEndpoints
                 }
                 finally
                 {
-                    traderSubscription.Dispose();
+                    traderSubscription?.Dispose();
                     accountSubscription?.Dispose();
-                    if (account is not null) stream.Release(account.Id);
+                    if (acquiredAccountId is { } accountId) stream.Release(accountId);
                 }
 
                 return Results.Empty;
@@ -510,7 +526,7 @@ public static class TradersEndpoints
                 var rows = await query
                     .OrderByDescending(c => c.StartedAt)
                     .ThenByDescending(c => c.Id)
-                    .Skip((pageNumber - 1) * size)
+                    .Skip(Offset(pageNumber, size))
                     .Take(size)
                     .ToListAsync(ct);
                 return ApiResults.Ok(new PagedResult<CycleInfoDto>(
@@ -537,7 +553,7 @@ public static class TradersEndpoints
                 var rows = await query
                     .OrderByDescending(s => s.CreatedAt)
                     .ThenByDescending(s => s.Id)
-                    .Skip((pageNumber - 1) * size)
+                    .Skip(Offset(pageNumber, size))
                     .Take(size)
                     .ToListAsync(ct);
                 return ApiResults.Ok(new PagedResult<ReviewListItemDto>(
@@ -598,7 +614,7 @@ public static class TradersEndpoints
                 var rows = await query
                     .OrderByDescending(l => l.CreatedAt)
                     .ThenByDescending(l => l.Id)
-                    .Skip((pageNumber - 1) * size)
+                    .Skip(Offset(pageNumber, size))
                     .Take(size)
                     .ToListAsync(ct);
                 return ApiResults.Ok(new PagedResult<LessonDto>(
@@ -618,7 +634,7 @@ public static class TradersEndpoints
 
     // —— 内部辅助 ——
 
-    /// <summary>分页参数（§1.3）：page 从 1 起；pageSize 默认 20、最大 100；pageSize=0 与越界一律 400。</summary>
+    /// <summary>分页参数（§1.3）：page 从 1 起、上限 10000；pageSize 默认 20、最大 100；pageSize=0 与越界一律 400。</summary>
     private static bool TryPagination(string? page, string? pageSize, out int pageNumber, out int size,
         out string? error)
     {
@@ -627,9 +643,9 @@ public static class TradersEndpoints
         error = null;
         if (page is not null &&
             (!int.TryParse(page, NumberStyles.Integer, CultureInfo.InvariantCulture, out pageNumber)
-             || pageNumber < 1))
+             || pageNumber < 1 || pageNumber > MaxPageNumber))
         {
-            error = "page 必须是从 1 起的整数";
+            error = $"page 必须在 1 到 {MaxPageNumber} 之间";
             return false;
         }
 
@@ -643,6 +659,10 @@ public static class TradersEndpoints
 
         return true;
     }
+
+    /// <summary>OFFSET 计算：先用 long 再落 int，配合页码上限杜绝负数/溢出（checked 兜底）。</summary>
+    private static int Offset(int pageNumber, int size) =>
+        checked((int)(((long)pageNumber - 1) * size));
 
     /// <summary>手动平仓请求的形状校验（金额解析在 runner 内先于建行，FormatError 映射 400，R-14-1）。</summary>
     private static string? ValidateManualClose(ManualCloseRequest request)
@@ -658,7 +678,7 @@ public static class TradersEndpoints
     }
 
     private static SseEvent StateEvent(Trader trader) =>
-        new("state", new TraderStateEvent(trader.IsRunning, trader.LastCycleStatus,
+        new("state", new TraderStateEvent(trader.IsRunning, CycleDtoMapper.LastCycleStatus(trader.LastCycleStatus),
             CycleDtoMapper.Utc(trader.LastCycleAt)));
 
     private static Task WriteFrameAsync(HttpContext http, string name, object payload, CancellationToken ct)
@@ -673,7 +693,8 @@ public static class TradersEndpoints
 
     // 总线事件 → SSE 帧（§4.2 事件集；未知事件忽略，便于后续扩展新事件类型）。
     // 试运行事件不发往交易员频道（R-11-7：按周期独立 test-run 频道），这里天然收不到、也不外泄。
-    private static (string Name, string Json)? ToEventFrame(SseEvent evt) => evt switch
+    // test-run 的快照回写（StrategiesEndpoints）复用本方法，避免两条 SSE 通道出现两套字段口径。
+    internal static (string Name, string Json)? ToEventFrame(SseEvent evt) => evt switch
     {
         { Name: "state", Payload: TraderStateEvent s } =>
             ("state", JsonSerializer.Serialize(s, FrameJson)),

@@ -8,7 +8,8 @@ namespace LuckyCat.Endpoints;
 /// </summary>
 internal static class ApiResults
 {
-    public static IResult Ok<T>(T data) => Results.Ok(ApiResponse<T>.Ok(data));
+    public static IResult Ok<T>(T data) =>
+        Results.Json(ApiResponse<T>.Ok(data), ApiJson.Options, statusCode: StatusCodes.Status200OK);
 
     public static IResult Created<T>(T data) =>
         Results.Json(ApiResponse<T>.Ok(data), ApiJson.Options, statusCode: StatusCodes.Status201Created);

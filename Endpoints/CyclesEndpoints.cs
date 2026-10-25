@@ -232,4 +232,8 @@ internal static class CycleDtoMapper
 
     /// <summary>周期状态白名单（§2.1/§4.2；API-10 的判定口径）。</summary>
     public static readonly string[] CycleStatuses = ["running", "completed", "failed", "skipped", "aborted"];
+
+    /// <summary>API-10：lastCycleStatus 只取约定枚举或 null；库内脏值一律收敛为 null（不透传给看板/SSE）。</summary>
+    public static string? LastCycleStatus(string? status) =>
+        status is not null && CycleStatuses.Contains(status) ? status : null;
 }

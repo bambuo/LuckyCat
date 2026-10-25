@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using CryptoExchange.Net.SharedApis;
@@ -137,6 +138,7 @@ public class CycleHttpTests
         var order = body.GetProperty("data").GetProperty("order");
         Assert.Equal("filled", order.GetProperty("status").GetString());
         Assert.True(order.GetProperty("simulated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("data").GetProperty("errorCode").ValueKind);
         // 金额/数量一律字符串（§1.1）。
         Assert.Equal(JsonValueKind.String, order.GetProperty("quantity").ValueKind);
         Assert.Equal(0, host.Gateway.CloseCallCount); // 演练平仓不触网关（API-06 同口径）
@@ -198,6 +200,19 @@ public class CycleHttpTests
         var cycle = await db.TradingCycles.AsNoTracking().SingleAsync();
         Assert.Equal("completed", cycle.Status);
         Assert.Equal("execution_errors", cycle.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Close_position_with_missing_bound_account_returns_400_validation_failed()
+    {
+        // 前置条件（绑定账户行已不存在）是请求可修复的问题，不是 500；且不得留下任何周期行。
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host, danglingAccount: true);
+
+        var response = await host.Client.PostAsJsonAsync("/api/traders/2/close-position",
+            new { symbol = "BTC/USDT", orderType = "market", reason = "手动减仓" }, ApiJson.Options);
+        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "validation_failed", "交易所账户");
+        Assert.Equal(0, await host.CountCyclesAsync());
     }
 
     [Fact]
@@ -322,7 +337,8 @@ public class CycleHttpTests
         Assert.DoesNotContain("strategyConfigJson", raw);
         Assert.DoesNotContain("memoryFingerprint", raw);
 
-        foreach (var bad in new[] { "pageSize=0", "pageSize=101", "page=abc", "page=0" })
+        foreach (var bad in new[] { "pageSize=0", "pageSize=101", "page=abc", "page=0", "page=10001",
+                     "page=2147483647&pageSize=100" })
         {
             await AssertErrorAsync(await host.Client.GetAsync($"/api/traders/1/cycles?{bad}"),
                 HttpStatusCode.BadRequest, "validation_failed");
@@ -390,6 +406,29 @@ public class CycleHttpTests
     }
 
     [Fact]
+    public async Task Unknown_last_cycle_status_is_reported_as_null_in_dashboard_and_state_seed()
+    {
+        // API-10：lastCycleStatus 只取约定枚举或 null；库内脏值不得透传到看板/SSE。
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host, danglingAccount: true);
+        await SetLastCycleStatusAsync(host, 2, "bogus_status");
+
+        var body = await ReadJsonAsync(await host.Client.GetAsync("/api/traders/2/dashboard"));
+        Assert.Equal(JsonValueKind.Null,
+            body.GetProperty("data").GetProperty("trader").GetProperty("lastCycleStatus").ValueKind);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var response = await host.Client.GetAsync("/api/traders/2/stream",
+            HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        var frames = await ReadSseFramesAsync(stream, cts.Token, names => names.Contains("state"), minimum: 1);
+        Assert.Equal(JsonValueKind.Null,
+            frames.First(f => f.Name == "state").Data.GetProperty("lastCycleStatus").ValueKind);
+        cts.Cancel();
+        response.Dispose();
+    }
+
+    [Fact]
     public async Task Dashboard_and_stream_do_not_require_the_legacy_runner_and_traders_list_is_wrapped()
     {
         await using var host = await TestApp.StartAsync();
@@ -438,6 +477,39 @@ public class CycleHttpTests
         Assert.Equal(0, await host.CountCyclesAsync());
         cts.Cancel();
         response.Dispose();
+    }
+
+    [Fact]
+    public void Event_frame_normalizes_order_payload_for_both_streams()
+    {
+        // test-run 与交易员 stream 共用 ToEventFrame：即使 order 载荷意外出现，也按 §4.2 契约出帧
+        // （数量/价格为字符串、无 success）。
+        var frame = TradersEndpoints.ToEventFrame(new SseEvent("order", new TraderOrder
+        {
+            Id = 9, TraderId = 1, At = DateTime.UtcNow, Action = "open", Symbol = "BTC/USDT",
+            Quantity = 0.01m, Price = 100m, Status = "filled", Success = true,
+        }));
+        Assert.NotNull(frame);
+        using var doc = JsonDocument.Parse(frame!.Value.Json);
+        Assert.Equal("order", frame.Value.Name);
+        Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty("quantity").ValueKind);
+        Assert.Equal(JsonValueKind.String, doc.RootElement.GetProperty("price").ValueKind);
+        Assert.False(doc.RootElement.TryGetProperty("success", out _));
+    }
+
+    [Fact]
+    public async Task Stream_disposes_subscriptions_when_account_acquisition_throws()
+    {
+        // 账户装配抛错（未知交易所类型 → ExchangeClientFactory.Create 抛 ArgumentOutOfRangeException）：
+        // AcquireAsync 之前创建的两个订阅必须在异常路径上同样释放，否则无界通道永久泄漏。
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+        await SeedUnsupportedExchangeTraderAsync(host);
+
+        var response = await host.Client.GetAsync("/api/traders/3/stream");
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal(0, SubscriberCount(host.Hub, SseChannels.Trader(3)));
+        Assert.Equal(0, SubscriberCount(host.Hub, SseChannels.Account(3)));
     }
 
     /// <summary>增量读取 SSE 帧直到谓词满足（用于 stream 长连接测试）；首帧到达后执行一次 <paramref name="afterFirst"/>。</summary>
@@ -617,6 +689,8 @@ public class CycleHttpTests
 
         // 合成账户：includeMemory=false 时记忆完全不读库；写网关零调用；权益为默认 10000。
         Assert.Equal(0, host.AccountReader.DecisionMemoryCalls);
+        Assert.Equal(0, host.AccountReader.AccountCalls);   // API-06：账户接口零请求
+        Assert.Equal(0, host.AccountReader.PositionCalls);  // API-06：持仓接口零请求
         Assert.Equal(0, host.Gateway.PlaceCallCount);
         Assert.Equal(0, host.Gateway.CloseCallCount);
         Assert.Contains("权益 10000 USDT", host.Chat.PromptFor("trader"));
@@ -961,6 +1035,47 @@ public class CycleHttpTests
         await db.SaveChangesAsync();
     }
 
+    private static async Task SetLastCycleStatusAsync(TestApp host, int traderId, string status)
+    {
+        await using var scope = host.App.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var trader = await db.Traders.SingleAsync(t => t.Id == traderId);
+        trader.LastCycleStatus = status;
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>未知交易所类型：AcquireAsync 在拉 WS 时必然抛错，用来证明异常路径的订阅释放。</summary>
+    private static async Task SeedUnsupportedExchangeTraderAsync(TestApp host)
+    {
+        await using var scope = host.App.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.ExchangeAccounts.Add(new ExchangeAccount
+        {
+            Id = 3, ExchangeType = (ExchangeType)999, AccountName = "异常交易所账户",
+            ApiKey = "key-abcdefgh1234", ApiSecret = "secret-abcdefgh1234",
+        });
+        db.Traders.Add(new Trader
+        {
+            Id = 3, Name = "异常交易所交易员", ProviderId = 1, ExchangeAccountId = 3, StrategyId = 1,
+            ExecutionMode = "dry", ScanIntervalMinutes = 3,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// 总线订阅数（测试观察缝）：SseEventHub 没有公开计数，泄漏只能从内部字典观察；
+    /// 生产侧不为测试新增 API。
+    /// </summary>
+    private static int SubscriberCount(SseEventHub hub, string key)
+    {
+        var field = typeof(SseEventHub).GetField("_subscribers",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var subscribers =
+            (System.Collections.Concurrent.ConcurrentDictionary<string, List<System.Threading.Channels.Channel<SseEvent>>>)
+            field.GetValue(hub)!;
+        return subscribers.TryGetValue(key, out var list) ? list.Count : 0;
+    }
+
     /// <summary>open 周期全套：4 阶段之一含截断标记、提案/裁决/订单/工具审计行。</summary>
     private static async Task SeedOpenCycleAsync(TestApp host, int traderId = 1)
     {
@@ -1217,13 +1332,21 @@ public class CycleHttpTests
     private sealed class TestAccountReader : IAccountReader
     {
         public int DecisionMemoryCalls { get; private set; }
+        public int AccountCalls { get; private set; }
+        public int PositionCalls { get; private set; }
 
-        public Task<AccountSnapshot> GetAccountAsync(CancellationToken ct) =>
-            Task.FromResult(new AccountSnapshot(true, 10_000m, 9_000m, null));
+        public Task<AccountSnapshot> GetAccountAsync(CancellationToken ct)
+        {
+            AccountCalls++;
+            return Task.FromResult(new AccountSnapshot(true, 10_000m, 9_000m, null));
+        }
 
-        public Task<PositionReadResult> GetPositionsAsync(CancellationToken ct) =>
-            Task.FromResult(new PositionReadResult(true,
+        public Task<PositionReadResult> GetPositionsAsync(CancellationToken ct)
+        {
+            PositionCalls++;
+            return Task.FromResult(new PositionReadResult(true,
                 [new SymbolPosition("BTC/USDT", SharedPositionSide.Long, 0.1m, 100m, 1m, 80m, 5m)], null));
+        }
 
         public Task<IReadOnlyList<TraderOrder>> GetRecentOrdersAsync(int limit, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<TraderOrder>>([]);

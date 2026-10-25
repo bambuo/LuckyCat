@@ -215,8 +215,9 @@ public static class StrategiesEndpoints
                         await writeLock.WaitAsync(CancellationToken.None);
                         try
                         {
-                            await http.Response.WriteAsync($"event: {evt.Name}\ndata: " +
-                                $"{JsonSerializer.Serialize(evt.Payload, FrameJson)}\n\n", ct);
+                            // 与交易员 stream 共用同一帧归一器（金额字符串/枚举/order 契约），不裸序列化域对象。
+                            if (TradersEndpoints.ToEventFrame(evt) is not { } frame) return;
+                            await http.Response.WriteAsync($"event: {frame.Name}\ndata: {frame.Json}\n\n", ct);
                             await http.Response.Body.FlushAsync(ct);
                         }
                         finally
