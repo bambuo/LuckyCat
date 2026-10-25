@@ -326,8 +326,10 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
     /// <summary>
     /// 消息记录落库：整体 JSON 超过 128 KiB 时先丢弃末尾消息、只剩一条时按 UTF-8 字节预算裁文本，
     /// 保证落库内容始终是合法 JSON 且不超过上限，并置 <c>Truncated</c>。
+    /// 对复盘宿主（Task 13 的 <see cref="ReviewRunner"/>）同样开放：截断口径只有一处实现，
+    /// 避免阶段与复盘两套 128 KiB 规则漂移。
     /// </summary>
-    private static (string Json, bool Truncated) BuildTranscript(IReadOnlyList<ChatMessage> messages)
+    internal static (string Json, bool Truncated) BuildTranscript(IReadOnlyList<ChatMessage> messages)
     {
         var entries = messages
             .Select(message => new TranscriptEntry(message.Role.Value, message.Text,

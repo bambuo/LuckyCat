@@ -105,9 +105,20 @@ public sealed class ToolRegistry(
     }
 
     // 复盘员（Task 13 的注册位）：已平仓交易/周期/经验读。
-    private IList<AITool> ReviewerTools(ToolAuditor audit)
+    private IList<AITool> ReviewerTools(ToolAuditor audit) => BuildReviewerTools(cycle.Accounts, audit);
+
+    /// <summary>
+    /// 复盘员工具集的<b>唯一</b>装配位（LC-STD-01 §9 输入行 = <see cref="ToolCatalog.Reviewer"/> 三件读工具）。
+    /// <para>
+    /// 单独暴露静态入口的原因：复盘链路<b>没有交易周期</b>，因此不能走 <see cref="For"/>——
+    /// 那条路径把 <see cref="TradingCycleContext.CycleId"/>（非空）写进 ToolAuditor，
+    /// 而 LC-STD-03 §2.1 明文「复盘工具调用 <c>cycleId</c> 为 null」。本入口由复盘宿主自带
+    /// <c>cycleId=null</c> 的审计器调用，工具清单仍然只有一份，不在复盘侧另起第二张清单。
+    /// </para>
+    /// </summary>
+    public static IList<AITool> BuildReviewerTools(IAccountReader accounts, ToolAuditor audit)
     {
-        var account = new AccountTools(cycle.Accounts, audit, RoleNames.Reviewer);
+        var account = new AccountTools(accounts, audit, RoleNames.Reviewer);
         var names = ToolCatalog.Reviewer;
         return
         [
@@ -116,6 +127,9 @@ public sealed class ToolRegistry(
             Fn(account.GetLessonsAsync, names[2]),
         ];
     }
+
+    /// <summary>审计与预算计数的角色名（复盘宿主装配审计器时用同一字面量）。</summary>
+    internal const string ReviewerRoleName = RoleNames.Reviewer;
 
     // 名称逐字来自 ToolCatalog；描述沿用方法上的 [Description]（DescriptionAttribute）。
     private static AIFunction Fn(Delegate method, string name) =>
