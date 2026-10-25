@@ -100,14 +100,15 @@ public class PromptLibraryTests
     }
 
     [Fact]
-    public void Custom_prompt_is_included_for_all_roles()
+    public void Custom_prompt_included_only_for_trader()
     {
         var config = new StrategyConfig { CustomPrompt = "CUSTOM-MARKER" };
 
-        foreach (var role in Enum.GetValues<AgentRole>())
-        {
-            Assert.Contains("CUSTOM-MARKER", PromptLibrary.Build(role, config));
-        }
+        Assert.Contains("CUSTOM-MARKER", PromptLibrary.Build(AgentRole.Trader, config));
+        Assert.DoesNotContain("CUSTOM-MARKER", PromptLibrary.Build(AgentRole.Analyst, config));
+        Assert.DoesNotContain("CUSTOM-MARKER", PromptLibrary.Build(AgentRole.Risk, config));
+        Assert.DoesNotContain("CUSTOM-MARKER", PromptLibrary.Build(AgentRole.Executor, config));
+        Assert.DoesNotContain("CUSTOM-MARKER", PromptLibrary.Build(AgentRole.Reviewer, config));
     }
 
     [Fact]
