@@ -113,7 +113,7 @@ cd web && bun run build                   # 前端类型检查与构建
 
 以下文档描述基于 Microsoft Agent Framework 的多智能体目标架构，**尚未落地**；当前代码仍为单轮提示词实现。
 
-- [重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易流水线与复盘、工具安全、数据与前端改造、实施阶段
+- [重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易工作流与复盘、工具安全、数据与前端改造、实施阶段
 - [规范索引与版本（LC-STD-00）](docs/standards/00-规范索引与版本.md) —— 文档地图、版本规则、变更传播矩阵
 - [外部标准与依赖版本（LC-STD-06）](docs/standards/06-外部标准与依赖版本.md) —— 锁定的外部规范、NuGet 与前端依赖
 - [机器可读版本清单](docs/standards/版本清单.json) —— 文档、外部标准与依赖版本的事实源
