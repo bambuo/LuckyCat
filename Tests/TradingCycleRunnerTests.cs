@@ -126,22 +126,25 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     [Fact]
     public void Tool_budget_enforces_per_role_and_per_cycle_limits()
     {
-        var budget = new CycleBudget(new AgentBudgetConfig());
+        var config = new AgentBudgetConfig();
+        var budget = new CycleBudget(config);
 
-        for (var i = 0; i < 12; i++) Assert.True(budget.TryConsumeTool("analyst"));
+        for (var i = 0; i < config.AnalystToolLimit; i++) Assert.True(budget.TryConsumeTool("analyst"));
         Assert.False(budget.TryConsumeTool("analyst"));
         // 单角色超限不影响其他角色（阶段预算彼此独立，超出不抛异常）。
         Assert.True(budget.TryConsumeTool("risk"));
-        Assert.Equal(13, budget.TotalToolCalls);
+        Assert.Equal(config.AnalystToolLimit + 1, budget.TotalToolCalls);
 
-        // 12/8/4/6 的角色上限恰好等于周期上限 30：填满后任何角色都不再放行。
-        for (var i = 0; i < 8; i++) Assert.True(budget.TryConsumeTool("trader"));
-        for (var i = 1; i < 4; i++) Assert.True(budget.TryConsumeTool("risk"));
-        for (var i = 0; i < 6; i++) Assert.True(budget.TryConsumeTool("executor"));
-        Assert.Equal(30, budget.TotalToolCalls);
+        // 填满各角色额度：角色上限之和（40）小于周期总量（45），此时拒绝来自角色额度而非周期总量。
+        for (var i = 0; i < config.TraderToolLimit; i++) Assert.True(budget.TryConsumeTool("trader"));
+        for (var i = 1; i < config.RiskToolLimit; i++) Assert.True(budget.TryConsumeTool("risk"));
+        for (var i = 0; i < config.ExecutorToolLimit; i++) Assert.True(budget.TryConsumeTool("executor"));
+        var roleSum = config.AnalystToolLimit + config.TraderToolLimit + config.RiskToolLimit + config.ExecutorToolLimit;
+        Assert.Equal(roleSum, budget.TotalToolCalls);
+        Assert.True(roleSum < config.CycleToolLimit);
         Assert.False(budget.TryConsumeTool("executor"));
         Assert.False(budget.TryConsumeTool("analyst"));
-        Assert.Equal(8, budget.ToolCalls("trader"));
+        Assert.Equal(config.TraderToolLimit, budget.ToolCalls("trader"));
     }
 
     [Fact]
@@ -154,7 +157,8 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         var tools = new MarketTools(new MarketDataCache(env.MarketReader), env.Config,
             new HashSet<string>(StringComparer.Ordinal) { "BTC/USDT" }, auditor, "analyst");
 
-        for (var i = 0; i < 12; i++)
+        var limit = env.Config.AgentBudget.AnalystToolLimit;
+        for (var i = 0; i < limit; i++)
         {
             var ok = await tools.GetKlinesAsync("BTC/USDT", "5m", 30, false, default);
             Assert.True(ok.Ok);
@@ -164,9 +168,9 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.False(exhausted.Ok);
         Assert.Equal(ToolErrors.ToolBudgetExceeded, exhausted.Error!.Code);
         Assert.False(budget.TryConsumeTool("analyst"));
-        // 超限后不再执行工具本体：第 13 次只有被拒绝的审计行。
+        // 超限后不再执行工具本体：第 N+1 次只有被拒绝的审计行。
         var rows = await env.Db.ToolInvocations.Where(i => i.StageRunId == env.StageRunId).ToListAsync();
-        Assert.Equal(13, rows.Count);
+        Assert.Equal(limit + 1, rows.Count);
         Assert.Equal(1, rows.Count(r => !r.Success));
         Assert.Equal("tool_budget_exceeded", rows.Single(r => !r.Success).ErrorCode);
     }

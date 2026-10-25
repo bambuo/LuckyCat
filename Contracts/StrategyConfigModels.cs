@@ -150,11 +150,11 @@ public class AgentBudgetConfig
     public int RiskTimeoutSeconds { get; set; } = 45;
     public int ExecutorTimeoutSeconds { get; set; } = 45;
     public int CycleTimeoutSeconds { get; set; } = 300;
-    public int AnalystToolLimit { get; set; } = 12;
-    public int TraderToolLimit { get; set; } = 8;
+    public int AnalystToolLimit { get; set; } = 20;
+    public int TraderToolLimit { get; set; } = 10;
     public int RiskToolLimit { get; set; } = 4;
     public int ExecutorToolLimit { get; set; } = 6;
-    public int CycleToolLimit { get; set; } = 30;
+    public int CycleToolLimit { get; set; } = 45;
     public int InputTokenBudget { get; set; } = 150000;
 }
 
