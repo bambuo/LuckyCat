@@ -73,6 +73,7 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     internal const string MissingOutcomeCode = "missing_outcome";
     internal const string InternalErrorCode = "cycle_internal_error";
     internal const string ExecutionErrorsCode = "execution_errors";
+    internal const string TokenBudgetExhaustedCode = "token_budget_exceeded";
 
     private const int MinIntervalMinutes = 3;
     private const int MaxIntervalMinutes = 60;
@@ -459,7 +460,10 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         var registry = new ToolRegistry(ctx, cycle.Db, cycle.Sources.Gateway, hub, allowed);
         var factory = new TradingAgentFactory();
         var runner = new AgentRunner();
-        using var client = cycle.Services.GetRequiredService<ChatClientFactory>().Create(ctx.Provider);
+        // token 预算每调用闸（LC-STD-01 §6「预算在每次模型调用前累计检查，超限不再发起调用」）：
+        // 图内所有模型调用（含阶段工具循环的续跑）都经由该装饰器；装饰器负责释放上游 client。
+        var rawClient = cycle.Services.GetRequiredService<ChatClientFactory>().Create(ctx.Provider);
+        using var client = new TokenBudgetGatedChatClient(rawClient, cycle.Budget, ctx.Provider);
 
         var analyst = new AnalystExecutor(ctx, factory, runner, registry, client);
         var trader = new TraderExecutor(ctx, factory, runner, registry, client);
@@ -494,10 +498,16 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         switch (evt)
         {
             case ExecutorFailedEvent failed:
-                var summary = failed.ExecutorId == "risk"
-                    ? "风控阶段执行失败，本周期已按失败安全终止（不下单）"
-                    : $"{failed.ExecutorId} 阶段执行失败，本周期已按失败安全终止";
-                var code = failed.ExecutorId == "risk" ? RiskStageFailedCode : StageFailedCode;
+                // 预算闸拒绝（每次模型调用前的检查）归因到既有 token 码；其余沿用阶段/风控失败码。
+                var refused = IsTokenBudgetRefusal(failed.Data);
+                var code = refused
+                    ? TokenBudgetExhaustedCode
+                    : failed.ExecutorId == "risk" ? RiskStageFailedCode : StageFailedCode;
+                var summary = refused
+                    ? "输入 token 预算已达上限，不再发起模型调用，本周期已按失败安全终止"
+                    : failed.ExecutorId == "risk"
+                        ? "风控阶段执行失败，本周期已按失败安全终止（不下单）"
+                        : $"{failed.ExecutorId} 阶段执行失败，本周期已按失败安全终止";
                 state.StageFailure ??= new StageFailure(code, summary);
                 if (slots.TryGetValue(failed.ExecutorId, out var slot))
                 {
@@ -628,6 +638,87 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     }
 
     private sealed record StageFailure(string Code, string Summary);
+
+    /// <summary>
+    /// token 预算闸拒绝的内部信号：只在图内出现（<see cref="TokenBudgetGatedChatClient"/> 抛出，
+    /// 由 <see cref="ConsumeEventAsync"/> 归因为 <see cref="TokenBudgetExhaustedCode"/>），
+    /// 不逃逸出图、不携带任何上游原始异常文本。
+    /// </summary>
+    private sealed class TokenBudgetRejectedException : Exception
+    {
+        public TokenBudgetRejectedException() : base("token budget gate refused the model call") { }
+    }
+
+    /// <summary>
+    /// 每次模型调用前的 token 预算闸（LC-STD-01 §6「预算在每次模型调用前累计检查，超限不再发起调用」）。
+    /// 装配位：<see cref="RunGraphAsync"/> 包住本周期唯一的 <see cref="ChatClientFactory"/> 产物，
+    /// 阶段工具循环的每一轮续跑都经过这里。发起委托前双检，任一命中即拒绝且<b>不向上游转发</b>：
+    /// ① 周期累计输入已达上限——与阶段入口闸（<see cref="ICycleBudget.IsInputTokenBudgetExceeded"/>）
+    ///    同一口径，覆盖每阶段第一次调用；② 上一轮 PromptTokens 已达上限——工具循环里 prompt 只增，
+    ///    上一轮 prompt 是下一轮 prompt 的保守下界预测。
+    /// 用量累计的唯一装配位也在本装饰器（每次原始调用后 <c>AddTokens</c>）；
+    /// <see cref="CycleRecorder"/> 阶段收尾时不再向周期预算累计，避免与逐调用累计双重计数。
+    /// 拒绝走既有阶段失败路径（ExecutorFailedEvent → 阶段 failed → 周期 failed），不新增逃逸异常类型。
+    /// </summary>
+    private sealed class TokenBudgetGatedChatClient(IChatClient inner, CycleBudget budget, Provider provider)
+        : IChatClient
+    {
+        /// <summary>上一轮（含此前所有轮次，prompt 单调不减）的 PromptTokens 预测值。</summary>
+        private int _predictedPromptTokens;
+
+        public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            RefuseIfExhausted();
+            var response = await inner.GetResponseAsync(messages, options, cancellationToken);
+
+            var inputTokens = ToInt(response.Usage?.InputTokenCount);
+            budget.AddTokens(inputTokens, ToInt(response.Usage?.OutputTokenCount));
+            // 下一轮 prompt ≥ 上一轮 prompt（工具循环只追加消息）：取历史最大值做保守预测。
+            _predictedPromptTokens = Math.Max(_predictedPromptTokens, inputTokens);
+            return response;
+        }
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            // 本图只走非流式路径（ChatClientAgent 工具循环）；流式同样先过闸，超限不再发起调用。
+            RefuseIfExhausted();
+            return inner.GetStreamingResponseAsync(messages, options, cancellationToken);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null)
+        {
+            if (serviceKey is null && serviceType == typeof(IChatClient)) return this;
+            return inner.GetService(serviceType, serviceKey);
+        }
+
+        public void Dispose() => inner.Dispose();
+
+        private void RefuseIfExhausted()
+        {
+            var limit = budget.InputTokenBudget(provider);
+            if (_predictedPromptTokens >= limit || budget.IsInputTokenBudgetExceeded(provider))
+            {
+                throw new TokenBudgetRejectedException();
+            }
+        }
+
+        private static int ToInt(long? value) => value is null or < 0
+            ? 0
+            : value > int.MaxValue ? int.MaxValue : (int)value.Value;
+    }
+
+    /// <summary>沿 InnerException 链识别预算闸拒绝（中间件可能原样包裹，也可能逐层包装）。</summary>
+    private static bool IsTokenBudgetRefusal(Exception? exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TokenBudgetRejectedException) return true;
+            if (current.InnerException is null) return false;
+        }
+        return false;
+    }
 
     /// <summary>本周期一次图运行的可变观测状态（阶段失败归因、图错误标记）。</summary>
     private sealed class CycleRunState

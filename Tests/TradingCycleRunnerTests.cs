@@ -297,6 +297,30 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.Equal("failed", (await env.Db.AgentStageRuns.SingleAsync()).Status);
     }
 
+    [Fact]
+    public async Task Token_cap_crossed_midstage_stops_the_next_model_call()
+    {
+        // 修复轮 2-C（LC-STD-01 §6「预算在每次模型调用前累计检查，超限不再发起调用」）：
+        // 工具循环第一轮就打满预算（prompt 2,000 ≥ 上限 2,000），第二轮必须被调用前闸拦下——
+        // 断言的是 inner client 的实际调用次数（1 次），不是只看结果。周期按既有阶段失败路径
+        // 归因到 token_budget_exceeded，原始拒绝文本不外泄。
+        await using var env = await RunnerEnv.CreateAsync(analystBehavior: "overcap", inputTokenBudget: 2_000);
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal(1, env.Clients.CallsFor("analyst"));
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        Assert.Equal("failed", cycle.Status);
+        Assert.Equal("token_budget_exceeded", cycle.ErrorCode);
+        Assert.DoesNotContain("token budget gate refused", cycle.Error);
+        var stage = await env.Db.AgentStageRuns.SingleAsync();
+        Assert.Equal("analyst", stage.Role);
+        Assert.Equal("failed", stage.Status);
+        Assert.Contains("token_budget_exceeded", stage.Error);
+        Assert.Empty(env.Db.TradeProposals);
+        Assert.Empty(env.Db.TraderOrders);
+    }
+
     // —— FLOW-07 交易员契约失败重试 1 次（LC-STD-05:98）——
 
     [Fact]
@@ -620,9 +644,9 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     [Fact]
     public async Task Restart_replaces_the_loop_entry_so_the_new_loop_is_still_stoppable()
     {
-        // 修复轮 2-A3：Stop+Start（Restart）时濒死循环只允许移除自己的 CTS 条目（身份感知移除）。
-        // 若它误摘新加的条目：新循环失控、随后 Stop 变成空操作（CTS 泄漏 + 双循环）——
-        // 下面的「第二次 Stop 后不得留下 running」正是该回归的证明。
+        // 修复轮 2-A3：Stop+Start（Restart）时濒死循环只允许移除自己的 (traderId, cts) 条目。
+        // 无条件 TryRemove 会把刚由 Start 加入的新条目摘走：新循环失控（后续 Stop 成空操作、
+        // 其 CTS 无人释放，下一次 Start 再叠一条循环）。身份感知移除下新条目必须原地存活。
         await using var env = await RunnerEnv.CreateAsync(analystBehavior: "hang");
         env.Trader.IsRunning = true;
         await env.Db.SaveChangesAsync();
@@ -630,21 +654,27 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         try
         {
             env.Runner.Start(env.Trader.Id);
-            await WaitUntilAsync(() =>
-                env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+            await WaitUntilAsync(async () =>
+                await env.Db.TradingCycles.AsNoTracking().CountAsync() == 1 &&
+                await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+            var dyingCycleId = await env.Db.TradingCycles.AsNoTracking()
+                .Select(c => c.Id).SingleAsync();
 
             env.Runner.Stop(env.Trader.Id);
             env.Runner.Start(env.Trader.Id);
 
-            // 交易员被恰好跟踪一次：新循环在跑，且真的开了第二个周期。
-            Assert.True(env.Runner.IsRunning(env.Trader.Id));
+            // 等濒死循环走完收尾（守卫落库终态 → 释放周期闸 → 执行移除语句），再留 100ms 余量：
             await WaitUntilAsync(async () =>
-                await env.Db.TradingCycles.AsNoTracking().CountAsync() == 2 &&
-                await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+                "aborted" == (await env.Db.TradingCycles.AsNoTracking()
+                    .SingleAsync(c => c.Id == dyingCycleId)).Status);
+            await Task.Delay(100);
+
+            // 恰好跟踪一次：新循环的条目没有被濒死循环误摘（带 bug 时此处 IsRunning == false）。
+            Assert.True(env.Runner.IsRunning(env.Trader.Id));
 
             env.Runner.Stop(env.Trader.Id);
             Assert.False(env.Runner.IsRunning(env.Trader.Id));
-            // 第二次 Stop 必须真正取消在跑的新周期（带 bug 时字典条目已被误摘，Stop 空转）。
+            // Stop 真正生效：新循环若在跑周期必须被取消，任何路径都不留下 running。
             await WaitUntilAsync(async () =>
                 !await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
         }

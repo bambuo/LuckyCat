@@ -141,8 +141,9 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
         });
         _inputTokens = SaturateAdd(_inputTokens, stats.InputTokens);
         _outputTokens = SaturateAdd(_outputTokens, stats.OutputTokens);
-        // 周期预算同步累计 token（LC-STD-01 §6）；测试用 ICycleBudget 假实现不累计，忽略即可。
-        if (ctx.Budget is CycleBudget budget) budget.AddTokens(stats.InputTokens, stats.OutputTokens);
+        // 周期预算的 token 累计只发生在宿主装配的每次模型调用闸（TradingCycleRunner.
+        // TokenBudgetGatedChatClient，LC-STD-01 §6「每次模型调用前累计检查」）；
+        // 这里只累计阶段用量用于 AgentStageRun/TradingCycle 落库列，不再向 CycleBudget 重复计数。
 
         object? proposalPayload = null;
         VerdictRecordedEvent? verdictPayload = null;
