@@ -1,28 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import {
-  IconApps,
   IconCheck,
-  IconEdit,
-  IconFile,
   IconLoop,
   IconRobot,
   IconSafe,
   IconStorage,
   IconThunderbolt,
 } from '@arco-design/web-vue/es/icon'
-import { STRATEGY_TYPE_CARDS } from '../../strategy'
-import type { PromptSectionConfig, StrategyConfig, StrategyType } from '../../types'
+import type { StrategyConfig } from '../../types'
 import CoinSourceEditor from './CoinSourceEditor.vue'
-import GridConfigEditor from './GridConfigEditor.vue'
 import IndicatorEditor from './IndicatorEditor.vue'
-import PromptSectionsEditor from './PromptSectionsEditor.vue'
 import RiskControlEditor from './RiskControlEditor.vue'
 
-const props = defineProps<{
+defineProps<{
   config: StrategyConfig
   defaultConfig: StrategyConfig
-  promptSectionDefaults: PromptSectionConfig
   name: string
   description: string
   isActive: boolean
@@ -36,28 +28,6 @@ const emit = defineEmits<{
   (e: 'save'): void
   (e: 'activate'): void
 }>()
-
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
-}
-
-// 切换副作用（设计稿 §3.2）：切出网格 → 清除 gridConfig；切入网格且无配置 → 填默认网格配置
-function switchType(type: StrategyType) {
-  if (props.config.strategyType === type) return
-  props.config.strategyType = type
-  if (type === 'grid_trading') {
-    if (!props.config.gridConfig && props.defaultConfig.gridConfig) {
-      props.config.gridConfig = clone(props.defaultConfig.gridConfig)
-    }
-  } else {
-    props.config.gridConfig = null
-  }
-}
-
-// 默认展开：网格类型展开「网格配置」，智能交易展开「币种来源」（设计稿 §3.3），其余收起
-const defaultActiveKeys = computed(() =>
-  props.config.strategyType === 'grid_trading' ? ['grid'] : ['coin'],
-)
 </script>
 
 <template>
@@ -92,45 +62,32 @@ const defaultActiveKeys = computed(() =>
       </div>
     </div>
 
-    <!-- 策略类型选择卡：整卡可点，隐藏单选圆点（设计稿 §3.2） -->
+    <!-- 策略类型：LC-STD-03 §2.2 已下线网格类型，只保留 AI 智能交易（gridConfig 原值仍随配置回传） -->
     <div class="type-block">
       <div class="type-block-title">
         <IconThunderbolt class="block-icon" />
         <span>策略类型</span>
       </div>
-      <div class="type-cards">
-        <div
-          v-for="card in STRATEGY_TYPE_CARDS"
-          :key="card.key"
-          class="type-card"
-          :class="[card.key, { active: config.strategyType === card.key }]"
-          @click="switchType(card.key)"
-        >
-          <IconRobot v-if="card.key === 'ai_trading'" class="type-icon" />
-          <IconApps v-else class="type-icon" />
+      <div class="type-cards single">
+        <div class="type-card ai_trading active static">
+          <IconRobot class="type-icon" />
           <div class="type-body">
-            <div class="type-name">{{ card.label }}</div>
-            <div class="type-desc">{{ card.desc }}</div>
+            <div class="type-name">AI 智能交易</div>
+            <div class="type-desc">AI 分析市场并自主决策买卖；网格类型已下线</div>
           </div>
+          <a-tag size="small" color="green">当前</a-tag>
         </div>
       </div>
     </div>
 
-    <!-- 折叠分区（按策略类型过滤）；展开图标置右，避免与分区图标挤在一起 -->
+    <!-- 折叠分区；展开图标置右，避免与分区图标挤在一起 -->
     <a-collapse
-      :default-active-key="defaultActiveKeys"
+      :default-active-key="['coin']"
       :bordered="false"
       expand-icon-position="right"
       class="sections"
     >
-      <a-collapse-item v-if="config.strategyType === 'grid_trading'" key="grid" class="section-item">
-        <template #header>
-          <span class="section-title"><IconApps class="section-icon success" />网格配置</span>
-        </template>
-        <GridConfigEditor v-if="config.gridConfig" :config="config.gridConfig" />
-      </a-collapse-item>
-
-      <a-collapse-item v-if="config.strategyType === 'ai_trading'" key="coin" class="section-item">
+      <a-collapse-item key="coin" class="section-item">
         <template #header>
           <span class="section-title"><IconStorage class="section-icon primary" />币种来源</span>
         </template>
@@ -149,28 +106,6 @@ const defaultActiveKeys = computed(() =>
           <span class="section-title"><IconSafe class="section-icon danger" />风控参数</span>
         </template>
         <RiskControlEditor :config="config.riskControl" />
-      </a-collapse-item>
-
-      <a-collapse-item key="prompt" class="section-item">
-        <template #header>
-          <span class="section-title"><IconFile class="section-icon purple" />提示词编辑</span>
-        </template>
-        <PromptSectionsEditor :config="config.promptSections" :defaults="promptSectionDefaults" />
-      </a-collapse-item>
-
-      <a-collapse-item key="extra" class="section-item">
-        <template #header>
-          <span class="section-title"><IconEdit class="section-icon gold" />附加提示</span>
-        </template>
-        <div class="extra-body">
-          <div class="section-desc">追加到 System Prompt 末尾的自定义提示词</div>
-          <a-textarea
-            v-model="config.customPrompt"
-            class="mono"
-            placeholder="输入自定义提示词..."
-            :auto-size="{ minRows: 4 }"
-          />
-        </div>
       </a-collapse-item>
 
       <a-collapse-item key="context" class="section-item">
@@ -292,6 +227,10 @@ const defaultActiveKeys = computed(() =>
   gap: 12px;
 }
 
+.type-cards.single {
+  grid-template-columns: 1fr;
+}
+
 .type-card {
   display: flex;
   align-items: flex-start;
@@ -300,12 +239,10 @@ const defaultActiveKeys = computed(() =>
   border: 1px solid var(--color-border-2);
   border-radius: 8px;
   background: var(--color-bg-2);
-  cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s;
 }
 
-.type-card:hover {
-  background: var(--color-fill-1);
+.type-card.static {
+  cursor: default;
 }
 
 .type-card.ai_trading.active {
@@ -313,9 +250,9 @@ const defaultActiveKeys = computed(() =>
   background: rgba(var(--primary-6), 0.08);
 }
 
-.type-card.grid_trading.active {
-  border-color: rgb(var(--success-6));
-  background: rgba(var(--success-6), 0.08);
+.type-card .type-body {
+  flex: 1;
+  min-width: 0;
 }
 
 .type-icon {
@@ -325,10 +262,6 @@ const defaultActiveKeys = computed(() =>
 
 .type-card.ai_trading.active .type-icon {
   color: rgb(var(--primary-6));
-}
-
-.type-card.grid_trading.active .type-icon {
-  color: rgb(var(--success-6));
 }
 
 .type-name {
@@ -371,23 +304,10 @@ const defaultActiveKeys = computed(() =>
 .section-icon.primary { color: rgb(var(--primary-6)); }
 .section-icon.success { color: rgb(var(--success-6)); }
 .section-icon.danger { color: rgb(var(--danger-6)); }
-.section-icon.purple { color: #a855f7; }
-.section-icon.gold { color: #f0b90b; }
 
 .section-desc {
   font-size: 12px;
   color: var(--color-text-3);
-}
-
-.extra-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
 }
 
 .context-body {

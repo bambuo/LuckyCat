@@ -203,6 +203,37 @@ export interface PromptSectionConfig {
   workflow: string
 }
 
+/** Contracts/StrategyConfigModels.cs RoleInstructionConfig：五角色追加指令（拼接在对应提示词末尾，各 ≤2,000 字）。 */
+export interface RoleInstructions {
+  analyst: string
+  trader: string
+  risk: string
+  executor: string
+  reviewer: string
+}
+
+/** Contracts/StrategyConfigModels.cs AgentBudgetConfig：阶段超时、工具上限与单周期输入 token 预算。 */
+export interface AgentBudgetConfig {
+  analystTimeoutSeconds: number
+  traderTimeoutSeconds: number
+  riskTimeoutSeconds: number
+  executorTimeoutSeconds: number
+  cycleTimeoutSeconds: number
+  analystToolLimit: number
+  traderToolLimit: number
+  riskToolLimit: number
+  executorToolLimit: number
+  cycleToolLimit: number
+  inputTokenBudget: number
+}
+
+/** Contracts/StrategyConfigModels.cs ReviewConfig：每日复盘调度配置（localTime 为 HH:mm）。 */
+export interface ReviewConfig {
+  enabled: boolean
+  localTime: string
+  maxLookbackDays: number
+}
+
 export interface StrategyConfig {
   strategyType: StrategyType
   coinSource: CoinSourceConfig
@@ -215,6 +246,9 @@ export interface StrategyConfig {
   decisionMemoryEnabled: boolean
   newsEnabled: boolean
   variant: StrategyVariant
+  roleInstructions: RoleInstructions
+  agentBudget: AgentBudgetConfig
+  review: ReviewConfig
 }
 
 export interface Strategy {
