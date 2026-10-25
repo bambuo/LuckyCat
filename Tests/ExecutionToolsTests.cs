@@ -877,8 +877,8 @@ public class ExecutionToolsTests
         Assert.Equal(0.4m, order.Quantity);
         Assert.Equal("EX-CLOSE", order.ExchangeOrderId);
         Assert.Equal("submitted", order.Status); // 限价平仓已受理未成交，仍可撤单
-        Assert.Equal(0.4m, order.FilledQuantity);
-        Assert.Equal(100m, order.AveragePrice);
+        Assert.Null(order.FilledQuantity); // 提交数量不是成交
+        Assert.Null(order.AveragePrice);   // 参考价不是成交均价
         Assert.False(order.Simulated);
         Assert.True(order.Success);
         Assert.Equal(call.ClientOrderId, order.ClientOrderId);
@@ -887,7 +887,7 @@ public class ExecutionToolsTests
     }
 
     [Fact]
-    public async Task Close_live_market_persists_filled_order_and_exchange_order_id()
+    public async Task Close_live_market_persists_submitted_order_without_fabricated_fills()
     {
         await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
         env.Gateway.CloseExchangeOrderId = "EX-FULL";
@@ -898,10 +898,11 @@ public class ExecutionToolsTests
         Assert.True(result.Ok, result.Error?.Message);
         Assert.Equal(1, env.Gateway.CloseCalls);
         var order = await env.Db.TraderOrders.SingleAsync();
-        Assert.Equal("filled", order.Status);
+        Assert.Equal("submitted", order.Status); // 交易所受理但无成交回报
         Assert.Equal("EX-FULL", order.ExchangeOrderId);
-        Assert.Equal(1m, order.FilledQuantity);
-        Assert.Equal(99.5m, order.AveragePrice);
+        Assert.Equal(100m, order.Price); // 参考价（报价），不是成交价
+        Assert.Null(order.FilledQuantity);
+        Assert.Null(order.AveragePrice);
         Assert.True(order.Success);
     }
 
@@ -934,6 +935,39 @@ public class ExecutionToolsTests
     }
 
     [Fact]
+    public async Task Close_dry_limit_fills_at_slippage_price_not_at_limit()
+    {
+        await using var env = await Env.CreateAsync(mode: "dry", positions: [Position()]);
+        env.Gateway.Price = 100m;
+        env.Config.RiskControl.EstimatedSlippagePct = 0.5m;
+
+        var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "limit", 99.4m, "manual", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal(99.4m, order.Price);        // 委托价仍是限价
+        Assert.Equal(99.5m, order.AveragePrice); // 100 × (1 - 0.5%)，未越限价
+        Assert.Equal(1m, order.FilledQuantity);
+    }
+
+    [Fact]
+    public async Task Close_dry_short_limit_caps_simulated_fill_at_limit()
+    {
+        await using var env = await Env.CreateAsync(mode: "dry",
+            positions: [Position(side: SharedPositionSide.Short)]);
+        env.Gateway.Price = 100m;
+        env.Config.RiskControl.EstimatedSlippagePct = 0.5m;
+
+        var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "limit", 100.4m, "manual", default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal(100.4m, order.Price);
+        Assert.Equal(100.4m, order.AveragePrice); // 买入模拟价 100.5 被限价 100.4 截断
+        Assert.Equal("short", order.Side);
+    }
+
+    [Fact]
     public async Task Close_stale_market_data_is_rejected()
     {
         await using var env = await Env.CreateAsync(positions: [Position()],
@@ -945,6 +979,38 @@ public class ExecutionToolsTests
         Assert.Equal(ToolErrors.StaleMarketData, result.Error!.Code);
         Assert.Empty(await env.Db.TraderOrders.ToListAsync());
         Assert.Equal(0, env.Gateway.CloseCalls);
+    }
+
+    [Fact]
+    public async Task Close_with_cycle_ownership_mismatch_is_rejected()
+    {
+        await using var env = await Env.CreateAsync(mode: "dry", positions: [Position()]);
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        cycle.Mode = "live";
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "market", null, "manual", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.InvalidArgument, result.Error!.Code);
+        Assert.Empty(await env.Db.TraderOrders.ToListAsync());
+        Assert.Equal(0, env.Gateway.CloseCalls);
+    }
+
+    [Fact]
+    public async Task Accepted_limit_close_can_be_cancelled_by_exchange_order_id()
+    {
+        await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
+        env.Gateway.CloseExchangeOrderId = "EX-LIMIT";
+
+        var close = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "limit", 100m, "manual", default);
+        var cancel = await env.Tools.CancelOrderAsync("EX-LIMIT", default);
+
+        Assert.True(close.Ok, close.Error?.Message);
+        Assert.True(cancel.Ok, cancel.Error?.Message);
+        Assert.Equal(1, env.Gateway.CancelCalls);
+        var order = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("cancelled", order.Status);
     }
 
     [Fact]
@@ -970,7 +1036,7 @@ public class ExecutionToolsTests
         Assert.Equal(1m, order.Quantity);
         Assert.Equal(100m, order.Price);
         Assert.Equal(1m, order.FilledQuantity);
-        Assert.Equal(100m, order.AveragePrice);
+        Assert.Equal(99.95m, order.AveragePrice); // 最新价 100 减去 0.05% 滑点
         Assert.Equal(5m, order.Leverage);
         Assert.Equal("filled", order.Status);
         Assert.True(order.Simulated);
@@ -1071,7 +1137,7 @@ public class ExecutionToolsTests
     public async Task Close_exchange_rejection_is_persisted_as_failed()
     {
         await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
-        env.Gateway.CloseOk = false;
+        env.Gateway.CloseResultOutcome = CloseOutcome.Rejected;
         env.Gateway.CloseError = "rejected by exchange";
 
         var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "market", null, "manual", default);
@@ -1083,11 +1149,74 @@ public class ExecutionToolsTests
         Assert.Equal("failed", order.Status);
         Assert.False(order.Success);
         Assert.Null(order.ExchangeOrderId);
+        Assert.Null(order.FilledQuantity);
+        Assert.Null(order.AveragePrice);
         Assert.Equal("交易所拒绝平仓，订单未创建", order.Error);
     }
 
     [Fact]
-    public async Task Close_unknown_outcome_is_persisted_unknown_and_not_retryable()
+    public async Task Close_timeout_result_is_persisted_unknown_and_not_retryable()
+    {
+        // 真实网关把超时收敛为 CloseResult.Unknown("平仓超时")，而不是抛异常。
+        await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
+        env.Gateway.CloseResultOutcome = CloseOutcome.Unknown;
+        env.Gateway.CloseError = "平仓超时";
+
+        var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", 0.4m, "market", null, "manual", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.False(result.Error.Retryable);
+        Assert.Equal(1, env.Gateway.CloseCalls);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Null(order.ExchangeOrderId);
+        Assert.Null(order.FilledQuantity);
+        Assert.Null(order.AveragePrice);
+        Assert.Equal("平仓结果未知，请人工核对", order.Error);
+    }
+
+    [Fact]
+    public async Task Close_accepted_limit_without_exchange_order_id_is_unknown()
+    {
+        await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
+        env.Gateway.CloseExchangeOrderId = null;
+
+        var result = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "limit", 100m, "manual", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.False(result.Error.Retryable);
+        var order = await env.Db.TraderOrders.SingleAsync();
+        Assert.Equal("unknown", order.Status);
+        Assert.False(order.Success);
+        Assert.Null(order.ExchangeOrderId);
+        Assert.Null(order.FilledQuantity);
+        Assert.Null(order.AveragePrice);
+    }
+
+    [Fact]
+    public async Task Close_after_unknown_close_on_same_symbol_is_blocked()
+    {
+        await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
+        env.Gateway.CloseResultOutcome = CloseOutcome.Unknown;
+        env.Gateway.CloseError = "平仓超时";
+
+        var first = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "market", null, "manual", default);
+        env.Gateway.CloseResultOutcome = CloseOutcome.Accepted;
+        var second = await env.Tools.ClosePositionAsync(null, "BTC/USDT", null, "market", null, "manual", default);
+
+        Assert.False(first.Ok);
+        Assert.False(second.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, second.Error!.Code);
+        Assert.False(second.Error.Retryable);
+        Assert.Equal(1, env.Gateway.CloseCalls); // 未知结果禁止重试
+        Assert.Single(await env.Db.TraderOrders.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Close_unknown_outcome_from_exception_is_persisted_unknown_and_not_retryable()
     {
         await using var env = await Env.CreateAsync(mode: "live", positions: [Position()]);
         env.Gateway.CloseException = new TimeoutException("close timeout");
@@ -1168,10 +1297,10 @@ public class ExecutionToolsTests
     }
 
     [Fact]
-    public async Task Cancel_dry_run_marks_cancelled_without_exchange_call()
+    public async Task Cancel_dry_run_marks_simulated_order_cancelled_without_exchange_call()
     {
         await using var env = await Env.CreateAsync(mode: "dry");
-        var order = Order(env, status: "partial", exchangeOrderId: null);
+        var order = Order(env, status: "partial", exchangeOrderId: null, simulated: true);
         env.Db.TraderOrders.Add(order);
         await env.Db.SaveChangesAsync();
 
@@ -1188,6 +1317,40 @@ public class ExecutionToolsTests
         Assert.Equal("cancel_order", invocation.ToolName);
         Assert.True(invocation.Success);
         Assert.Equal(new[] { "executor" }, env.Budget.Roles);
+    }
+
+    [Fact]
+    public async Task Cancel_dry_run_cannot_cancel_live_order()
+    {
+        await using var env = await Env.CreateAsync(mode: "dry");
+        var order = Order(env, status: "submitted", simulated: false, cycleId: null);
+        env.Db.TraderOrders.Add(order);
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.CancelOrderAsync(order.ClientOrderId!, default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.OrderNotCancellable, result.Error!.Code);
+        Assert.Equal(0, env.Gateway.CancelCalls);
+        var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("submitted", saved.Status); // 不得改写实盘订单
+    }
+
+    [Fact]
+    public async Task Cancel_live_cannot_cancel_simulated_order()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        var order = Order(env, status: "submitted", simulated: true, cycleId: null);
+        env.Db.TraderOrders.Add(order);
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.CancelOrderAsync(order.ClientOrderId!, default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.OrderNotCancellable, result.Error!.Code);
+        Assert.Equal(0, env.Gateway.CancelCalls);
+        var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("submitted", saved.Status); // 不得改写演练订单
     }
 
     [Fact]
@@ -1228,6 +1391,39 @@ public class ExecutionToolsTests
 
         Assert.False(result.Ok);
         Assert.Equal(ToolErrors.OrderNotCancellable, result.Error!.Code);
+        Assert.Contains("缺少交易所订单号", result.Error.Message);
+        Assert.Equal(0, env.Gateway.CancelCalls);
+    }
+
+    [Fact]
+    public async Task Cancel_live_without_symbol_is_rejected_with_clear_message()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        var order = Order(env, status: "submitted", symbol: null);
+        env.Db.TraderOrders.Add(order);
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.CancelOrderAsync(order.ExchangeOrderId!, default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.OrderNotCancellable, result.Error!.Code);
+        Assert.Contains("缺少标的", result.Error.Message);
+        Assert.DoesNotContain("缺少交易所订单号", result.Error.Message);
+        Assert.Equal(0, env.Gateway.CancelCalls);
+    }
+
+    [Fact]
+    public async Task Cancel_with_cycle_ownership_mismatch_is_rejected()
+    {
+        await using var env = await Env.CreateAsync(mode: "live");
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        cycle.ExchangeAccountId = AccountId + 1;
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.CancelOrderAsync("missing", default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.InvalidArgument, result.Error!.Code);
         Assert.Equal(0, env.Gateway.CancelCalls);
     }
 
@@ -1235,7 +1431,7 @@ public class ExecutionToolsTests
     public async Task Cancel_live_rejection_keeps_order_submitted()
     {
         await using var env = await Env.CreateAsync(mode: "live");
-        env.Gateway.CancelOk = false;
+        env.Gateway.CancelResultOutcome = CancelOutcome.Rejected;
         env.Gateway.CancelError = "rejected";
         var order = Order(env, status: "submitted");
         env.Db.TraderOrders.Add(order);
@@ -1248,6 +1444,27 @@ public class ExecutionToolsTests
         Assert.Equal(1, env.Gateway.CancelCalls);
         var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
         Assert.Equal("submitted", saved.Status);
+    }
+
+    [Fact]
+    public async Task Cancel_timeout_result_is_unknown_and_keeps_order_submitted()
+    {
+        // 真实网关把超时收敛为 CancelResult.Unknown("撤单超时")，而不是抛异常。
+        await using var env = await Env.CreateAsync(mode: "live");
+        env.Gateway.CancelResultOutcome = CancelOutcome.Unknown;
+        env.Gateway.CancelError = "撤单超时";
+        var order = Order(env, status: "submitted");
+        env.Db.TraderOrders.Add(order);
+        await env.Db.SaveChangesAsync();
+
+        var result = await env.Tools.CancelOrderAsync(order.ExchangeOrderId!, default);
+
+        Assert.False(result.Ok);
+        Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
+        Assert.False(result.Error.Retryable);
+        Assert.Equal(1, env.Gateway.CancelCalls);
+        var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
+        Assert.Equal("submitted", saved.Status); // 未知绝不标记 cancelled
     }
 
     [Fact]
@@ -1285,20 +1502,22 @@ public class ExecutionToolsTests
     };
 
     private static TraderOrder Order(Env env, string status = "submitted", string? exchangeOrderId = "EX-CANCEL",
-        int? traderId = null, int? accountId = null) => new()
+        int? traderId = null, int? accountId = null, bool simulated = false, string? symbol = "BTC/USDT",
+        string? cycleId = null) => new()
     {
         TraderId = traderId ?? TraderId,
         At = DateTime.UtcNow,
-        Symbol = "BTC/USDT",
+        Symbol = symbol,
         Action = "open",
         Side = "long",
         Quantity = 0.4m,
         Price = 100m,
-        CycleId = env.CycleId,
+        CycleId = cycleId ?? env.CycleId,
         ExchangeAccountId = accountId ?? AccountId,
         ClientOrderId = "lc-cancel-1",
         ExchangeOrderId = exchangeOrderId,
         Status = status,
+        Simulated = simulated,
         Success = status is "submitted" or "partial" or "filled"
     };
 
@@ -1349,7 +1568,7 @@ public class ExecutionToolsTests
         public decimal? AveragePrice { get; set; } = 100m;
         public int PlaceCalls { get; private set; }
         public PlaceCall? LastPlace { get; private set; }
-        public bool CloseOk { get; set; } = true;
+        public CloseOutcome CloseResultOutcome { get; set; } = CloseOutcome.Accepted;
         public string? CloseError { get; set; }
         public Exception? CloseException { get; set; }
         public decimal? CloseQuantity { get; set; }
@@ -1357,7 +1576,7 @@ public class ExecutionToolsTests
         public string? CloseExchangeOrderId { get; set; } = "EX-CLOSE";
         public int CloseCalls { get; private set; }
         public CloseCall? LastClose { get; private set; }
-        public bool CancelOk { get; set; } = true;
+        public CancelOutcome CancelResultOutcome { get; set; } = CancelOutcome.Accepted;
         public string? CancelError { get; set; }
         public Exception? CancelException { get; set; }
         public int CancelCalls { get; private set; }
@@ -1392,27 +1611,34 @@ public class ExecutionToolsTests
             });
         }
 
-        public Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> CloseAsync(
+        public Task<CloseResult> CloseAsync(
             SharedSymbol symbol, decimal? quantity, bool isLong, string orderType, decimal? price,
             string? clientOrderId, CancellationToken ct)
         {
             CloseCalls++;
             LastClose = new CloseCall(symbol, quantity, isLong, orderType, price, clientOrderId);
             if (CloseException is not null) throw CloseException;
-            return Task.FromResult(CloseOk
-                ? (true, (string?)null, CloseQuantity ?? quantity, ClosePrice, CloseExchangeOrderId)
-                : (false, CloseError ?? "close failed", null, null, null));
+            return Task.FromResult(CloseResultOutcome switch
+            {
+                CloseOutcome.Accepted => CloseResult.Accepted(CloseExchangeOrderId,
+                    CloseQuantity ?? quantity, ClosePrice),
+                CloseOutcome.Rejected => CloseResult.Rejected(CloseError ?? "close failed"),
+                _ => CloseResult.Unknown(CloseError)
+            });
         }
 
-        public Task<(bool Ok, string? Error)> CancelAsync(SharedSymbol symbol, string orderId,
+        public Task<CancelResult> CancelAsync(SharedSymbol symbol, string orderId,
             CancellationToken ct)
         {
             CancelCalls++;
             LastCancel = new CancelCall(symbol, orderId);
             if (CancelException is not null) throw CancelException;
-            return Task.FromResult(CancelOk
-                ? (true, (string?)null)
-                : (false, CancelError ?? "cancel failed"));
+            return Task.FromResult(CancelResultOutcome switch
+            {
+                CancelOutcome.Accepted => CancelResult.Accepted(),
+                CancelOutcome.Rejected => CancelResult.Rejected(CancelError ?? "cancel failed"),
+                _ => CancelResult.Unknown(CancelError)
+            });
         }
 
         public TradingAudit Audit() => AuditResult;

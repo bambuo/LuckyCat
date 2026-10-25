@@ -199,32 +199,67 @@ public class ExecutionGatewayTests
     }
 
     [Fact]
-    public async Task Gateway_close_returns_exchange_order_id_slot()
+    public void Close_failure_classification_maps_timeout_to_unknown_and_rejection_to_rejected()
+    {
+        Assert.Equal(CloseOutcome.Unknown, ExchangeTradingService.ClassifyCloseFailure(
+            new CryptoExchange.Net.Objects.TimeoutError("平仓超时", new TimeoutException())));
+        Assert.Equal(CloseOutcome.Unknown, ExchangeTradingService.ClassifyCloseFailure(null));
+        Assert.Equal(CloseOutcome.Rejected, ExchangeTradingService.ClassifyCloseFailure(
+            new CryptoExchange.Net.Objects.ServerError(
+                CryptoExchange.Net.Objects.Errors.ErrorType.InsufficientBalance, "rejected", new Exception())));
+    }
+
+    [Fact]
+    public void Cancel_failure_classification_maps_timeout_to_unknown_and_rejection_to_rejected()
+    {
+        Assert.Equal(CancelOutcome.Unknown, ExchangeTradingService.ClassifyCancelFailure(
+            new CryptoExchange.Net.Objects.TimeoutError("撤单超时", new TimeoutException())));
+        Assert.Equal(CancelOutcome.Unknown, ExchangeTradingService.ClassifyCancelFailure(null));
+        Assert.Equal(CancelOutcome.Rejected, ExchangeTradingService.ClassifyCancelFailure(
+            new CryptoExchange.Net.Objects.ServerError(
+                CryptoExchange.Net.Objects.Errors.ErrorType.InvalidParameter, "rejected", new Exception())));
+    }
+
+    [Fact]
+    public void Close_and_cancel_results_are_ok_only_when_accepted()
+    {
+        Assert.True(CloseResult.Accepted("EX-1", 0.5m, 100m).Ok);
+        Assert.False(CloseResult.Rejected("rejected").Ok);
+        Assert.False(CloseResult.Unknown("timeout").Ok);
+        Assert.True(CancelResult.Accepted().Ok);
+        Assert.False(CancelResult.Rejected("rejected").Ok);
+        Assert.False(CancelResult.Unknown("timeout").Ok);
+    }
+
+    [Fact]
+    public async Task Gateway_close_returns_typed_outcome_slot()
     {
         var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
 
-        var (ok, error, quantity, price, exchangeOrderId) = await gateway.CloseAsync(
+        var result = await gateway.CloseAsync(
             Btc, 0.5m, isLong: true, "stop", null, "lc-close-1", CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("不支持的订单类型：stop", error);
-        Assert.Null(quantity);
-        Assert.Null(price);
-        Assert.Null(exchangeOrderId);
+        Assert.False(result.Ok);
+        Assert.Equal(CloseOutcome.Rejected, result.Outcome);
+        Assert.Equal("不支持的订单类型：stop", result.Error);
+        Assert.Null(result.ExchangeOrderId);
+        Assert.Null(result.SubmittedQuantity);
+        Assert.Null(result.ReferencePrice);
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public async Task Detailed_close_returns_exchange_order_id_slot(decimal quantity)
+    public async Task Detailed_close_returns_typed_outcome_slot(decimal quantity)
     {
-        var (ok, error, submitted, price, exchangeOrderId) = await new ExchangeTradingService()
+        var result = await new ExchangeTradingService()
             .ClosePositionAsync(Account(), Btc, quantity, "market", null, "lc-close-1", true, CancellationToken.None);
 
-        Assert.False(ok);
-        Assert.Equal("平仓数量必须大于 0", error);
-        Assert.Null(submitted);
-        Assert.Null(price);
-        Assert.Null(exchangeOrderId);
+        Assert.False(result.Ok);
+        Assert.Equal(CloseOutcome.Rejected, result.Outcome);
+        Assert.Equal("平仓数量必须大于 0", result.Error);
+        Assert.Null(result.ExchangeOrderId);
+        Assert.Null(result.SubmittedQuantity);
+        Assert.Null(result.ReferencePrice);
     }
 }

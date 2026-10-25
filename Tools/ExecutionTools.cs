@@ -426,8 +426,9 @@ public sealed class ExecutionTools(
     /// </summary>
     private async Task<ToolEnvelope> ClosePositionCoreAsync(CloseRequest request, CancellationToken ct)
     {
-        // 1) 参数与模式（fail-closed）。
+        // 1) 参数、模式与周期归属（fail-closed）。
         if (_ctx.Mode is not ("dry" or "live")) return Fail(ToolErrors.InvalidArgument, "周期执行模式无效");
+        if (!await CurrentCycleOwnedAsync(ct)) return Fail(ToolErrors.InvalidArgument, "周期归属不匹配");
         if (string.IsNullOrWhiteSpace(request.Symbol)) return Fail(ToolErrors.InvalidArgument, "symbol 必填");
         if (request.OrderType is not ("market" or "limit")) return Fail(ToolErrors.InvalidArgument, "orderType 无效");
         if (request.OrderType == "limit" && request.Price is not > 0)
@@ -486,6 +487,13 @@ public sealed class ExecutionTools(
             if (existingClose is not null) return ExistingOrder(existingClose);
         }
 
+        // 结果未知的平仓可能已成交：同账户同标的一律禁止再次平仓，避免重复减仓甚至反手。
+        var unresolvedCloses = await _db.TraderOrders.AsNoTracking()
+            .Where(o => o.ExchangeAccountId == _ctx.Account.Id && o.Action == "close" && o.Status == "unknown")
+            .ToListAsync(ct);
+        if (unresolvedCloses.Any(o => SameBaseAsset(o.Symbol, request.Symbol)))
+            return Fail(ToolErrors.ExchangeUnknown, "该账户标的存在结果未知的平仓，禁止再次平仓，请人工核对");
+
         var priorCloses = await _db.TraderOrders.AsNoTracking()
             .CountAsync(o => o.CycleId == _ctx.CycleId && o.Action == "close", ct);
         var attempt = Math.Max(_attempt, priorCloses);
@@ -513,17 +521,26 @@ public sealed class ExecutionTools(
             Leverage = position.Leverage,
             Simulated = simulated,
             Status = simulated ? "filled" : "unknown",
-            FilledQuantity = simulated ? qty : null,
-            AveragePrice = simulated ? execPrice : null,
-            Success = simulated,
+            // 成交字段只允许来自模拟成交或交易所确认回报；提交数量/参考价不是成交。
+            FilledQuantity = null,
+            AveragePrice = null,
+            Success = false,
             Note = Truncate(request.Reason, 500),
             Error = simulated ? null : CloseUnknownMessage,
             At = DateTime.UtcNow
         };
 
-        // 7) 演练：不调用交易所，直接模拟整仓/部分成交。
+        // 7) 演练：不调用交易所，按最新价±配置滑点模拟成交（限价单不得越过限价）。
         if (simulated)
         {
+            if (fresh.LastPrice is not > 0)
+                return Fail(ToolErrors.DataUnavailable, "最新价不可用，无法模拟成交", true);
+            var simulatedFill = SimulatedCloseFillPrice(isLong, fresh.LastPrice.Value,
+                request.OrderType == "limit" ? request.Price : null);
+            row.FilledQuantity = qty;
+            row.AveragePrice = simulatedFill;
+            row.Success = true;
+            row.Error = null;
             var (inserted, raced) = await TryInsertOrderAsync(row);
             if (!inserted)
                 return raced is not null
@@ -542,7 +559,7 @@ public sealed class ExecutionTools(
                 ? ExistingOrder(competing, "已存在相同的 clientOrderId，未重复提交；如状态未知请人工核对")
                 : Fail(ToolErrors.DataUnavailable, "订单无法落库，未提交", true);
 
-        (bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId) closed;
+        CloseResult closed;
         try
         {
             closed = await _gateway.CloseAsync(shared, qty, isLong, request.OrderType,
@@ -562,50 +579,71 @@ public sealed class ExecutionTools(
         }
         ct.ThrowIfCancellationRequested();
 
-        if (!closed.Ok && string.IsNullOrWhiteSpace(closed.Error))
+        switch (closed.Outcome)
         {
-            // 无错误信息的失败同样无法确认结果，保持 unknown。
-            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
-            return Fail(ToolErrors.ExchangeUnknown, CloseUnknownMessage);
+            case CloseOutcome.Unknown:
+                // 未知 = 订单可能已创建/成交：保持 unknown，禁止重试或补单。
+                LogGatewayError("close_position", closed.Error);
+                row.Status = "unknown";
+                row.Success = false;
+                row.FilledQuantity = null;
+                row.AveragePrice = null;
+                row.Error = CloseUnknownMessage;
+                if (!await TryPersistOrderAsync(row))
+                    return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
+                _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+                return Fail(ToolErrors.ExchangeUnknown, CloseUnknownMessage);
+
+            case CloseOutcome.Rejected:
+                // 交易所明确拒绝：确定未创建，可安全记为 failed。
+                LogGatewayError("close_position", closed.Error);
+                row.Status = "failed";
+                row.Success = false;
+                row.FilledQuantity = null;
+                row.AveragePrice = null;
+                row.ExchangeOrderId = null;
+                row.Error = CloseRejectedMessage;
+                if (!await TryPersistOrderAsync(row))
+                    return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
+                _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+                return Fail(ToolErrors.ExchangeError, CloseRejectedMessage);
         }
 
-        if (!closed.Ok)
+        // 交易所已受理：成交未经回报确认，一律记为 submitted；成交字段保持 null。
+        row.Status = "submitted";
+        row.Success = true;
+        row.FilledQuantity = null;
+        row.AveragePrice = null;
+        row.ExchangeOrderId = closed.ExchangeOrderId;
+        row.Error = null;
+
+        // 限价平仓若没有交易所订单号，将无法撤单/对账：按未知处理，绝不静默返回可撤的成功。
+        if (request.OrderType == "limit" && closed.ExchangeOrderId is null)
         {
-            LogGatewayError("close_position", closed.Error);
-            row.Status = "failed";
+            row.Status = "unknown";
             row.Success = false;
-            row.FilledQuantity = null;
-            row.AveragePrice = null;
-            row.ExchangeOrderId = null;
-            row.Error = CloseRejectedMessage;
-        }
-        else
-        {
-            // 市价平仓视为已成交；限价平仓仅受理（submitted），保留交易所订单号供 cancel_order 撤销。
-            row.Status = request.OrderType == "limit" ? "submitted" : "filled";
-            row.Success = true;
-            row.FilledQuantity = closed.Quantity ?? qty;
-            row.AveragePrice = closed.Price ?? execPrice;
-            row.ExchangeOrderId = closed.ExchangeOrderId;
-            row.Error = null;
+            row.Error = "限价平仓已受理但未返回交易所订单号，无法撤单";
+            if (!await TryPersistOrderAsync(row))
+                return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
+            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+            return Fail(ToolErrors.ExchangeUnknown, "限价平仓已受理但未返回交易所订单号，无法撤单，请人工核对");
         }
 
         if (!await TryPersistOrderAsync(row))
             return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
         _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
-
-        return closed.Ok
-            ? ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live")
-            : Fail(ToolErrors.ExchangeError, CloseRejectedMessage);
+        return ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live");
     }
 
     /// <summary>
     /// cancel_order：只撤销本交易员、当前账户、仍处于 submitted/partial 的订单。
-    /// 演练不调用交易所；实盘必须携带交易所订单号且只调用一次，结果无法确认时绝不标记成功。
+    /// 演练只撤演练订单、实盘只撤实盘订单；实盘必须携带交易所订单号且只调用一次，
+    /// 结果未知时保持订单原状态，绝不标记成功。
     /// </summary>
     private async Task<ToolEnvelope> CancelOrderCoreAsync(string orderId, CancellationToken ct)
     {
         if (_ctx.Mode is not ("dry" or "live")) return Fail(ToolErrors.InvalidArgument, "周期执行模式无效");
+        if (!await CurrentCycleOwnedAsync(ct)) return Fail(ToolErrors.InvalidArgument, "周期归属不匹配");
         if (string.IsNullOrWhiteSpace(orderId)) return Fail(ToolErrors.InvalidArgument, "orderId 必填");
 
         // 归属校验：只认本交易员的订单；账户快照存在时还必须等于当前账户。
@@ -614,17 +652,40 @@ public sealed class ExecutionTools(
                 && (o.ExchangeOrderId == orderId || o.ClientOrderId == orderId))
             .OrderByDescending(o => o.Id)
             .FirstOrDefaultAsync(ct);
-        if (order is null || order.Status is not ("submitted" or "partial"))
-            return Fail(ToolErrors.OrderNotCancellable, "订单不存在或不可撤");
+        if (order is null) return Fail(ToolErrors.OrderNotCancellable, "订单不存在");
+        if (order.Status is not ("submitted" or "partial"))
+            return Fail(ToolErrors.OrderNotCancellable, "订单状态不可撤");
         if (order.ExchangeAccountId is { } orderAccountId && orderAccountId != _ctx.Account.Id)
             return Fail(ToolErrors.OrderNotCancellable, "订单不属于当前账户");
 
+        // 订单周期归属：存在周期快照时，归属与演练标记必须一致（历史行可为空）。
+        if (order.CycleId is { } orderCycleId)
+        {
+            var orderCycle = await _db.TradingCycles.AsNoTracking()
+                .SingleOrDefaultAsync(c => c.Id == orderCycleId, ct);
+            if (orderCycle is null || orderCycle.TraderId != _ctx.Trader.Id
+                || orderCycle.ExchangeAccountId != _ctx.Account.Id)
+                return Fail(ToolErrors.OrderNotCancellable, "订单周期归属不匹配");
+            if ((orderCycle.Mode == "dry") != order.Simulated)
+                return Fail(ToolErrors.OrderNotCancellable, "订单演练标记与周期模式不一致");
+        }
+
+        // 演练/实盘隔离：演练绝不能改写实盘订单，实盘也不能碰演练订单。
+        if (_ctx.Mode == "dry" && !order.Simulated)
+            return Fail(ToolErrors.OrderNotCancellable, "演练模式只能撤销演练订单");
+        if (_ctx.Mode == "live" && order.Simulated)
+            return Fail(ToolErrors.OrderNotCancellable, "实盘模式不能撤销演练订单");
+
         if (_ctx.Mode != "dry")
         {
-            if (order.ExchangeOrderId is null || order.Symbol is null)
-                return Fail(ToolErrors.OrderNotCancellable, "缺少交易所订单号");
+            if (order.Symbol is null && order.ExchangeOrderId is null)
+                return Fail(ToolErrors.OrderNotCancellable, "订单缺少标的与交易所订单号，无法撤单");
+            if (order.Symbol is null)
+                return Fail(ToolErrors.OrderNotCancellable, "订单缺少标的，无法撤单");
+            if (order.ExchangeOrderId is null)
+                return Fail(ToolErrors.OrderNotCancellable, "订单缺少交易所订单号，无法撤单");
             var shared = CoinRankingService.ParseConfiguredSymbol(order.Symbol);
-            (bool Ok, string? Error) canceled;
+            CancelResult canceled;
             try
             {
                 canceled = await _gateway.CancelAsync(shared, order.ExchangeOrderId, ct);
@@ -639,12 +700,14 @@ public sealed class ExecutionTools(
                 LogGatewayError("cancel_order", ex.Message);
                 return Fail(ToolErrors.ExchangeUnknown, CancelUnknownMessage);
             }
-            if (!canceled.Ok)
+            switch (canceled.Outcome)
             {
-                if (string.IsNullOrWhiteSpace(canceled.Error))
+                case CancelOutcome.Unknown:
+                    LogGatewayError("cancel_order", canceled.Error);
                     return Fail(ToolErrors.ExchangeUnknown, CancelUnknownMessage);
-                LogGatewayError("cancel_order", canceled.Error);
-                return Fail(ToolErrors.ExchangeError, CancelRejectedMessage);
+                case CancelOutcome.Rejected:
+                    LogGatewayError("cancel_order", canceled.Error);
+                    return Fail(ToolErrors.ExchangeError, CancelRejectedMessage);
             }
         }
 
@@ -656,11 +719,35 @@ public sealed class ExecutionTools(
         return ToolEnvelope.Success(OrderData(order), DateTimeOffset.UtcNow, "live");
     }
 
+    /// <summary>当前周期必须属于本交易员、本策略、本账户且模式一致（与 place_order 第 2 步同口径）。</summary>
+    private async Task<bool> CurrentCycleOwnedAsync(CancellationToken ct)
+    {
+        var cycle = await _db.TradingCycles.AsNoTracking()
+            .SingleOrDefaultAsync(c => c.Id == _ctx.CycleId, ct);
+        return cycle is not null && cycle.TraderId == _ctx.Trader.Id
+            && cycle.StrategyId == _ctx.Trader.StrategyId
+            && cycle.ExchangeAccountId == _ctx.Account.Id
+            && cycle.Mode == _ctx.Mode;
+    }
+
     /// <summary>演练成交价：一律以最新价为基准按配置滑点成交，不得直接使用限价充当成交价。</summary>
     private decimal SimulatedFillPrice(OrderRequest request, decimal latestPrice)
     {
         var slippage = _config.RiskControl.EstimatedSlippagePct / 100m;
         return request.Side == "long" ? latestPrice * (1m + slippage) : latestPrice * (1m - slippage);
+    }
+
+    /// <summary>
+    /// 演练平仓价：平多按最新价减滑点（卖出），平空按最新价加滑点（买入）；
+    /// 限价单不得越过限价（卖出不低于限价、买入不高于限价），因此按限价截断。
+    /// </summary>
+    private decimal SimulatedCloseFillPrice(bool isLong, decimal latestPrice, decimal? limitPrice)
+    {
+        var slippage = _config.RiskControl.EstimatedSlippagePct / 100m;
+        var simulated = isLong ? latestPrice * (1m - slippage) : latestPrice * (1m + slippage);
+        return limitPrice is not { } limit
+            ? simulated
+            : isLong ? Math.Max(simulated, limit) : Math.Min(simulated, limit);
     }
 
     private static string StatusFor(PlaceResult placed, decimal quantity) => placed.Outcome switch

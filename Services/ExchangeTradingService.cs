@@ -902,25 +902,33 @@ public class ExchangeTradingService
         return mode;
     }
 
-    /// <summary>整仓平仓（ICloseFullPosition，可用时优先）。</summary>
-    public static async Task<(bool Ok, string? Error)> CloseFullPositionAsync(ExchangeAccount account, SharedSymbol symbol, bool crossMargin, CancellationToken ct)
+    /// <summary>
+    /// 整仓平仓（ICloseFullPosition，可用时优先）。结果类型化：交易所明确拒绝=Rejected；
+    /// 超时/传输/解析异常=Unknown（订单可能已提交，调用方不得再走反向单兜底）。
+    /// </summary>
+    public static async Task<(CloseOutcome Outcome, string? Error)> CloseFullPositionAsync(ExchangeAccount account, SharedSymbol symbol, bool crossMargin, CancellationToken ct)
     {
         try
         {
             var client = ExchangeClientFactory.Get(account);
             var capability = client.GetCapability<ICloseFullPosition>(ExchangeClientFactory.Name(account.ExchangeType), TradingMode.PerpetualLinear);
-            if (capability is null) return (false, "__unsupported__"); // 由调用方决定是否兜底
+            if (capability is null) return (CloseOutcome.Rejected, "__unsupported__"); // 由调用方决定是否兜底
 
             var result = await capability.Capability
                 .CloseFullPositionAsync(
                     new CloseFullPositionRequest(symbol, SharedPositionMode.OneWay, null, crossMargin ? SharedMarginMode.Cross : SharedMarginMode.Isolated, null, ExchangeClientFactory.Parameters(account)),
                     ct)
                 .ConfigureAwait(false);
-            return result.Success ? (true, null) : (false, result.Error?.ToString() ?? "整仓平仓失败");
+            if (result.Success) return (CloseOutcome.Accepted, null);
+            return (ClassifyCloseFailure(result.Error), result.Error?.ToString() ?? "整仓平仓失败");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return (CloseOutcome.Unknown, "平仓超时");
         }
         catch (Exception ex)
         {
-            return (false, ex.Message);
+            return (CloseOutcome.Unknown, ex.Message);
         }
     }
 
@@ -928,9 +936,16 @@ public class ExchangeTradingService
     /// 整仓平仓（两条路径）：①交易所原生整仓平仓（ICloseFullPosition，可用时优先）；
     /// ②兜底：反向市价平仓单——按持仓模式自适应：双向持仓用 positionSide 表达只减不增（Binance 拒收 reduceOnly），
     /// 单向持仓用 ReduceOnly=true；模式未知时按错误码（-1106/-4061）自动切换重试（被拒=未成交，重试安全）。
-    /// 返回被平仓位的数量与平仓时点价格（供审计留痕）。
+    /// 原生路径超时/异常=Unknown 时**绝不**再走反向单兜底（可能重复平仓/反手）。
+    /// 旧调用方兼容签名：返回被平仓位数量与平仓时点参考价（非成交回报）。
     /// </summary>
     public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> ClosePositionAsync(ExchangeAccount account, SharedSymbol symbol, bool crossMargin, CancellationToken ct)
+    {
+        var result = await ClosePositionCoreAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
+        return (result.Ok, result.Error, result.SubmittedQuantity, result.ReferencePrice);
+    }
+
+    private async Task<CloseResult> ClosePositionCoreAsync(ExchangeAccount account, SharedSymbol symbol, bool crossMargin, CancellationToken ct)
     {
         // 新鲜读取持仓（数量/方向用于审计与兜底）；读取失败不得伪装成“无持仓”。
         var snapshot = await GetPositionSnapshotAsync(account, ct).ConfigureAwait(false);
@@ -943,47 +958,54 @@ public class ExchangeTradingService
         var auditPrice = await GetPriceAsync(account, symbol, ct).ConfigureAwait(false) ?? position?.AverageOpenPrice;
 
         // ① 原生整仓平仓（可用时优先）
-        var (fullOk, fullError) = await CloseFullPositionAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
-        if (fullOk) return (true, null, auditQuantity, auditPrice);
+        var (fullOutcome, fullError) = await CloseFullPositionAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
+        if (fullOutcome == CloseOutcome.Accepted)
+            return CloseResult.Accepted(null, auditQuantity, auditPrice);
+        // 结果未知时订单可能已成交：不得再用反向单兜底，否则可能重复平仓甚至反手。
+        if (fullOutcome == CloseOutcome.Unknown)
+            return CloseResult.Unknown(fullError, auditQuantity, auditPrice);
+
         var nativeError = fullError == "__unsupported__" ? null : fullError;
         if (nativeError is not null)
         {
             Console.WriteLine($"[Trading] {symbol} 整仓平仓接口失败，尝试反向市价单兜底：{nativeError}");
         }
 
-        // ② 兜底：反向市价平仓单（持仓模式自适应）
+        // ② 兜底：反向市价平仓单（持仓模式自适应）。提交前校验失败=Rejected（确定未创建）。
         try
         {
             if (!snapshot.Success)
             {
                 var readError = string.IsNullOrWhiteSpace(snapshot.Error) ? "持仓读取失败" : $"持仓读取失败：{snapshot.Error}";
-                return (false, nativeError is null ? readError : $"{nativeError}；{readError}", null, null);
+                return CloseResult.Rejected(nativeError is null ? readError : $"{nativeError}；{readError}");
             }
 
-            if (position is null) return (false, nativeError ?? "未找到该标的持仓", null, null);
+            if (position is null) return CloseResult.Rejected(nativeError ?? "未找到该标的持仓");
 
             var quantity = Math.Abs(position.Quantity);
-            if (quantity <= 0) return (false, "持仓数量为 0", null, null);
+            if (quantity <= 0) return CloseResult.Rejected("持仓数量为 0");
 
             var isLong = position.Side.ToString().Contains("Long", StringComparison.OrdinalIgnoreCase);
-            var (ok, error, _) = await PlaceReduceOnlyOrderAsync(account, symbol, isLong, quantity,
+            var (outcome, error, _) = await PlaceReduceOnlyOrderAsync(account, symbol, isLong, quantity,
                 SharedOrderType.Market, null, crossMargin, null, ct).ConfigureAwait(false);
-            if (!ok)
+            if (outcome != CloseOutcome.Accepted)
             {
                 var detail = nativeError is null ? error : $"{nativeError}；{error}";
-                return (false, detail, auditQuantity, auditPrice);
+                return outcome == CloseOutcome.Unknown
+                    ? CloseResult.Unknown(detail, auditQuantity, auditPrice)
+                    : CloseResult.Rejected(detail);
             }
 
             PositionCache.TryRemove(account.Id, out _);
-            return (true, null, quantity, auditPrice);
+            return CloseResult.Accepted(null, quantity, auditPrice);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return (false, "平仓超时", auditQuantity, auditPrice);
+            return CloseResult.Unknown("平仓超时", auditQuantity, auditPrice);
         }
         catch (Exception ex)
         {
-            return (false, ex.Message, auditQuantity, auditPrice);
+            return CloseResult.Unknown(ex.Message, auditQuantity, auditPrice);
         }
     }
 
@@ -997,36 +1019,32 @@ public class ExchangeTradingService
         ExchangeAccount account, SharedSymbol symbol, decimal? quantity, string orderType, decimal? price,
         bool crossMargin, CancellationToken ct)
     {
-        var (ok, error, submitted, auditPrice, _) = await ClosePositionAsync(account, symbol, quantity, orderType,
+        var result = await ClosePositionAsync(account, symbol, quantity, orderType,
             price, null, crossMargin, ct).ConfigureAwait(false);
-        return (ok, error, submitted, auditPrice);
+        return (result.Ok, result.Error, result.SubmittedQuantity, result.ReferencePrice);
     }
 
     /// <summary>
     /// 平仓（可携带工具生成的 clientOrderId）：提供订单号时不再走原生整仓平仓，
     /// 改用反向减仓单以便把客户端订单号透传给交易所（原生整仓接口不接受 clientOrderId）。
-    /// 返回实际提交的平仓数量、参考价与交易所订单号：整仓原生路径可能无订单号（null），
-    /// 部分/限价反向减仓单返回 <c>result.Data?.Id</c>，供后续撤单（Task 8）与审计。
-    /// 与开仓路径一致：任何异常都在此收敛为错误元组，绝不向调用方抛出。
+    /// 返回类型化结果：受理时携带交易所订单号、提交数量与参考价（**不是**成交回报）。
+    /// 与开仓路径一致：超时/传输/异常收敛为 <see cref="CloseOutcome.Unknown"/>，绝不向调用方抛出。
     /// </summary>
-    public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> ClosePositionAsync(
+    public async Task<CloseResult> ClosePositionAsync(
         ExchangeAccount account, SharedSymbol symbol, decimal? quantity, string orderType, decimal? price,
         string? clientOrderId, bool crossMargin, CancellationToken ct)
     {
         if (!TryParseOrderType(orderType, out var parsedType))
-            return (false, $"不支持的订单类型：{orderType}", null, null, null);
+            return CloseResult.Rejected($"不支持的订单类型：{orderType}");
         if (quantity is { } requested && requested <= 0)
-            return (false, "平仓数量必须大于 0", null, null, null);
+            return CloseResult.Rejected("平仓数量必须大于 0");
         if (parsedType == SharedOrderType.Limit && price is not > 0)
-            return (false, "限价平仓缺少有效价格", null, null, null);
+            return CloseResult.Rejected("限价平仓缺少有效价格");
         var hasClientId = !string.IsNullOrWhiteSpace(clientOrderId);
 
         // 未指定数量且为市价：既有整仓路径（原生整仓平仓优先；有 clientOrderId 时保留给反向单）。
         if (quantity is null && parsedType == SharedOrderType.Market && !hasClientId)
-        {
-            var (ok, error, auditQuantity, auditPrice) = await ClosePositionAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
-            return (ok, error, auditQuantity, auditPrice, null);
-        }
+            return await ClosePositionCoreAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
 
         try
         {
@@ -1035,7 +1053,7 @@ public class ExchangeTradingService
             if (!snapshot.Success)
             {
                 var readError = string.IsNullOrWhiteSpace(snapshot.Error) ? "持仓读取失败" : $"持仓读取失败：{snapshot.Error}";
-                return (false, readError, null, null, null);
+                return CloseResult.Rejected(readError);
             }
 
             var positions = snapshot.Positions;
@@ -1043,55 +1061,68 @@ public class ExchangeTradingService
             var position = positions.FirstOrDefault(p =>
                 (nativeName is not null && string.Equals(p.Symbol, nativeName, StringComparison.OrdinalIgnoreCase))
                 || p.Symbol.Contains(symbol.BaseAsset, StringComparison.OrdinalIgnoreCase));
-            if (position is null) return (false, "未找到该标的持仓", null, null, null);
+            if (position is null) return CloseResult.Rejected("未找到该标的持仓");
 
             var positionQuantity = Math.Abs(position.Quantity);
-            if (positionQuantity <= 0) return (false, "持仓数量为 0", null, null, null);
+            if (positionQuantity <= 0) return CloseResult.Rejected("持仓数量为 0");
 
             var closeQuantity = quantity ?? positionQuantity;
-            if (closeQuantity > positionQuantity) return (false, "平仓数量超过当前持仓", null, null, null);
+            if (closeQuantity > positionQuantity) return CloseResult.Rejected("平仓数量超过当前持仓");
 
             // 整仓 + 市价 + 无客户端订单号：沿用整仓路径（不会把部分平仓放大为整仓）。
             if (closeQuantity == positionQuantity && parsedType == SharedOrderType.Market && !hasClientId)
-            {
-                var (ok, error, auditQuantity, auditPrice) = await ClosePositionAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
-                return (ok, error, auditQuantity, auditPrice, null);
-            }
+                return await ClosePositionCoreAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
 
             var referencePrice = await GetPriceAsync(account, symbol, ct).ConfigureAwait(false) ?? position.AverageOpenPrice;
             var isLong = position.Side.ToString().Contains("Long", StringComparison.OrdinalIgnoreCase);
-            var (placeOk, placeError, orderId) = await PlaceReduceOnlyOrderAsync(account, symbol, isLong, closeQuantity,
+            var (outcome, error, orderId) = await PlaceReduceOnlyOrderAsync(account, symbol, isLong, closeQuantity,
                 parsedType, price, crossMargin, clientOrderId, ct).ConfigureAwait(false);
-            if (!placeOk) return (false, placeError, positionQuantity, referencePrice, null);
-
-            PositionCache.TryRemove(account.Id, out _);
-            return (true, null, closeQuantity, referencePrice, orderId);
+            switch (outcome)
+            {
+                case CloseOutcome.Accepted:
+                    PositionCache.TryRemove(account.Id, out _);
+                    return CloseResult.Accepted(orderId, closeQuantity, referencePrice);
+                case CloseOutcome.Unknown:
+                    return CloseResult.Unknown(error, positionQuantity, referencePrice);
+                default:
+                    return new CloseResult(CloseOutcome.Rejected, SubmittedQuantity: positionQuantity,
+                        ReferencePrice: referencePrice, Error: error);
+            }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return (false, "平仓超时", null, null, null);
+            return CloseResult.Unknown("平仓超时");
         }
         catch (Exception ex)
         {
-            return (false, ex.Message, null, null, null);
+            return CloseResult.Unknown(ex.Message);
         }
     }
+
+    /// <summary>明确拒绝=Rejected，超时/网络/解析/空错误=Unknown（订单可能已创建，禁止重试）。</summary>
+    internal static CloseOutcome ClassifyCloseFailure(CryptoExchange.Net.Objects.Error? error) =>
+        error is null || IsAmbiguousPlaceError(error) ? CloseOutcome.Unknown : CloseOutcome.Rejected;
+
+    /// <summary>明确拒绝=Rejected，超时/网络/解析/空错误=Unknown（订单可能已撤销或状态已变，禁止按成功处理）。</summary>
+    internal static CancelOutcome ClassifyCancelFailure(CryptoExchange.Net.Objects.Error? error) =>
+        error is null || IsAmbiguousPlaceError(error) ? CancelOutcome.Unknown : CancelOutcome.Rejected;
 
     /// <summary>
     /// 反向减仓单（整仓兜底与部分平仓共用）：双向持仓用 positionSide 表达只减不增，
     /// 单向持仓用 ReduceOnly=true；模式未知时按错误码自动切换重试（被拒=未成交，重试安全）。
+    /// 超时/网络/空错误一律 Unknown 且**不得**切换形态重试（订单可能已创建）。
     /// 返回交易所订单号（交易所未返回时如实为 null）。
     /// </summary>
-    private async Task<(bool Ok, string? Error, string? OrderId)> PlaceReduceOnlyOrderAsync(
+    private async Task<(CloseOutcome Outcome, string? Error, string? OrderId)> PlaceReduceOnlyOrderAsync(
         ExchangeAccount account, SharedSymbol symbol, bool isLong, decimal quantity,
         SharedOrderType orderType, decimal? price, bool crossMargin, string? clientOrderId, CancellationToken ct)
     {
-        if (quantity <= 0) return (false, "平仓数量必须大于 0", null);
-        if (orderType == SharedOrderType.Limit && price is not > 0) return (false, "限价平仓缺少有效价格", null);
+        if (quantity <= 0) return (CloseOutcome.Rejected, "平仓数量必须大于 0", null);
+        if (orderType == SharedOrderType.Limit && price is not > 0) return (CloseOutcome.Rejected, "限价平仓缺少有效价格", null);
 
         var orderCapability = ExchangeClientFactory.Get(account)
             .GetCapability<IPlaceFuturesOrder>(ExchangeClientFactory.Name(account.ExchangeType), TradingMode.PerpetualLinear);
-        if (orderCapability is null) return (false, "该交易所不支持下单，无法平仓", null);
+        if (orderCapability is null) return (CloseOutcome.Rejected, "该交易所不支持下单，无法平仓", null);
 
         // 预判：双向持仓 → 先 positionSide 形态；单向/未知 → 先 ReduceOnly 形态；错误码不匹配自动换另一种
         var mode = await GetPositionModeAsync(account, ct).ConfigureAwait(false);
@@ -1107,19 +1138,28 @@ public class ExchangeTradingService
             {
                 var style = hedgeStyle ? "positionSide·双向持仓" : "ReduceOnly·单向持仓";
                 Console.WriteLine($"[Trading] {symbol} 已通过反向{orderType}单平仓（数量 {quantity}，{style}）");
-                return (true, null, order.Data?.Id);
+                return (CloseOutcome.Accepted, null, order.Data?.Id);
             }
 
             lastError = order.Error?.ToString() ?? "下单失败";
+            // 明确的持仓模式不匹配属于「交易所拒绝、未创建」，可安全切换形态重试。
             var retriable = lastError.Contains("-1106", StringComparison.Ordinal)
                 || lastError.Contains("-4061", StringComparison.Ordinal)
                 || lastError.Contains("reduceonly", StringComparison.OrdinalIgnoreCase)
                 || lastError.Contains("position side", StringComparison.OrdinalIgnoreCase);
-            if (!retriable) break;
-            Console.WriteLine($"[Trading] {symbol} 平仓形态与持仓模式不匹配（{lastError}），切换另一种重试");
+            if (retriable)
+            {
+                Console.WriteLine($"[Trading] {symbol} 平仓形态与持仓模式不匹配（{lastError}），切换另一种重试");
+                continue;
+            }
+
+            // 其余结果按类型分类：超时/网络/空错误=Unknown，绝不切换形态再次提交。
+            return ClassifyCloseFailure(order.Error) == CloseOutcome.Unknown
+                ? (CloseOutcome.Unknown, $"兜底平仓失败：{lastError}", null)
+                : (CloseOutcome.Rejected, $"兜底平仓失败：{lastError}", null);
         }
 
-        return (false, $"兜底平仓失败：{lastError}", null);
+        return (CloseOutcome.Rejected, $"兜底平仓失败：{lastError}", null);
     }
 
     /// <summary>
@@ -1147,8 +1187,11 @@ public class ExchangeTradingService
             ExchangeClientFactory.Parameters(account));
     }
 
-    /// <summary>撤单（共享能力 ICancelFuturesOrder）：只撤指定标的的指定订单；能力不可用时如实返回失败。</summary>
-    public static async Task<(bool Ok, string? Error)> CancelOrderAsync(
+    /// <summary>
+    /// 撤单（共享能力 ICancelFuturesOrder）：只撤指定标的的指定订单。
+    /// 明确拒绝=Rejected；超时/网络/解析/空错误=Unknown（不得按成功处理或重试）。
+    /// </summary>
+    public static async Task<CancelResult> CancelOrderAsync(
         ExchangeAccount account, SharedSymbol symbol, string orderId, CancellationToken ct)
     {
         try
@@ -1156,20 +1199,24 @@ public class ExchangeTradingService
             var client = ExchangeClientFactory.Get(account);
             var capability = client.GetCapability<ICancelFuturesOrder>(
                 ExchangeClientFactory.Name(account.ExchangeType), TradingMode.PerpetualLinear);
-            if (capability?.Capability is null) return (false, "交易所不支持撤单");
+            if (capability?.Capability is null) return CancelResult.Rejected("交易所不支持撤单");
 
             var result = await capability.Capability
                 .CancelFuturesOrderAsync(new CancelOrderRequest(symbol, orderId, ExchangeClientFactory.Parameters(account)), ct)
                 .ConfigureAwait(false);
-            return result.Success ? (true, null) : (false, result.Error?.Message ?? "撤单失败");
+            if (result.Success) return CancelResult.Accepted();
+            var detail = result.Error?.Message ?? result.Error?.ToString() ?? "撤单失败";
+            return ClassifyCancelFailure(result.Error) == CancelOutcome.Unknown
+                ? CancelResult.Unknown(detail)
+                : CancelResult.Rejected(detail);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return (false, "撤单超时");
+            return CancelResult.Unknown("撤单超时");
         }
         catch (Exception ex)
         {
-            return (false, ex.Message);
+            return CancelResult.Unknown(ex.Message);
         }
     }
 

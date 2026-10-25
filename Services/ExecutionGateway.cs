@@ -59,19 +59,19 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
         return placed;
     }
 
-    public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> CloseAsync(
+    public async Task<CloseResult> CloseAsync(
         SharedSymbol symbol, decimal? quantity, bool isLong, string orderType, decimal? price,
         string? clientOrderId, CancellationToken ct)
     {
         if (!ExchangeTradingService.TryParseOrderType(orderType, out _))
-            return (false, $"不支持的订单类型：{orderType}", null, null, null);
+            return CloseResult.Rejected($"不支持的订单类型：{orderType}");
 
         _ = isLong; // 方向由交易所最新持仓判定；调用方传入值仅作审计参考。
         return await trading.ClosePositionAsync(account, symbol, quantity, orderType, price, clientOrderId,
             crossMargin, ct).ConfigureAwait(false);
     }
 
-    public Task<(bool Ok, string? Error)> CancelAsync(SharedSymbol symbol, string orderId, CancellationToken ct) =>
+    public Task<CancelResult> CancelAsync(SharedSymbol symbol, string orderId, CancellationToken ct) =>
         ExchangeTradingService.CancelOrderAsync(account, symbol, orderId, ct);
 
     public TradingAudit Audit() => ExchangeTradingService.Audit(account);
