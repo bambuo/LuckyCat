@@ -3,20 +3,65 @@ using LuckyCat.Contracts;
 using LuckyCat.Models;
 using LuckyCat.Services;
 using LuckyCat.Tools;
+using Microsoft.Extensions.AI;
 
 namespace LuckyCat.Workflows;
 
 /// <summary>
-/// 阶段与周期落库抽象（周期宿主在 Task 11 实现：AgentStageRun 原文落库、
+/// 阶段与周期落库抽象（Task 11 实现：AgentStageRun 原文落库、
 /// 终态落库与 SSE 推送按 <see cref="CycleEvents.cs"/> 的负载契约发布）。
 /// 收尾执行器不调用模型、不产生 AgentStageRun，只调用 CompleteCycleAsync（LC-STD-01 §4.1）。
 /// </summary>
 public interface ICycleRecorder
 {
-    Task RecordStageAsync(string role, object output, string instructions, CancellationToken ct);
+    /// <summary>
+    /// 记录一个角色阶段。<paramref name="stageRunId"/> **必须**是执行器自身的
+    /// <c>StageRunId</c>：ToolAuditor 已按同一 ID 落 ToolInvocation，宿主另造 ID 会让工具审计行悬空。
+    /// </summary>
+    Task RecordStageAsync(string role, string stageRunId, object output, string instructions,
+        StageRunStats stats, CancellationToken ct);
 
     Task CompleteCycleAsync(TradingCycleContext ctx, string status, string? errorCode, string? error,
         CancellationToken ct);
+}
+
+/// <summary>
+/// 阶段观测数据（LC-STD-03 §2.1 AgentStageRun 的用量/耗时/消息记录来源）：
+/// 由阶段执行器在模型调用处测量，由周期宿主的落库记录器写入并截断。
+/// </summary>
+/// <param name="Messages">本轮模型可见的消息（含工具调用记录；可为空）。</param>
+/// <param name="ElapsedMs">阶段耗时（模型循环 + 工具循环），毫秒。</param>
+/// <param name="InputTokens">输入 token 用量（上游未回报时为 null）。</param>
+/// <param name="OutputTokens">输出 token 用量（上游未回报时为 null）。</param>
+/// <param name="Reasoning">思维链摘要，≤2,000 字。</param>
+public sealed record StageRunStats(
+    IReadOnlyList<ChatMessage> Messages,
+    long ElapsedMs,
+    int? InputTokens,
+    int? OutputTokens,
+    string? Reasoning)
+{
+    /// <summary>思维链落库上限（AgentStageRun.Reasoning 字段长度，LC-STD-03 §2.1）。</summary>
+    public const int MaxReasoningChars = 2000;
+
+    public static StageRunStats From(IList<ChatMessage>? messages, UsageDetails? usage, long elapsedMs)
+    {
+        var list = messages?.ToList() ?? [];
+        var reasoning = string.Join("\n", list
+            .SelectMany(message => message.Contents)
+            .OfType<TextReasoningContent>()
+            .Select(content => content.Text))
+            .Trim();
+        return new StageRunStats(list, elapsedMs, ToInt(usage?.InputTokenCount), ToInt(usage?.OutputTokenCount),
+            reasoning.Length == 0 ? null : reasoning[..Math.Min(reasoning.Length, MaxReasoningChars)]);
+    }
+
+    /// <summary>空观测（未调用模型的阶段，如收尾或失败阶段）。</summary>
+    public static StageRunStats Empty { get; } = new([], 0, null, null, null);
+
+    private static int? ToInt(long? value) => value is < int.MinValue or > int.MaxValue
+        ? null
+        : value.HasValue ? (int)value.Value : null;
 }
 
 /// <summary>
@@ -60,6 +105,25 @@ public sealed class TradingCycleContext(
     /// <summary>写工具阶段上下文：与 <see cref="ExecutionToolContext"/> 契约逐字段对齐（Task 7）。</summary>
     public ExecutionToolContext ForStage(string stageRunId) =>
         new(CycleId, stageRunId, Mode, Exchange, Timeframe, Trader, Account, Config, Budget);
+
+    /// <summary>
+    /// 阶段超时缝（LC-STD-01 §6）：返回与调用 token 链接的超时源，秒数取本周期预算的阶段口径；
+    /// 预算未配置阶段超时（&lt;=0）时只链接、不定时。超时经 <see cref="CancellationToken"/> 传播，
+    /// 不得用 <see cref="Task.WhenAny"/> 遗留未取消的任务（调用方负责 dispose）。
+    /// </summary>
+    public CancellationTokenSource StageTimeout(CancellationToken ct, string stage)
+    {
+        var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var seconds = Budget.StageTimeoutSeconds(stage);
+        if (seconds > 0) source.CancelAfter(TimeSpan.FromSeconds(seconds));
+        return source;
+    }
+
+    /// <summary>
+    /// 输入 token 预算闸门（LC-STD-01 §6、LC-STD-05 FLOW-09）：本周期累计输入用量达到预算即超限，
+    /// 后续阶段一律不再发起模型调用，周期按「观望」完成且不下单。
+    /// </summary>
+    public bool TokenBudgetExhausted() => Budget.IsInputTokenBudgetExceeded(Provider);
 
     /// <summary>阶段执行器回存研究简报。</summary>
     internal void Observe(ResearchBrief brief) => Brief = brief;

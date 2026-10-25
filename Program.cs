@@ -37,6 +37,10 @@ builder.Services.AddScoped<DecisionMemoryService>();
 builder.Services.AddScoped<ExchangeTradingService>();
 builder.Services.AddSingleton<TraderRunnerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>());
+// P4 周期宿主（Task 11）：与旧 TraderRunnerService 并存到 P7（Task 18）删除旧链路为止。
+builder.Services.AddScoped<CycleRecorder>();
+builder.Services.AddSingleton<TradingCycleRunner>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TradingCycleRunner>());
 builder.Services.AddSingleton<PositionHistorySyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionHistorySyncService>());
 builder.Services.AddSingleton<AccountStreamService>();

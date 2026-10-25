@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LuckyCat.Agents;
 using LuckyCat.Services;
 using LuckyCat.Tools;
@@ -24,14 +25,28 @@ public sealed class AnalystExecutor(TradingCycleContext ctx, TradingAgentFactory
     public override async ValueTask<ResearchBriefMessage> HandleAsync(
         CycleInput input, IWorkflowContext context, CancellationToken ct)
     {
+        // 输入 token 预算闸（LC-STD-01 §6、FLOW-09）：超限不再发起模型调用，
+        // 空候选出边直接收尾，终态记「观望完成」；不调模型、不产生本阶段记录。
+        if (ctx.TokenBudgetExhausted())
+        {
+            ctx.SetOutcome(new CycleOutcome("completed", "token_budget_exceeded",
+                "输入 token 预算已达上限，后续阶段停止，本周期观望"));
+            return new ResearchBriefMessage(
+                new Contracts.ResearchBrief("输入 token 预算已达上限，本周期观望", [], [], []));
+        }
+
         var agent = factory.Create(client, AgentRole.Analyst, ctx.Config,
             tools.For(AgentRole.Analyst, StageRunId), null);
         var prompt = await ctx.BuildUserPrompt(AgentRole.Analyst, ct);
-        var (brief, _) = await runner.RunAsync<Contracts.ResearchBrief>(agent, prompt, ct);
+        // 阶段超时（LC-STD-01 §6）：超时按 CancellationToken 传播到模型与工具循环，阶段按失败处理。
+        using var stageTimeout = ctx.StageTimeout(ct, Stage);
+        var started = Stopwatch.StartNew();
+        var (brief, response) = await runner.RunAsync<Contracts.ResearchBrief>(agent, prompt, stageTimeout.Token);
+        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
 
         ctx.Observe(brief);
-        await ctx.Recorder.RecordStageAsync(Stage, brief,
-            PromptLibrary.Build(AgentRole.Analyst, ctx.Config), ct);
+        await ctx.Recorder.RecordStageAsync(Stage, StageRunId, brief,
+            PromptLibrary.Build(AgentRole.Analyst, ctx.Config), stats, ct);
 
         if (brief.Candidates.Count == 0)
         {

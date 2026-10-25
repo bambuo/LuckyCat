@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LuckyCat.Agents;
 using LuckyCat.Contracts;
 using LuckyCat.Services;
@@ -25,10 +26,24 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
     public override async ValueTask<ProposalMessage> HandleAsync(
         ResearchBriefMessage input, IWorkflowContext context, CancellationToken ct)
     {
+        // 输入 token 预算闸（LC-STD-01 §6、FLOW-09）：超限不再发起模型调用；
+        // Hold 出边直接收尾，观望完成、不产生提案。
+        if (ctx.TokenBudgetExhausted())
+        {
+            ctx.SetOutcome(new CycleOutcome("completed", "token_budget_exceeded",
+                "输入 token 预算已达上限，后续阶段停止，本周期观望"));
+            return new ProposalMessage(new AgentTradeProposal(ProposalAction.Hold, null, null, null, null,
+                null, null, null, null, "输入 token 预算已达上限，本周期观望", null, null));
+        }
+
         var agent = factory.Create(client, AgentRole.Trader, ctx.Config,
             tools.For(AgentRole.Trader, StageRunId), null);
         var prompt = await PromptLibrary.BuildTraderUserPrompt(ctx, input.Brief, ct);
-        var (proposal, _) = await runner.RunAsync<AgentTradeProposal>(agent, prompt, ct);
+        // 阶段超时（LC-STD-01 §6）：超时按 CancellationToken 传播到模型与工具循环，阶段按失败处理。
+        using var stageTimeout = ctx.StageTimeout(ct, Stage);
+        var started = Stopwatch.StartNew();
+        var (proposal, response) = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
+        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
 
         // 契约校验（LC-STD-01 §4.1 第 3 步）：System.Text.Json 会原样接受越界枚举值，
         // 未定义动作匹配不到任何出边会让周期中途死路；fail-closed 归一化为 Hold 走收尾边，
@@ -39,14 +54,14 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
                 "交易员提案动作越界，本周期已按失败安全终止"));
             var safe = proposal with { Action = ProposalAction.Hold };
             ctx.Observe(safe);
-            await ctx.Recorder.RecordStageAsync(Stage, new ProposalMessage(safe),
-                PromptLibrary.Build(AgentRole.Trader, ctx.Config), ct);
+            await ctx.Recorder.RecordStageAsync(Stage, StageRunId, new ProposalMessage(safe),
+                PromptLibrary.Build(AgentRole.Trader, ctx.Config), stats, ct);
             return new ProposalMessage(safe);
         }
 
         ctx.Observe(proposal);
-        await ctx.Recorder.RecordStageAsync(Stage, new ProposalMessage(proposal),
-            PromptLibrary.Build(AgentRole.Trader, ctx.Config), ct);
+        await ctx.Recorder.RecordStageAsync(Stage, StageRunId, new ProposalMessage(proposal),
+            PromptLibrary.Build(AgentRole.Trader, ctx.Config), stats, ct);
 
         if (proposal.Action == ProposalAction.Hold)
         {

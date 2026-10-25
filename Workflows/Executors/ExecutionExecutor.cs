@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LuckyCat.Agents;
 using LuckyCat.Contracts;
 using LuckyCat.Services;
@@ -35,13 +36,26 @@ public sealed class ExecutionExecutor(TradingCycleContext ctx, TradingAgentFacto
                 $"执行阶段收到非法输入 {input.GetType().Name}，fail-closed 终止"),
         };
 
+        // 输入 token 预算闸（LC-STD-01 §6、FLOW-09）：超限不再发起模型调用；
+        // fail-closed——执行停止、绝不发起写请求，终态记「观望完成」。
+        if (ctx.TokenBudgetExhausted())
+        {
+            ctx.SetOutcome(new CycleOutcome("completed", "token_budget_exceeded",
+                "输入 token 预算已达上限，执行阶段停止（未下单），本周期观望"));
+            return new ExecutionReport("输入 token 预算已达上限，本周期观望，未发起任何写请求", [], [], []);
+        }
+
         var agent = factory.Create(client, AgentRole.Executor, ctx.Config,
             tools.For(AgentRole.Executor, StageRunId), null);
         var prompt = await PromptLibrary.BuildExecutorUserPrompt(ctx, proposal, verdict, ct);
-        var (report, _) = await runner.RunAsync<ExecutionReport>(agent, prompt, ct);
+        // 阶段超时（LC-STD-01 §6）：执行超时同样按失败终止，绝不留下「已提交但阶段未完成」的中间态。
+        using var stageTimeout = ctx.StageTimeout(ct, Stage);
+        var started = Stopwatch.StartNew();
+        var (report, response) = await runner.RunAsync<ExecutionReport>(agent, prompt, stageTimeout.Token);
+        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
 
-        await ctx.Recorder.RecordStageAsync(Stage, report,
-            PromptLibrary.Build(AgentRole.Executor, ctx.Config), ct);
+        await ctx.Recorder.RecordStageAsync(Stage, StageRunId, report,
+            PromptLibrary.Build(AgentRole.Executor, ctx.Config), stats, ct);
 
         ctx.SetOutcome(report.Errors.Count > 0
             ? new CycleOutcome("completed", "execution_errors", string.Join("; ", report.Errors))

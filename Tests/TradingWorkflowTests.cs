@@ -378,7 +378,8 @@ public class TradingWorkflowTests
         public List<(string Role, object Output, string Instructions)> StageRecords { get; } = [];
         public List<(string Status, string? ErrorCode, string? Error)> Completions { get; } = [];
 
-        public Task RecordStageAsync(string role, object output, string instructions, CancellationToken ct)
+        public Task RecordStageAsync(string role, string stageRunId, object output, string instructions,
+            StageRunStats stats, CancellationToken ct)
         {
             Stages.Add(role);
             StageRecords.Add((role, output, instructions));

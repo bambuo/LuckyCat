@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LuckyCat.Agents;
 using LuckyCat.Contracts;
 using LuckyCat.Services;
@@ -26,10 +27,24 @@ public sealed class RiskExecutor(TradingCycleContext ctx, TradingAgentFactory fa
     public override async ValueTask<VerdictMessage> HandleAsync(
         ProposalMessage input, IWorkflowContext context, CancellationToken ct)
     {
+        // 输入 token 预算闸（LC-STD-01 §6、FLOW-09）：超限不再发起模型调用；
+        // fail-closed——按「拒绝」出边直接收尾，不写裁决、不下单。
+        if (ctx.TokenBudgetExhausted())
+        {
+            ctx.SetOutcome(new CycleOutcome("completed", "token_budget_exceeded",
+                "输入 token 预算已达上限，后续阶段停止，本周期观望"));
+            return new VerdictMessage(input.Proposal, new AgentRiskVerdict(RiskDecision.Rejected,
+                ["输入 token 预算已达上限，风控停止，按失败安全拒绝"], null, null, null, null, null, null));
+        }
+
         var agent = factory.Create(client, AgentRole.Risk, ctx.Config,
             tools.For(AgentRole.Risk, StageRunId), null);
         var prompt = await ctx.BuildUserPrompt(AgentRole.Risk, ct);
-        var (verdict, _) = await runner.RunAsync<AgentRiskVerdict>(agent, prompt, ct);
+        // 阶段超时（LC-STD-01 §6、FLOW-08）：风控超时按 fail-closed 处理——阶段失败、不写裁决、不下单。
+        using var stageTimeout = ctx.StageTimeout(ct, Stage);
+        var started = Stopwatch.StartNew();
+        var (verdict, response) = await runner.RunAsync<AgentRiskVerdict>(agent, prompt, stageTimeout.Token);
+        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
 
         // 契约校验（LC-STD-01 §4.1 第 3 步）：同 TraderExecutor，越界 RiskDecision 匹配不到
         // approved/rejected 任一出边会死路；Rejected=0 是有意的安全零值，fail-closed 归一化为 Rejected。
@@ -40,15 +55,15 @@ public sealed class RiskExecutor(TradingCycleContext ctx, TradingAgentFactory fa
             var safeVerdict = verdict with { Decision = RiskDecision.Rejected };
             var safeMessage = new VerdictMessage(input.Proposal, safeVerdict);
             ctx.Observe(safeVerdict);
-            await ctx.Recorder.RecordStageAsync(Stage, safeMessage,
-                PromptLibrary.Build(AgentRole.Risk, ctx.Config), ct);
+            await ctx.Recorder.RecordStageAsync(Stage, StageRunId, safeMessage,
+                PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, ct);
             return safeMessage;
         }
 
         var message = new VerdictMessage(input.Proposal, verdict);
         ctx.Observe(verdict);
-        await ctx.Recorder.RecordStageAsync(Stage, message,
-            PromptLibrary.Build(AgentRole.Risk, ctx.Config), ct);
+        await ctx.Recorder.RecordStageAsync(Stage, StageRunId, message,
+            PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, ct);
 
         if (verdict.Decision == RiskDecision.Rejected)
         {

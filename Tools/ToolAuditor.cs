@@ -7,10 +7,22 @@ using LuckyCat.Services;
 
 namespace LuckyCat.Tools;
 
-/// <summary>单周期工具预算：按角色计数（周期宿主实现；超出即拒绝继续调用）。</summary>
+/// <summary>
+/// 单周期工具与阶段预算：按角色计数（周期宿主实现；超出即拒绝继续调用），并提供阶段超时口径。
+/// 默认不启用阶段超时（返回 0），保持纯计数实现的既有语义；生产实现按策略配置返回 90/90/45/45 秒。
+/// </summary>
 public interface ICycleBudget
 {
     bool TryConsumeTool(string role);
+
+    /// <summary>指定阶段（analyst/trader/risk/executor）的超时秒数；&lt;=0 表示不启用阶段超时。</summary>
+    int StageTimeoutSeconds(string stage) => 0;
+
+    /// <summary>
+    /// 输入 token 预算闸门（LC-STD-01 §6、LC-STD-05 FLOW-09）：本周期累计输入用量达到预算即为超限，
+    /// 后续阶段不再发起模型调用。默认不超限，保持纯计数实现的既有语义。
+    /// </summary>
+    bool IsInputTokenBudgetExceeded(Provider provider) => false;
 }
 
 /// <summary>
