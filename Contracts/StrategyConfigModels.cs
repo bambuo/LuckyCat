@@ -13,6 +13,9 @@ public class StrategyConfig
     public bool DecisionMemoryEnabled { get; set; } = true;
     public bool NewsEnabled { get; set; } = true;
     public string Variant { get; set; } = "balanced";          // balanced | aggressive | conservative | scalping
+    public RoleInstructionConfig RoleInstructions { get; set; } = new();
+    public AgentBudgetConfig AgentBudget { get; set; } = new();
+    public ReviewConfig Review { get; set; } = new();
 }
 
 public class CoinSourceConfig
@@ -127,4 +130,38 @@ public class PromptSectionConfig
     public string Frequency { get; set; } = "";
     public string Entry { get; set; } = "";
     public string Workflow { get; set; } = "";
+}
+
+// 五角色附加指令：拼接在对应角色提示词末尾。
+public class RoleInstructionConfig
+{
+    public string Analyst { get; set; } = "";
+    public string Trader { get; set; } = "";
+    public string Risk { get; set; } = "";
+    public string Executor { get; set; } = "";
+    public string Reviewer { get; set; } = "";
+}
+
+// 智能体预算：阶段超时、工具调用上限与单周期输入 token 预算。
+public class AgentBudgetConfig
+{
+    public int AnalystTimeoutSeconds { get; set; } = 90;
+    public int TraderTimeoutSeconds { get; set; } = 90;
+    public int RiskTimeoutSeconds { get; set; } = 45;
+    public int ExecutorTimeoutSeconds { get; set; } = 45;
+    public int CycleTimeoutSeconds { get; set; } = 300;
+    public int AnalystToolLimit { get; set; } = 12;
+    public int TraderToolLimit { get; set; } = 8;
+    public int RiskToolLimit { get; set; } = 4;
+    public int ExecutorToolLimit { get; set; } = 6;
+    public int CycleToolLimit { get; set; } = 30;
+    public int InputTokenBudget { get; set; } = 150000;
+}
+
+// 每日复盘调度配置。
+public class ReviewConfig
+{
+    public bool Enabled { get; set; } = true;
+    public string LocalTime { get; set; } = "00:10";
+    public int MaxLookbackDays { get; set; } = 30;
 }

@@ -4,6 +4,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Polly;
+using LuckyCat.Contracts;
 using LuckyCat.Data;
 using LuckyCat.Endpoints;
 using LuckyCat.Services;
@@ -16,7 +17,14 @@ builder.WebHost.UseUrls("http://localhost:5210");
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite("Data Source=luckycat.db"));
 builder.Services.ConfigureHttpJsonOptions(options =>
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+{
+    // 属性命名与 ApiJson.Options 对齐（camelCase、大小写不敏感、忽略未映射字段以兼容旧客户端）。
+    options.SerializerOptions.PropertyNamingPolicy = ApiJson.Options.PropertyNamingPolicy;
+    options.SerializerOptions.PropertyNameCaseInsensitive = ApiJson.Options.PropertyNameCaseInsensitive;
+    // 旧端点仍依赖 PascalCase 枚举（ProviderType/ExchangeType 由现前端按值匹配），
+    // 保留旧 JsonStringEnumConverter 直到 P7 端点重写；新代码使用 ApiJson.Options / AgentJson.Options 的 camelCase 枚举。
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 builder.Services.AddScoped<ChatClientFactory>();
 builder.Services.AddScoped<VerificationRunner>();
 builder.Services.AddScoped<ExchangeVerificationRunner>();
