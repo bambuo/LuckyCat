@@ -254,6 +254,24 @@ public class MarketToolsTests
     }
 
     [Fact]
+    public async Task News_with_zero_configured_sources_still_surfaces_builtin_results()
+    {
+        // 内置源（金十）不依赖策略配置：零配置源时也必须调用读取器并把内置源条目送出。
+        // 若有人把「零配置源直接返回」的短路加回来，金十会对所有未配置外部源的策略永久不可见。
+        var reader = new BuiltinOnlyReader();
+        var config = new StrategyConfig { NewsEnabled = true };
+        var tools = new MarketTools(new MarketDataCache(reader), config, new HashSet<string>(["BTC/USDT"]));
+
+        var result = await tools.GetNewsAsync(10, default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        Assert.Equal(1, reader.NewsCalls);
+        var text = result.Data!.Value.GetString()!;
+        Assert.Contains("金十数据", text);
+        Assert.Contains("内置快讯条目", text);
+    }
+
+    [Fact]
     public async Task Auditor_persists_invocation_enforces_budget_and_publishes_failure()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -441,6 +459,23 @@ public class MarketToolsTests
 
     private sealed class FakeReader : StubReader
     {
+    }
+
+    /// <summary>模拟已并入内置源的读取器：不管配置源是否为空，都返回一条金十条目。</summary>
+    private sealed class BuiltinOnlyReader : StubReader
+    {
+        public int NewsCalls { get; private set; }
+
+        public override Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(
+            IEnumerable<ExternalDataSource> sources, CancellationToken ct)
+        {
+            NewsCalls++;
+            return Task.FromResult<IReadOnlyList<ExternalDataResult>>(
+            [
+                new ExternalDataResult("金十数据",
+                    [new ExternalDataItem("2026-10-25T18:23:36Z", "", "内置快讯条目")], null, Now)
+            ]);
+        }
     }
 
     private sealed class BigReader : StubReader

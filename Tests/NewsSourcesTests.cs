@@ -235,6 +235,85 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Cached_result_is_trimmed_to_a_smaller_max_items_request()
+    {
+        var (source, handler) = NewSource((_, _) => Task.FromResult(JsonResponse(Fixture)));
+
+        var wide = await source.FetchAsync(10, default);
+        var narrow = await source.FetchAsync(2, default);
+
+        Assert.Equal(1, handler.Calls);
+        Assert.True(wide.Items.Count > 2);
+        Assert.Equal(2, narrow.Items.Count);
+        Assert.Equal(wide.Items.Take(2).Select(i => i.Text), narrow.Items.Select(i => i.Text));
+    }
+
+    [Fact]
+    public async Task Item_with_unparseable_time_is_skipped_instead_of_timeless()
+    {
+        // 时间格式漂移（如带毫秒/时区后缀）时不得产出 Time="" 的条目：那会让跨源去重退化、
+        // 新快讯在排序里沉底。整批都无法解析时如实报 Problem，漂移因此可见。
+        const string oneBad = """
+        {"status":200,"message":"OK","data":[
+          {"id":"1","time":"2026-10-26 02:23:36.123","important":0,"data":{"content":"带毫秒","title":""}},
+          {"id":"2","time":"2026-10-26 02:20:00","important":0,"data":{"content":"正常条目","title":""}}]}
+        """;
+        var (source, _) = NewSource((_, _) => Task.FromResult(JsonResponse(oneBad)));
+
+        var result = await source.FetchAsync(10, default);
+
+        var item = Assert.Single(result.Items);
+        Assert.Contains("正常条目", item.Text);
+        Assert.Equal("2026-10-25T18:20:00Z", item.Time);
+
+        const string allBad = """
+        {"status":200,"message":"OK","data":[{"id":"1","time":"2026/10/26 02:23:36","important":0,"data":{"content":"全都解析不了","title":""}}]}
+        """;
+        var (badSource, _) = NewSource((_, _) => Task.FromResult(JsonResponse(allBad)));
+        var bad = await badSource.FetchAsync(10, default);
+        Assert.Empty(bad.Items);
+        Assert.NotNull(bad.Problem);
+    }
+
+    [Fact]
+    public async Task Title_only_item_is_kept()
+    {
+        const string body = """
+        {"status":200,"message":"OK","data":[{"id":"1","time":"2026-10-26 02:23:36","important":0,"data":{"content":"","title":"仅标题快讯"}}]}
+        """;
+        var (source, _) = NewSource((_, _) => Task.FromResult(JsonResponse(body)));
+
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Contains("仅标题快讯", Assert.Single(result.Items).Text);
+    }
+
+    [Fact]
+    public async Task Float_important_flag_is_marked()
+    {
+        // 线上曾观察到 1.0 这类浮点编码；只认整型会让它静默失去【重要】标记
+        const string body = """
+        {"status":200,"message":"OK","data":[{"id":"1","time":"2026-10-26 02:23:36","important":1.0,"data":{"content":"浮点重要","title":""}}]}
+        """;
+        var (source, _) = NewSource((_, _) => Task.FromResult(JsonResponse(body)));
+
+        var result = await source.FetchAsync(10, default);
+
+        Assert.StartsWith("【重要】", Assert.Single(result.Items).Text);
+    }
+
+    [Fact]
+    public async Task Bom_prefixed_body_is_parsed()
+    {
+        var (source, _) = NewSource((_, _) => Task.FromResult(JsonResponse("\uFEFF" + Fixture)));
+
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Null(result.Problem);
+        Assert.NotEmpty(result.Items);
+    }
+
+    [Fact]
     public async Task Aggregator_merges_configured_and_builtin_and_dedupes_title_time()
     {
         var configured = new ExternalDataSourceService(new StubFactory(new StubHandler((_, _) =>

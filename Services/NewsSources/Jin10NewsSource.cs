@@ -45,12 +45,13 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
     public async Task<ExternalDataResult> FetchAsync(int maxItems, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (TryGetCached(out var cached)) return cached;
+        var limit = Math.Clamp(maxItems, 1, MaxItems);
+        if (TryGetCached(limit, out var cached)) return cached;
 
         ExternalDataResult result;
         try
         {
-            result = await FetchCoreAsync(Math.Clamp(maxItems, 1, MaxItems), ct).ConfigureAwait(false);
+            result = await FetchCoreAsync(limit, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -119,7 +120,8 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
             buffer.Write(chunk, 0, take);
             total += take;
         }
-        return Encoding.UTF8.GetString(buffer.ToArray());
+        // 个别网关会在 JSON 前带 BOM；JsonDocument 不接受，先剥掉（与 ExternalDataSourceService 同口径）
+        return Encoding.UTF8.GetString(buffer.ToArray()).TrimStart('\uFEFF');
     }
 
     private ExternalDataResult Parse(string body, int maxItems)
@@ -174,11 +176,16 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
 
         var title = StripHtml(ReadString(payload, "title"));
         var text = StripHtml(ReadString(payload, "content"));
-        // 内容为空的条目（VIP 锁定的占位等）没有可用文本，跳过而不是塞一条空快讯
+        // 正文为空时退回标题（部分快讯只有 title）；两者都空才是无可用文本的占位条目
+        if (text.Length == 0) text = title;
         if (text.Length == 0) return null;
 
-        if (IsImportant(element)) text = "【重要】" + text;
+        // 时间格式漂移时宁可整源缺席（Problem 可见），也不产出无时间戳的条目——
+        // 无时间会让跨源去重退化为「文本|空串」，且排序把新快讯沉底。
         var at = ParseBeijingTime(ReadString(element, "time"));
+        if (at is null) return null;
+
+        if (IsImportant(element)) text = "【重要】" + text;
         return (at, new ExternalDataItem(FormatUtc(at), Clamp(title), Clamp(text)));
     }
 
@@ -194,7 +201,7 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
         return marker.ValueKind switch
         {
             JsonValueKind.True => true,
-            JsonValueKind.Number => marker.TryGetInt64(out var number) && number != 0,
+            JsonValueKind.Number => marker.TryGetDouble(out var number) && number != 0,
             JsonValueKind.String => marker.GetString()?.Trim().ToLowerInvariant() is "1" or "true",
             _ => false,
         };
@@ -230,13 +237,16 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
 
     private ExternalDataResult Failure(string reason) => new(Name, [], reason);
 
-    private bool TryGetCached(out ExternalDataResult result)
+    private bool TryGetCached(int maxItems, out ExternalDataResult result)
     {
         lock (_cacheGate)
         {
             if (_cached is not null && DateTime.UtcNow - _cachedAtUtc < CacheTtl)
             {
-                result = _cached;
+                // 缓存按最大条数存放：调用方要得更少时按需裁剪，不越过 INewsSource 的 maxItems 契约
+                result = _cached.Items.Count <= maxItems
+                    ? _cached
+                    : _cached with { Items = _cached.Items.Take(maxItems).ToList() };
                 return true;
             }
         }
