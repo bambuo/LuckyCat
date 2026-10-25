@@ -31,7 +31,12 @@ public sealed class ToolRegistry(
             AgentRole.Trader => TraderTools(audit),
             AgentRole.Risk => RiskTools(audit),
             AgentRole.Executor => ExecutorTools(audit, stageRunId),
-            AgentRole.Reviewer => ReviewerTools(audit),
+            // 结构性禁止（LC-STD-03 §2.1「复盘工具调用 cycleId 为 null」）：For 会把周期的
+            // 非空 cycleId 写进审计器，复盘员走这条路径必然违规，因此在注册位直接拒绝，
+            // 唯一装配入口是静态的 BuildReviewerTools（自带 cycleId=null 审计器）。
+            AgentRole.Reviewer => throw new InvalidOperationException(
+                "复盘员工具不能走周期装配位 For（会带上非空 cycleId，违反 LC-STD-03 §2.1）；" +
+                $"唯一入口是 {nameof(BuildReviewerTools)}。"),
             _ => throw new ArgumentOutOfRangeException(nameof(role), role, "Unknown agent role."),
         };
     }
@@ -104,8 +109,8 @@ public sealed class ToolRegistry(
         ];
     }
 
-    // 复盘员（Task 13 的注册位）：已平仓交易/周期/经验读。
-    private IList<AITool> ReviewerTools(ToolAuditor audit) => BuildReviewerTools(cycle.Accounts, audit);
+    // 复盘员没有注册位：复盘链路不存在交易周期，For(AgentRole.Reviewer) 直接被拒绝（见上），
+    // 工具集只经下方静态入口 BuildReviewerTools 装配。
 
     /// <summary>
     /// 复盘员工具集的<b>唯一</b>装配位（LC-STD-01 §9 输入行 = <see cref="ToolCatalog.Reviewer"/> 三件读工具）。

@@ -109,6 +109,24 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Logged_exception_text_is_scrubbed_of_urls_and_credential_fragments()
+    {
+        // R-13-7 / LC-STD-04 §8：上游异常文本可能自带含密钥的 URL，进日志前必须脱敏。
+        // 测试集没有 Console 捕获缝（宿主直接 Console.WriteLine），故直接钉死脱敏函数本身
+        // ——两处日志站点（ReviewRunner/TradingCycleRunner 的 LogException）都只是这一行调用。
+        var raw = new HttpRequestException(
+            "上游 502 https://api.invalid.test/v1?key=sk-leakedvalue Authorization: Bearer leaked-token 收尾").ToString();
+
+        var line = LogRedaction.Scrub(raw);
+
+        Assert.DoesNotContain("invalid.test", line);
+        Assert.DoesNotContain("sk-leakedvalue", line);
+        Assert.DoesNotContain("leaked-token", line);
+        Assert.Contains("[url]", line);
+        Assert.Contains("上游 502", line); // 非敏感内容保留，脱敏不是打码整行
+    }
+
+    [Fact]
     public async Task Cycles_without_closed_trades_still_run_the_review()
     {
         // §9 跳过要两个「无」同时成立；只有周期也必须复盘。

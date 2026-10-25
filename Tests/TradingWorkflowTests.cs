@@ -209,7 +209,6 @@ public class TradingWorkflowTests
     [InlineData(AgentRole.Trader)]
     [InlineData(AgentRole.Risk)]
     [InlineData(AgentRole.Executor)]
-    [InlineData(AgentRole.Reviewer)]
     public async Task ToolRegistry_exposes_catalog_names_verbatim_per_role(AgentRole role)
     {
         await using var env = await TestEnv.CreateAsync();
@@ -223,6 +222,29 @@ public class TradingWorkflowTests
 
         // 名称↔底层方法绑定同样钉死为字面量：若注册处两行 Fn(...) 连索引一起对调，
         // 名称集合不变但配对断言必红（仅比名称数组抓不到这种交换）。
+        Assert.Equal(expected.Select(b => b.Method),
+            tools.Select(tool => Assert.IsAssignableFrom<AIFunction>(tool).UnderlyingMethod?.Name));
+    }
+
+    [Fact]
+    public async Task Reviewer_tools_assemble_only_through_the_static_entry()
+    {
+        // LC-STD-03 §2.1：复盘工具调用 cycleId 必须为 null，而 For 会把周期的非空 cycleId 写进
+        // 审计器——For(Reviewer) 已在注册位结构性拒绝，唯一装配位是 BuildReviewerTools。
+        // 绑定逐字校验与上方 Theory 同一口径（审计器显式传 cycleId: null）。
+        await using var env = await TestEnv.CreateAsync();
+
+        var rejected = Assert.Throws<InvalidOperationException>(
+            () => env.Registry.For(AgentRole.Reviewer, "stage-run-1"));
+        Assert.Contains(nameof(ToolRegistry.BuildReviewerTools), rejected.Message);
+
+        var audit = new ToolAuditor(env.Db, new SseEventHub(), env.Ctx.Budget, cycleId: null,
+            "stage-run-1", env.Ctx.SseChannel);
+        var tools = ToolRegistry.BuildReviewerTools(env.Ctx.Accounts, audit);
+        var expected = ExpectedToolBindings(AgentRole.Reviewer);
+
+        Assert.Equal(expected.Select(b => b.Name), tools.Select(tool => tool.Name));
+        Assert.Equal(expected.Length, tools.Count);
         Assert.Equal(expected.Select(b => b.Method),
             tools.Select(tool => Assert.IsAssignableFrom<AIFunction>(tool).UnderlyingMethod?.Name));
     }

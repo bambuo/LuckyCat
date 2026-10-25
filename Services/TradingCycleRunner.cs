@@ -632,9 +632,10 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
 
     private static void LogException(string context, Exception? ex)
     {
-        // 上游异常原文只进服务端日志，绝不进入落库数据或 SSE 负载（R-11-1、LC-STD-02 §10）。
+        // 上游异常原文只进服务端日志，绝不进入落库数据或 SSE 负载（R-11-1、LC-STD-02 §10）；
+        // 进日志前同样脱敏——异常文本可能自带含密钥的 URL（LC-STD-04 §8）。
         if (ex is null) return;
-        Console.WriteLine($"[Cycle] {context}：{ex}");
+        Console.WriteLine($"[Cycle] {context}：{LogRedaction.Scrub(ex.ToString())}");
     }
 
     private sealed record StageFailure(string Code, string Summary);

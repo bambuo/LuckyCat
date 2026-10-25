@@ -469,9 +469,10 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
 
     private static void LogException(string context, Exception? ex)
     {
-        // 上游异常原文只进服务端日志，绝不进入落库数据或 SSE 负载（R-13-7、LC-STD-02 §10）。
+        // 上游异常原文只进服务端日志，绝不进入落库数据或 SSE 负载（R-13-7、LC-STD-02 §10）；
+        // 进日志前也要脱敏——异常文本可能自带含密钥的 URL（LC-STD-04 §8）。
         if (ex is null) return;
-        Console.WriteLine($"[Review] {context}：{ex}");
+        Console.WriteLine($"[Review] {context}：{LogRedaction.Scrub(ex.ToString())}");
     }
 
     /// <summary>折行 + 去首尾空白：自由文本一律单行入库，避免换行放大注入正文。</summary>
