@@ -499,6 +499,14 @@ export function openTestRunStream(
           }
         }
       }
+      // 流尾可能残留一个没有空行收尾的半帧；补一个边界再解析一次，避免丢最后一帧
+      if (!disposed && buffer.trim().length > 0) {
+        for (const frame of parseSseFrames(`${buffer}\n\n`).frames) {
+          if (isCycleEventName(frame.event)) {
+            dispatchCycleFrame(frame.event, frame.data, onEvent, options.onError)
+          }
+        }
+      }
       if (!disposed) options.onStatus?.('closed')
     } catch (error) {
       if (disposed) return

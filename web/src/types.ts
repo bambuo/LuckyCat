@@ -753,9 +753,10 @@ export interface VerdictEventPayload {
   validUntilUtc: string | null
 }
 
-/** Tools/ToolAuditor.cs：写工具调用或工具失败；error 仅在 success=false 时非空（固定中文摘要）。 */
+/** Tools/ToolAuditor.cs：写工具调用或工具失败；error 仅在 success=false 时非空（固定中文摘要）。
+ * cycleId 可为 null——复盘工具调用发往交易员频道时没有周期（LC-STD-03 §2.1）。 */
 export interface ToolEventPayload {
-  cycleId: string
+  cycleId: string | null
   stageId: string
   tool: string
   success: boolean
