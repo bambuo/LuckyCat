@@ -106,6 +106,9 @@ public class ReviewRunnerTests(ITestOutputHelper output)
         // 模拟的基础设施异常原文不入库（R-13-7）；行数 Single 已证明没有重复行。
         Assert.DoesNotContain("模拟落库失败", stage.Error);
         Assert.Equal(1, await env.Db.AgentStageRuns.CountAsync());
+        // 一次失败的复盘不得留下经验：成功路径的阶段行+经验行同批提交，保存抛错后那份经验
+        // 仍挂在 ChangeTracker 上，若失败补写不把它摘掉，failed 的复盘也会推进窗口水位（§9 失败行只要留痕）。
+        Assert.Equal(0, await env.Db.TraderLessons.CountAsync());
     }
 
     [Fact]

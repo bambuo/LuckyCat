@@ -418,6 +418,11 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
             Error = Truncate($"{code}：{summary}", 1000),
             CreatedAt = DateTime.UtcNow,
         });
+        // 失败路径不留经验：成功路径把阶段行与经验行放进同一次 SaveChanges，那次保存若抛错，
+        // 尚未提交的 TraderLesson 仍挂在 ChangeTracker 上，会被这次失败补写一起提交出去——
+        // 于是「记为 failed 的复盘」照样推进窗口水位（WindowStartAsync 读 TraderLesson.PeriodEnd），
+        // 等于静默吞掉那段数据。§9 失败行只要 AgentStageRun 留痕。
+        DiscardPendingLessons(db);
         await db.SaveChangesAsync(CancellationToken.None);
 
         RecordDuration(trader, elapsed, FailedStatus, toolCalls);
@@ -446,6 +451,18 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
         }
 
         db.AgentStageRuns.Add(row);
+    }
+
+    /// <summary>
+    /// 丢弃尚未提交的经验行（仅 <see cref="EntityState.Added"/>）：一次复盘失败只能留下阶段行。
+    /// 已提交的经验不动——那是既成事实，也不能被后续宿主异常回收。
+    /// </summary>
+    private static void DiscardPendingLessons(AppDbContext db)
+    {
+        foreach (var entry in db.ChangeTracker.Entries<TraderLesson>())
+        {
+            if (entry.State == EntityState.Added) entry.State = EntityState.Detached;
+        }
     }
     /// <summary>复盘耗时（LC-STD-01 §10「复盘耗时」）：标签只有状态/角色/工具次数，不含账户与密钥。</summary>
     private static void RecordDuration(Trader trader, long elapsedMs, string status, int toolCalls)
