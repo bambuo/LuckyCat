@@ -88,6 +88,27 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Failed_persist_still_lands_exactly_one_failed_stage_row()
+    {
+        // 钉死 AddStageRun 的幂等写（6cfccc2）：成功路径的落库在阶段行已 Add 未提交时抛错，
+        // 宿主紧随其后的失败补写在同一个 ChangeTracker 里改写那份行，而不是再 Add 一份撞
+        // EF 身份冲突——「记录失败」这件事本身绝不能丢：阶段行恰好 1 条、状态 failed、错误码稳定。
+        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1, failFirstSave: true);
+
+        var result = await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal("failed", result.Status);
+        Assert.Equal("stage_failed", result.ErrorCode);
+        var stage = await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "reviewer");
+        Assert.Equal("failed", stage.Status);
+        Assert.Null(stage.CycleId);
+        Assert.StartsWith("stage_failed：", stage.Error);
+        // 模拟的基础设施异常原文不入库（R-13-7）；行数 Single 已证明没有重复行。
+        Assert.DoesNotContain("模拟落库失败", stage.Error);
+        Assert.Equal(1, await env.Db.AgentStageRuns.CountAsync());
+    }
+
+    [Fact]
     public async Task Cycles_without_closed_trades_still_run_the_review()
     {
         // §9 跳过要两个「无」同时成立；只有周期也必须复盘。
@@ -104,7 +125,7 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     {
         // 窗口=上次成功复盘之后：45 天前平仓、10 天前已复盘 → 窗口内无数据。
         await using var env = await ReviewEnv.CreateAsync();
-        env.SeedLesson(TimeSpan.FromDays(10), "上一轮经验");
+        env.SeedLesson(DateTime.UtcNow.AddDays(-10), "上一轮经验");
         env.Reader.AddClosedTrade(DateTime.UtcNow.AddDays(-45));
 
         var result = await env.Runner.RunAsync(env.Trader, default);
@@ -121,7 +142,7 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     {
         await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
         var lastReview = DateTime.UtcNow.AddDays(-12);
-        env.SeedLesson(TimeSpan.FromDays(12), "上一轮经验", lastReview);
+        env.SeedLesson(lastReview, "上一轮经验");
 
         var result = await env.Runner.RunAsync(env.Trader, default);
 
@@ -419,10 +440,18 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     public async Task Daily_guard_is_restart_safe()
     {
         // 重启安全：进程内状态全空，但库里今天已有一次失败复盘 → 同日不再复发。
-        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
-        env.SeedReviewStage("failed", TimeSpan.FromHours(1));
+        // LC-STD-05 §1.5：时钟与种子行都取自同一个合成时刻（不用当前时间做断言输入）；
+        // 双侧断言：同一时刻无阶段行的新夹具必须派发 1，证明这里的「0」不是「谁都还没到点」的假绿。
+        var now = LocalAt("10:00");
 
-        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default));
+        await using var unseeded = await ReviewEnv.CreateAsync(closedTrades: 1);
+        Assert.Equal(1, await unseeded.CreateScheduler().RunTickAsync(now, default));
+        Assert.Single(unseeded.Db.TraderLessons);
+
+        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
+        env.SeedReviewStage("failed", now - TimeSpan.FromHours(1));
+
+        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(now, default));
         Assert.Empty(env.Db.TraderLessons);
     }
 
@@ -430,11 +459,17 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     public async Task Scheduler_skips_a_day_that_already_produced_a_lesson()
     {
         // 今天已成功复盘（经验落库）→ 重启后的 tick 也不得复发。
-        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
-        env.SeedReviewStage("completed", TimeSpan.FromHours(2));
-        env.SeedLesson(TimeSpan.FromHours(2), "今天的经验");
+        // 双侧断言同上：同一合成时刻，无当日行的新夹具必须派发 1。
+        var now = LocalAt("10:00");
 
-        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default));
+        await using var unseeded = await ReviewEnv.CreateAsync(closedTrades: 1);
+        Assert.Equal(1, await unseeded.CreateScheduler().RunTickAsync(now, default));
+
+        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
+        env.SeedReviewStage("completed", now - TimeSpan.FromHours(2));
+        env.SeedLesson(now - TimeSpan.FromHours(2), "今天的经验");
+
+        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(now, default));
     }
 
     [Fact]
@@ -454,12 +489,21 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     [Fact]
     public async Task Scheduler_skips_traders_that_are_not_running()
     {
+        // 双侧断言：同一合成时刻先「未运行 → 0」，再翻回运行 → 1，
+        // 证明「0」是 IsRunning 挡下的，而不是整个 tick 谁都还没到点。
+        var now = LocalAt("10:00");
         await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
         env.Trader.IsRunning = false;
         env.WriteTrader();
 
-        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default));
+        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(now, default));
         Assert.Empty(env.Db.TraderLessons);
+
+        env.Trader.IsRunning = true;
+        env.WriteTrader();
+
+        Assert.Equal(1, await env.CreateScheduler().RunTickAsync(now, default));
+        Assert.Single(env.Db.TraderLessons);
     }
 
     [Fact]
@@ -467,11 +511,12 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     {
         // §9 失败=记录失败、不阻塞交易、下个触发点重试：一个交易员失败不影响其他交易员。
         // 脚本用 throw_first（只有第一个交易员的上游抛错），否则两个交易员都失败、
-        // 与「另一个交易员仍产出经验」这组断言自相矛盾。
+        // 与「另一个交易员仍产出经验」这组断言自相矛盾。时钟取合成时刻（LC-STD-05 §1.5）。
+        var now = LocalAt("10:00");
         await using var env = await ReviewEnv.CreateAsync(closedTrades: 1, behavior: "throw_first");
         env.AddSecondRunningTrader();
 
-        var dispatched = await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default);
+        var dispatched = await env.CreateScheduler().RunTickAsync(now, default);
 
         Assert.Equal(2, dispatched);
         Assert.Equal(2, await env.Db.AgentStageRuns.Where(r => r.Role == "reviewer").CountAsync());
@@ -483,11 +528,20 @@ public class ReviewRunnerTests(ITestOutputHelper output)
     [Fact]
     public async Task Scheduler_tolerates_a_misconfigured_local_time()
     {
+        // 脏 localTime 按「未到点」容忍：不派发、不抛给整个 tick。
+        // 双侧断言：同一合成时刻把配置改回合法的 "00:10" 必须派发 1，证明「0」来自脏配置本身。
+        var now = LocalAt("10:00");
         await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
         env.Config.Review.LocalTime = "25:99";
         env.WriteConfig();
 
-        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default));
+        Assert.Equal(0, await env.CreateScheduler().RunTickAsync(now, default));
+
+        env.Config.Review.LocalTime = "00:10";
+        env.WriteConfig();
+
+        Assert.Equal(1, await env.CreateScheduler().RunTickAsync(now, default));
+        Assert.Single(env.Db.TraderLessons);
     }
 
     // —— 标准条款补测：窗口交给模型（§9 窗口行）/ 复盘只读边界（§1.35、§9 限制行）/
@@ -542,7 +596,7 @@ public class ReviewRunnerTests(ITestOutputHelper output)
         // §9 注入行（最近 3 份、合计 ≤1,200 字）必须对「复盘写出的最大经验」依然成立：
         // summary 取 LC-STD-03 §2.1 的列上限 2,000 字，注入块仍要裁到 1,200 字以内。
         await using var env = await ReviewEnv.CreateAsync();
-        env.SeedLesson(TimeSpan.FromHours(1), new string('总', 2_000));
+        env.SeedLesson(DateTime.UtcNow.AddHours(-1), new string('总', 2_000));
 
         var memory = new TradingMemoryContextProvider(env.Reader, env.Config);
         var blocks = await memory.BuildContextAsync(default);
@@ -597,7 +651,8 @@ public class ReviewRunnerTests(ITestOutputHelper output)
         private SqliteConnection Connection { get; init; } = null!;
 
         public static async Task<ReviewEnv> CreateAsync(int closedTrades = 0, int cycles = 0,
-            string behavior = "report", int timeoutSeconds = ReviewRunner.DefaultTimeoutSeconds)
+            string behavior = "report", int timeoutSeconds = ReviewRunner.DefaultTimeoutSeconds,
+            bool failFirstSave = false)
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
@@ -641,7 +696,8 @@ public class ReviewRunnerTests(ITestOutputHelper output)
 
             var client = new ScriptedReviewClient(behavior);
             var services = new ServiceCollection();
-            services.AddScoped(_ => new AppDbContext(options));
+            if (failFirstSave) services.AddScoped<AppDbContext>(_ => new FailFirstSaveDbContext(options));
+            else services.AddScoped(_ => new AppDbContext(options));
             services.AddSingleton(hub);
             services.AddSingleton<ChatClientFactory>(client);
             var serviceProvider = services.BuildServiceProvider();
@@ -664,10 +720,10 @@ public class ReviewRunnerTests(ITestOutputHelper output)
             };
         }
 
-        public void SeedLesson(TimeSpan age, string summary, DateTime? createdAt = null)
+        /// <summary>种一份历史经验（绝对时刻入参，LC-STD-05 §1.5：行时刻由调用方给定，不从当前时钟派生）。</summary>
+        public void SeedLesson(DateTime at, string summary)
         {
             var stageId = Ids.NewUlid();
-            var at = createdAt ?? DateTime.UtcNow - age;
             Db.AgentStageRuns.Add(new AgentStageRun
             {
                 Id = stageId, CycleId = null, TraderId = Trader.Id, Role = "reviewer", Status = "completed",
@@ -684,8 +740,8 @@ public class ReviewRunnerTests(ITestOutputHelper output)
             Db.SaveChanges();
         }
 
-        /// <summary>只留阶段行（不写经验）：用于「今天已失败/已跳过」的重启安全守卫。</summary>
-        public void SeedReviewStage(string status, TimeSpan age)
+        /// <summary>只留阶段行（不写经验）：用于「今天已失败/已跳过」的重启安全守卫；绝对时刻入参同上。</summary>
+        public void SeedReviewStage(string status, DateTime createdAt)
         {
             Db.AgentStageRuns.Add(new AgentStageRun
             {
@@ -693,7 +749,7 @@ public class ReviewRunnerTests(ITestOutputHelper output)
                 ProviderName = Provider.Name, Model = Provider.Model,
                 Instructions = PromptLibrary.Build(AgentRole.Reviewer, Config),
                 TranscriptJson = "[]", ElapsedMs = 5, ToolCallCount = 0,
-                CreatedAt = DateTime.UtcNow - age,
+                CreatedAt = createdAt,
                 Error = status == "failed" ? "stage_failed：复盘阶段执行失败，本轮未产出经验" : null
             });
             Db.SaveChanges();
@@ -738,6 +794,23 @@ public class ReviewRunnerTests(ITestOutputHelper output)
 
             protected override IAccountReader CreateReader(IServiceProvider services, Trader trader,
                 ExchangeAccount account, StrategyConfig config, string memoryFingerprint) => reader;
+        }
+
+        /// <summary>
+        /// 模拟「落库基础设施第一次写就抛错」（数据库不可用等，6cfccc2 的成因）：
+        /// 只让第一次 <see cref="SaveChangesAsync"/> 失败，之后一律走基类——失败补写必须能在同一
+        /// ChangeTracker 里把未提交的阶段行改写为 failed 并落库，而不是再 <c>Add</c> 一份撞身份。
+        /// </summary>
+        private sealed class FailFirstSaveDbContext(DbContextOptions<AppDbContext> options)
+            : AppDbContext(options)
+        {
+            private int _saveCalls;
+
+            public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
+                ++_saveCalls == 1
+                    ? Task.FromException<int>(new DbUpdateException("模拟落库失败",
+                        new InvalidOperationException("database is locked")))
+                    : base.SaveChangesAsync(cancellationToken);
         }
     }
 
