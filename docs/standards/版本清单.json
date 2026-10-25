@@ -12,56 +12,56 @@
       "id": "LC-SPEC-001",
       "path": "docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md",
       "version": "1.0.0",
-      "status": "定稿（待实施）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-00",
       "path": "docs/standards/00-规范索引与版本.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-01",
       "path": "docs/standards/01-系统架构与多智能体工作流规范.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-02",
       "path": "docs/standards/02-工具契约与交易安全规范.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-03",
       "path": "docs/standards/03-数据模型与接口契约规范.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-04",
       "path": "docs/standards/04-提示词与记忆规范.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-05",
       "path": "docs/standards/05-测试与验收规范.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     },
     {
       "id": "LC-STD-06",
       "path": "docs/standards/06-外部标准与依赖版本.md",
       "version": "1.0.0",
-      "status": "定稿（随实现生效）",
+      "status": "生效",
       "normative": true
     }
   ],

@@ -2,52 +2,62 @@
   <img src="web/public/logo.svg" width="88" alt="招财猫" />
   <h1>招财猫 · LuckyCat</h1>
   <p>AI 自主决策的加密货币交易系统<br/>
-  <sub>.NET 10 · Minimal API · SQLite ｜ Vue 3 · Vite · Arco Design ｜ Microsoft.Extensions.AI · CryptoClients.Net</sub></p>
+  <sub>.NET 10 · Minimal API · SQLite ｜ Vue 3 · Vite · Arco Design ｜ Microsoft Agent Framework · CryptoClients.Net</sub></p>
 </div>
 
 ---
 
-招财猫把「模型提供商、交易所账户、交易策略」组合成一个个 **AI 交易员**：按扫描间隔拉取真实行情与技术指标，组装带风控纪律与决策记忆的提示词，交给大模型产出可执行的买卖决策，经风控校验后按**实盘 / 演练**两种模式执行，并把每一轮决策连同原始响应、token 与耗时实时推送到交易看板。
-
-![交易看板](docs/images/dashboard.png)
+招财猫把「模型提供商、交易所账户、交易策略」组合成一个个 **AI 交易员**。交易员启动后按扫描间隔进入**交易周期**：分析师、交易员、风控官、执行员四个智能体依次完成研究、提案、裁决与执行；独立的复盘员按本地时刻或手动触发，总结已平仓交易与周期，沉淀经验并注入后续交易员上下文。周期、阶段、工具调用、提案、裁决、订单与经验全部落库，并通过 SSE 推送到看板、周期历史与复盘经验页。
 
 ## 功能一览
 
-**🤖 AI 交易员** — 绑定「模型 + 交易所账户 + 策略」，后台循环自主运行；启动/停止/编辑即生效，应用重启自动恢复运行中的交易员；同一账户多交易员的执行串行，避免绕过风控。
+**AI 交易员** — 绑定「模型 + 交易所账户 + 策略」，启动后由后台循环自主运行；启动、停止、编辑即生效，应用重启自动恢复运行中的交易员；同一账户的写操作串行，避免绕过风控。
 
-**🧪 策略工作室** — 可视化配置：策略类型（AI 智能交易 / AI 网格交易<sup>暂不自动执行</sup>）、币种来源（静态列表 / 评分榜 / OI 增减榜 / 混合）、技术指标、风控参数、提示词编辑与附加提示；支持 **Prompt 预览** 与 **AI 测试**（真实模型干跑、不产生交易）。
+**多智能体工作流** — 分析师（研究简报）→ 交易员（`open` / `close` / `hold` 提案）→ 风控官（仅 `open`，批准并给出执行边界）→ 执行员（写工具硬闸）；`hold` 与风控拒绝直接收尾，`close` 跳过风控。每阶段有独立超时与工具上限，每周期有输入 token 预算。
 
-**🔌 模型提供商** — 内置常见预设（DeepSeek 等），支持 OpenAI 兼容 / Azure OpenAI / Ollama 本地模型；思维链三态控制；内置四项连接验证（基础对话 / 流式 / 工具调用 / JSON 输出）。
+**策略工作室** — 配置币种来源（静态列表 / 评分榜 / OI 增减榜 / 混合）、技术指标、风控参数、四段提示词、五角色追加指令、智能体预算与每日复盘；支持五角色提示词预览与试运行（真实工作流、合成账户、不触达交易）。
 
-**🏦 加密交易所** — 基于 CryptoClients.Net 接入多家 CEX（Binance · Gate.io · Bybit · OKX · Bitget · KuCoin 等）；管理 API 凭据（掩码存储与展示、留空不改），连接验证覆盖行情连通与余额查询；页面展示出口 IP 便于配置 Key 白名单，Gate.io 等交易所的实时流需要用户 UID。
+**模型提供商** — 内置常见预设，支持 OpenAI 兼容 / Azure OpenAI / Ollama；思维链三态控制；四项连接验证（基础对话 / 流式 / 工具调用 / JSON 输出），工具调用验证通过后才能试运行。
 
-**📊 交易看板** — 净值曲线、持仓、最近决策流（含原始响应、提示词、评分、耗时与 token）；SSE 秒推 + 断线自动重连看门狗，持仓与未实现盈亏由交易所 WS 实时驱动。
+**加密交易所** — 基于 CryptoClients.Net 接入 Binance · Gate.io · Bybit · OKX · Bitget · KuCoin；API 凭据掩码存储与展示、留空不改；连接验证覆盖行情连通与余额查询；展示出口 IP 便于配置 Key 白名单，Gate.io 实时流需要用户 UID。
 
-**🛡 风控与纪律** — 执行层强制校验杠杆、仓位、单笔风险、总保证金占用、最大持仓数与最小金额；连亏两笔仓位上限减半、三笔停手至次日；手续费未知或仓位历史同步失败时禁止开新仓（仍可平仓）；成功决策与失败轮次分离归档为决策记忆，注入下一轮且可追溯。
+**看板与审计** — 净值曲线、持仓、最新周期的阶段、提案、裁决与订单；已平仓历史与统计；周期历史可展开阶段详情与工具调用；复盘经验页汇总复盘记录与经验；SSE 秒推并断线重连，持仓与未实现盈亏由交易所 WS 驱动。
 
-**🔭 可观测性** — OpenTelemetry 全套埋点：`trader.cycle` / `ai.call` / `exchange.fetch` 追踪（含 GenAI 语义约定）、决策数 / AI 耗时 / token / 行情重试等指标、日志按级别过滤导出；OTLP 与控制台导出按环境变量启用，无收集端时零噪声。
+**风控与纪律** — 执行层强制校验持仓数、杠杆、仓位、单笔风险、成本后盈亏比、保证金占用、最小金额与执行价偏离；连亏两笔仓位上限减半、三笔停手至次日；当日手续费缺失或触发停手时禁止开新仓，仍可平仓。
 
-## 界面速览
+**可观测性** — OpenTelemetry 追踪 `trader.cycle` / `ai.call` / `exchange.fetch`（含 GenAI 语义约定），周期、AI 耗时、token、行情失败与重试等指标；OTLP 与控制台导出按环境变量启用，无收集端时零噪声。
 
-| AI 交易员 | 策略工作室 |
+## 交易工作流
+
+| 阶段 | 角色 | 职责 | 去向 |
+| --- | --- | --- | --- |
+| S1 | 分析师 | 在候选池内取行情、指标、情绪与新闻，产出研究简报；不读账户、不给出下单指令 | 有候选 → 交易员；无候选 → 收尾（`skipped`） |
+| S2 | 交易员 | 结合简报、账户、持仓、历史提案与经验，产出 `open` / `close` / `hold` 提案 | `hold` → 收尾；`open` → 风控官；`close` → 执行员 |
+| S3 | 风控官 | 只复核 `open`，批准或拒绝，并给出仓位、杠杆、价格带与有效期边界；数据缺失时拒绝 | 批准 → 执行员；拒绝或失败 → 收尾，不下单 |
+| S4 | 执行员 | 在批准边界内提交开仓；平仓直接执行；工具错误如实报告 | 提交完成 → 收尾 |
+
+收尾执行器不调用模型，只负责落库与 SSE。复盘员是独立任务，不属于四阶段：只读已平仓交易、周期与经验，输出 `TraderLesson`，不修改策略、风控或交易员状态；最近 3 份经验注入后续交易员上下文。
+
+角色、工具、数据、提示词与测试的强制标准见 [规范索引与版本](docs/standards/00-规范索引与版本.md)。
+
+## 安全边界
+
+| 边界 | 规则 |
 | --- | --- |
-| <img src="docs/images/traders.png" alt="AI 交易员" /> | <img src="docs/images/strategy-studio.png" alt="策略工作室" /> |
-| 模型、交易所与交易员集中管理，入口即管理 | 可视化配置 + Prompt 预览（5594 字符的完整提示词） |
+| 开仓 | 必须有 `approved` 风控裁决且未过期，参数在批准边界内；执行时在账户锁内重读账户并重跑风控 |
+| 平仓 | 降险动作，跳过风控裁决；仍校验持仓、行情新鲜度与写工具硬闸 |
+| 写工具 | `place_order` 按固定顺序执行 12 步硬闸；`close_position` 走其中适用步骤；`cancel_order` 校验归属、未成交与账户锁。模型不能指定账户或交易员，工具从周期作用域绑定 |
+| 试运行 | 使用合成账户、`trigger=test`、`mode=dry`，周期的 `traderId` / `exchangeAccountId` 为 `null`；写工具的周期归属校验 fail-closed，不会产生订单事件，也不会触达交易所写接口 |
+| 演练 / 实盘 | 演练不提交交易或账户写请求，按最新价与配置成本模拟成交；实盘真实提交，订单以确定性客户端订单号与唯一索引防重 |
+| 工具权限 | 仅提供 `place_order` / `close_position` / `cancel_order`；没有提币、划转、改杠杆或改 API Key 的工具 |
 
-| 模型提供商 | 交易所账户 |
-| --- | --- |
-| <img src="docs/images/providers.png" alt="模型提供商" /> | <img src="docs/images/exchanges.png" alt="交易所账户" /> |
-| 从交易员页进入：预设 / Base URL / 模型名 / 密钥 | 从交易员页进入：API Key / Secret / UID |
+## 交易周期
 
-## 系统架构
+触发方式有三种：交易员启动后立即执行首个周期，并按扫描间隔（3–60 分钟）继续（`schedule`）；手动平仓创建 `trigger=manual` 周期（无 AI 阶段，复用平仓写工具）；工作室试运行创建 `trigger=test` 周期。同一交易员同时最多一个周期，同一账户的写操作串行。
 
-![系统架构](docs/images/architecture.svg)
+结果分别落在 `TradingCycles`（周期终态与用量）、`AgentStageRuns`（阶段指令、消息、工具调用摘要、token 与耗时）、`TradeProposals`（提案）、`RiskVerdicts`（裁决与批准边界）、`TraderOrders`（订单与模拟标记）、`TraderLessons`（复盘经验）。看板展示最新周期，周期历史展示阶段与工具，复盘经验页展示复盘记录与经验。
 
-## 决策周期
-
-每一轮运行都走同一条流水线：**数据准备 → 提示词组装 → AI 决策 → 风控校验 → 执行 → 落库与推送**。数据准备失败会记录为失败轮次（不伪造提示词与响应）；被风控拒绝的方案整体作废；成功与失败都不影响下一轮循环。
-
-![交易员决策周期](docs/images/trader-cycle.svg)
+复盘按每个交易员策略中的 `review` 配置在服务器本地时刻触发（默认 00:10），也可在复盘经验页手动触发；窗口自上次成功复盘起、最多回看 30 天，没有可复盘数据时记为 `skipped`。
 
 ## 快速开始
 
@@ -59,7 +69,7 @@
 ### 启动后端
 
 ```bash
-dotnet run            # http://localhost:5210，首次运行自动创建 SQLite 库（luckycat.db）
+dotnet run            # http://localhost:5210，空库首次运行自动建表（EnsureCreated）
 ```
 
 ### 启动前端
@@ -67,15 +77,15 @@ dotnet run            # http://localhost:5210，首次运行自动创建 SQLite 
 ```bash
 cd web
 bun install
-bun dev               # http://localhost:5173，/api 已代理到 5210
+bun run dev           # http://localhost:5173，/api 已代理到 5210
 ```
 
 ### 首次使用
 
-1. **AI 交易员** → 添加模型：选择预设或填写 Base URL / 模型名 / API Key，点击「验证」确认连通；
-2. 同页 → 添加交易所：填入 API Key / Secret（Gate.io 等实时流需补 UID；只做 REST 查询可留空），「验证」通过即完成；
-3. **策略工作室** → 新建或导入策略，先「生成 Prompt」预览或跑一次 AI 测试，再激活；
-4. **AI 交易员** → 创建交易员（模型 + 账户 + 策略）→ 启动，进入看板观察决策流。
+1. **AI 交易员** → 添加模型：选择预设或填写 Base URL / 模型名 / API Key，点击「验证」确认四项检查通过（试运行与正式周期需要工具调用验证通过）；
+2. 同页 → 添加交易所：填入 API Key / Secret（Gate.io 实时流需补 UID；只做 REST 查询可留空），「验证」通过即完成；
+3. **策略工作室** → 新建或导入策略，先预览五角色提示词或跑一次试运行，再激活；
+4. **AI 交易员** → 创建交易员（模型 + 账户 + 策略，选择演练或实盘，扫描间隔 3–60 分钟）→ 启动，在看板观察周期与阶段事件。
 
 > 建议先在**演练**模式下跑通完整链路，再切换实盘。前端生产构建 `bun run build` 产出 `web/dist`，可由任意静态服务器托管并反向代理 `/api`。
 
@@ -83,40 +93,43 @@ bun dev               # http://localhost:5173，/api 已代理到 5210
 
 ```text
 LuckyCat/
+├── Agents/         # 五角色智能体、提示词与角色指令
+├── Tools/          # 只读工具、写工具硬闸、工具审计与返回信封
+├── Workflows/      # 交易周期图、阶段执行器与收尾
+├── Memory/         # 记忆与经验注入、复盘调度
 ├── Contracts/      # API 契约、SSE 事件与策略配置模型
 ├── Data/           # EF Core DbContext（SQLite）
-├── Endpoints/      # Minimal API 端点：providers / exchanges / strategies / traders
-├── Models/         # 实体：提供商、交易所账户、策略、交易员、决策记录、订单…
-├── Services/       # 决策循环、行情与指标、提示词、风控、交易执行、SSE、遥测
+├── Endpoints/      # Minimal API：providers / exchanges / strategies / traders / cycles
+├── Models/         # 实体：提供商、账户、策略、交易员、周期、阶段、提案、裁决、订单、经验…
+├── Services/       # 行情、风控、执行网关、周期记录、SSE、遥测
 ├── Tests/          # xUnit 测试（LuckyCat.Tests）
-├── docs/           # 工程文档与配图（docs/images）
+├── docs/           # 规范、设计、SQL 与示例策略
 ├── web/            # Vue 3 + TypeScript + Vite 前端
 ├── Program.cs      # 装配：EF Core、HTTP 弹性管道、OpenTelemetry、端点映射
 └── LuckyCat.csproj
 ```
 
+## 数据库与迁移
+
+- **全新空库**：直接启动应用，`EnsureCreated` 按当前 EF 模型建表，不需要执行脚本。
+- **已有库**：先停服务并备份数据库，再执行 [`docs/sql/2026-10-26-多智能体新表.sql`](docs/sql/2026-10-26-多智能体新表.sql)。脚本用于存量库：新建多智能体表并给存量表补列；其中 `ALTER TABLE` 是一次性语句，重复执行会报列已存在/已删除。历史决策表不再读写，清理是可选项，默认不删数据。
+
 ## 测试
 
 ```bash
-dotnet test Tests/LuckyCat.Tests.csproj   # 56 项：拒单边界、连亏锁定、Prompt 预览、记忆隔离等
+dotnet test Tests/LuckyCat.Tests.csproj   # 417 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
 cd web && bun run build                   # 前端类型检查与构建
 ```
 
-回归测试使用独立内存 SQLite、模拟订单提交端口和无后台交易员的临时 HTTP 宿主，**不连接真实数据库、交易所或模型**。
+回归测试使用独立内存 SQLite、模拟订单提交端口和临时 HTTP 宿主，不连接真实数据库、交易所或模型。
 
 ## 文档
 
-- [提示词与风控工程化说明](docs/prompt-risk-controls.md) —— 风控政策、决策记忆与提示词版本化的设计记录
+- [规范索引与版本（LC-STD-00）](docs/standards/00-规范索引与版本.md) —— 文档地图、版本规则、状态生命周期与变更传播矩阵；各角色、工具、数据、提示词与测试标准从这里进入
+- [多智能体重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易工作流、复盘、工具安全、数据与前端契约
 - [示例策略：日内顺势回调](docs/strategies/intraday-trend-pullback.md) —— 可直接导入策略工作室
-
-### 重构设计与规范（待实施）
-
-以下文档描述基于 Microsoft Agent Framework 的多智能体目标架构，**尚未落地**；当前代码仍为单轮提示词实现。
-
-- [重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易工作流与复盘、工具安全、数据与前端改造、实施阶段
-- [规范索引与版本（LC-STD-00）](docs/standards/00-规范索引与版本.md) —— 文档地图、版本规则、变更传播矩阵
-- [外部标准与依赖版本（LC-STD-06）](docs/standards/06-外部标准与依赖版本.md) —— 锁定的外部规范、NuGet 与前端依赖
-- [机器可读版本清单](docs/standards/版本清单.json) —— 文档、外部标准与依赖版本的事实源
+- [存量库建表与补列脚本](docs/sql/2026-10-26-多智能体新表.sql)
+- [机器可读版本清单](docs/standards/版本清单.json)
 
 ## 风险提示
 
