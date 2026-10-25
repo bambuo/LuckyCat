@@ -109,6 +109,15 @@ cd web && bun run build                   # 前端类型检查与构建
 - [提示词与风控工程化说明](docs/prompt-risk-controls.md) —— 风控政策、决策记忆与提示词版本化的设计记录
 - [示例策略：日内顺势回调](docs/strategies/intraday-trend-pullback.md) —— 可直接导入策略工作室
 
+### 重构设计与规范（待实施）
+
+以下文档描述基于 Microsoft Agent Framework 的多智能体目标架构，**尚未落地**；当前代码仍为单轮提示词实现。
+
+- [重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易流水线与复盘、工具安全、数据与前端改造、实施阶段
+- [规范索引与版本（LC-STD-00）](docs/standards/00-规范索引与版本.md) —— 文档地图、版本规则、变更传播矩阵
+- [外部标准与依赖版本（LC-STD-06）](docs/standards/06-外部标准与依赖版本.md) —— 锁定的外部规范、NuGet 与前端依赖
+- [机器可读版本清单](docs/standards/版本清单.json) —— 文档、外部标准与依赖版本的事实源
+
 ## 风险提示
 
 本项目是自动化交易工具：AI 决策与程序化下单存在亏损风险，实盘前请先用演练模式充分验证策略。交易所 API Key 建议只授予交易权限并绑定 IP 白名单，**切勿开启提币权限**。
