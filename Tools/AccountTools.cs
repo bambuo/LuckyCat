@@ -92,15 +92,16 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         decimal usedMargin;
         if (positions.Success)
         {
-            usedMargin = UsedMargin(snapshot, positions.Positions);
-            if (positions.Positions.Any(position => position.Leverage is null or <= 0))
+            var estimate = MarginMath.Estimate(snapshot, positions.Positions);
+            usedMargin = estimate.UsedMargin;
+            if (!estimate.Complete)
             {
-                warnings.Add("部分持仓杠杆缺席，已用保证金按账户差额估算");
+                warnings.Add("部分持仓杠杆或未实现盈亏缺席，已用保证金按账户差额估算");
             }
         }
         else
         {
-            usedMargin = Math.Max(0m, snapshot.UsdtEquity - snapshot.UsdtAvailable);
+            usedMargin = MarginMath.Estimate(snapshot, []).UsedMargin;
             warnings.Add("持仓不可读，已用保证金按权益-可用估算");
         }
 
@@ -198,7 +199,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         }
 
         var fetchedAt = now.ToString("O", CultureInfo.InvariantCulture);
-        return ToolEnvelope.SuccessLines(entries.Select(RenderMemory).ToList(), now, "live",
+        return ToolEnvelope.SuccessLines(entries.Select(RenderMemory).Select(Escape).ToList(), now, "live",
             [UntrustedWarning], header: $"<untrusted source=\"decision_memory\" fetchedAt=\"{fetchedAt}\">",
             footer: "</untrusted>");
     }
@@ -269,7 +270,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         }
 
         var parseFailed = false;
-        var lines = lessons.Select(lesson => RenderLesson(lesson, ref parseFailed)).ToList();
+        var lines = lessons.Select(lesson => RenderLesson(lesson, ref parseFailed)).Select(Escape).ToList();
         var warnings = new List<string> { UntrustedWarning };
         if (parseFailed) warnings.Add("部分经验内容无法解析（n/a）");
         var fetchedAt = now.ToString("O", CultureInfo.InvariantCulture);
@@ -295,7 +296,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         var parts = new List<string>
         {
             Time(proposal.CreatedAt),
-            $"{proposal.Action} {proposal.Symbol ?? "n/a"} {proposal.Side ?? ""}".TrimEnd(),
+            $"{Untrusted(proposal.Action)} {Untrusted(proposal.Symbol ?? "n/a")} {Untrusted(proposal.Side ?? "")}".TrimEnd(),
             $"信心 {Pct(proposal.Confidence is { } confidence ? confidence * 100m : null)}"
         };
         if (proposal.Action == "open")
@@ -308,7 +309,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
     }
 
     private static string RenderVerdict(RiskVerdict verdict) =>
-        $"裁决 {verdict.Decision}(maxPos={Pct(verdict.MaxPositionPct)}, maxLev={Num(verdict.MaxLeverage)}"
+        $"裁决 {Untrusted(verdict.Decision)}(maxPos={Pct(verdict.MaxPositionPct)}, maxLev={Num(verdict.MaxLeverage)}"
         + $", zone=[{Num(verdict.EntryZoneMin)},{Num(verdict.EntryZoneMax)}]"
         + $", market={Bool(verdict.AllowMarket)})";
 
@@ -320,8 +321,8 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         }
 
         var items = executions.Select(order =>
-            $"{order.Status ?? (order.Success ? "unknown" : "failed")}{(order.Simulated ? "（演练）" : "")}"
-            + $": {order.Action} {Num(order.FilledQuantity ?? order.Quantity)} @ {Num(order.AveragePrice ?? order.Price)}");
+            $"{Untrusted(order.Status ?? (order.Success ? "unknown" : "failed"))}{(order.Simulated ? "（演练）" : "")}"
+            + $": {Untrusted(order.Action)} {Num(order.FilledQuantity ?? order.Quantity)} @ {Num(order.AveragePrice ?? order.Price)}");
         return $"执行 {string.Join("；", items)}";
     }
 
@@ -396,14 +397,6 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         return true;
     }
 
-    private static decimal UsedMargin(AccountSnapshot account, IReadOnlyList<SymbolPosition> positions)
-    {
-        var held = positions.Sum(position => position.Leverage is > 0
-            ? Math.Abs(position.Quantity * position.AverageOpenPrice) / position.Leverage.Value
-            : account.UsdtEquity);
-        return Math.Max(held, Math.Max(0m, account.UsdtEquity + positions.Sum(p => p.UnrealizedPnl ?? 0m) - account.UsdtAvailable));
-    }
-
     private static string Side(SharedPositionSide side) => side == SharedPositionSide.Long ? "long" : "short";
 
     private static string Leverage(decimal? leverage) => leverage is { } value ? $"{Num(value)}x" : "n/a";
@@ -427,6 +420,9 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
     }
 
     private static string Escape(string text) => UntrustedCloseTag.Replace(text, "&lt;/untrusted&gt;");
+
+    /// <summary>untrusted 块内的模型/历史派生字段：空值按空串处理，闭合标记一律转义，保证块只闭合一次。</summary>
+    private static string Untrusted(string? text) => text is null ? "" : Escape(text);
 
     private static string ShortFingerprint(string fingerprint) =>
         fingerprint.Length <= 8 ? fingerprint : fingerprint[..8];

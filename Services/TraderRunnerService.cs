@@ -419,11 +419,9 @@ public class TraderRunnerService(IServiceScopeFactory scopeFactory, PositionHist
     }
 
     // 可用资金可能包含未实现盈亏；同时保留持仓初始保证金下界，不能因浮盈把已占用误算为0。
-    internal static decimal UsedMargin(AccountSnapshot account, IReadOnlyList<SymbolPosition> positions)
-    {
-        var held = positions.Sum(p => p.Leverage is > 0 ? Math.Abs(p.Quantity * p.AverageOpenPrice) / p.Leverage.Value : account.UsdtEquity);
-        return Math.Max(held, Math.Max(0m, account.UsdtEquity + positions.Sum(p => p.UnrealizedPnl ?? 0m) - account.UsdtAvailable));
-    }
+    // 公式与账户工具共用 MarginMath，缺杠杆时不再用整份权益兜底。
+    internal static decimal UsedMargin(AccountSnapshot account, IReadOnlyList<SymbolPosition> positions) =>
+        MarginMath.UsedMargin(account, positions);
 
     // 审计行标的为「BASE/QUOTE」、交易所持仓为原生名（如 BASEUSDT）：统一取基准资产做匹配键
     private static string BaseAssetOf(string symbol) =>
