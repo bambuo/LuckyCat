@@ -26,6 +26,10 @@ public class Provider
     public int MaxOutputTokens { get; set; } = 16384;
     /// <summary>提示词超出上下文大小时是否自动裁剪行情数据（关闭则仅警示）</summary>
     public bool AutoCompressContext { get; set; }
+    /// <summary>工具调用验证结果；启动交易员与 test-run 前必须为 true</summary>
+    public bool? ToolCallingSupported { get; set; }
+    /// <summary>最近一次工具调用验证时间（UTC）</summary>
+    public DateTime? ToolCallingVerifiedAt { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
