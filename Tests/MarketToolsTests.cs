@@ -139,6 +139,52 @@ public class MarketToolsTests
     }
 
     [Fact]
+    public async Task Failed_sentiment_is_refetched_on_second_call()
+    {
+        var reader = new FlakySentimentReader();
+        var tools = new MarketTools(new MarketDataCache(reader), new StrategyConfig(), new HashSet<string>(["BTC/USDT"]));
+
+        // 每个标的都返回全 null 记录：工具报 retryable 的 data_unavailable，且不得缓存
+        var first = await tools.GetSentimentAsync(["BTC/USDT"], true, true, default);
+        Assert.False(first.Ok);
+        Assert.Equal(ToolErrors.DataUnavailable, first.Error!.Code);
+        Assert.True(first.Error.Retryable);
+        Assert.Equal(1, reader.SentimentCalls);
+
+        // 重试真正重新拉取底层数据并恢复
+        var second = await tools.GetSentimentAsync(["BTC/USDT"], true, true, default);
+        Assert.True(second.Ok, second.Error?.Message);
+        Assert.Equal("live", second.Source);
+        Assert.Equal(2, reader.SentimentCalls);
+
+        // 有数据的结果才缓存：第三次不再触发底层拉取
+        var third = await tools.GetSentimentAsync(["BTC/USDT"], true, true, default);
+        Assert.True(third.Ok);
+        Assert.Equal(2, reader.SentimentCalls);
+    }
+
+    [Fact]
+    public async Task Partial_sentiment_is_cached_and_marked_incomplete()
+    {
+        var reader = new PartialSentimentReader();
+        var tools = new MarketTools(new MarketDataCache(reader), new StrategyConfig(),
+            new HashSet<string>(["BTC/USDT", "ETH/USDT"]));
+
+        var first = await tools.GetSentimentAsync(["BTC/USDT", "ETH/USDT"], true, true, default);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.Equal("incomplete", first.Source);
+        Assert.Null(first.Error);
+        Assert.Contains(first.Warnings, warning => warning.Contains("ETH"));
+
+        // 部分结果仍缓存；后续调用标记 incomplete，且不会给出可重试的暗示
+        var second = await tools.GetSentimentAsync(["BTC/USDT", "ETH/USDT"], true, true, default);
+        Assert.True(second.Ok);
+        Assert.Equal("incomplete", second.Source);
+        Assert.Null(second.Error);
+        Assert.Equal(1, reader.SentimentCalls);
+    }
+
+    [Fact]
     public async Task Indicators_filter_to_selector_with_full_warmup()
     {
         var reader = new RichReader();
@@ -423,6 +469,39 @@ public class MarketToolsTests
             return Task.FromResult(SnapshotCalls == 1
                 ? new MarketSnapshot("missing", symbol.BaseAsset + "/USDT", null, [], Failure: "upstream boom")
                 : new MarketSnapshot("live", symbol.BaseAsset + "/USDT", 100, Rows(80), AsOfUtc: Now));
+        }
+    }
+
+    // 首个情绪请求返回全 null 记录（模拟 MarketSentimentService 逐标的插入空值），之后恢复
+    private sealed class FlakySentimentReader : StubReader
+    {
+        public int SentimentCalls;
+
+        public override Task<IReadOnlyDictionary<string, SymbolSentiment>> GetSentimentAsync(string exchange,
+            IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct)
+        {
+            SentimentCalls++;
+            return Task.FromResult<IReadOnlyDictionary<string, SymbolSentiment>>(
+                SentimentCalls == 1
+                    ? new Dictionary<string, SymbolSentiment> { ["BTC"] = new(null, null, null, null) }
+                    : new Dictionary<string, SymbolSentiment> { ["BTC"] = new(1_000_000m, 1.5m, 0.01m, Now.AddHours(4)) });
+        }
+    }
+
+    // BTC 有完整情绪，ETH 只有全 null 记录：部分结果应缓存并以 incomplete 呈现
+    private sealed class PartialSentimentReader : StubReader
+    {
+        public int SentimentCalls;
+
+        public override Task<IReadOnlyDictionary<string, SymbolSentiment>> GetSentimentAsync(string exchange,
+            IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct)
+        {
+            SentimentCalls++;
+            return Task.FromResult<IReadOnlyDictionary<string, SymbolSentiment>>(new Dictionary<string, SymbolSentiment>
+            {
+                ["BTC"] = new(1_000_000m, 1.5m, 0.01m, Now.AddHours(4)),
+                ["ETH"] = new(null, null, null, null)
+            });
         }
     }
 

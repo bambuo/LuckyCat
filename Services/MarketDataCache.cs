@@ -6,8 +6,10 @@ namespace LuckyCat.Services;
 /// <summary>
 /// 单周期行情缓存（DI 作用域内一个实例，周期结束即释放；无静态缓存）：
 /// 同一交易周期内多个工具/阶段重复读取同一份行情时只拉取一次，保证口径一致并减少交易所请求。
-/// 只缓存成功且非空的结果——失败（missing 快照 / null 概览 / 空情绪 / 全源缺席新闻）不落缓存，
+/// 只缓存成功且可用的结果——失败（missing 快照 / null 概览 / 全空情绪 / 全源缺席新闻）不落缓存，
 /// 模型按 retryable 重试时能真正重新拉取，而不是命中同一份失败结果。
+/// 情绪按标的逐条返回（字段可能全为 null），只有至少一个标的出现工具可展示的数据时才缓存；
+/// 部分标的缺席的结果仍缓存（工具以 incomplete 呈现，不再给出重试暗示）。
 /// 缓存键包含交易所/标的/周期/根数/预热深度，不同参数不会串用。
 /// </summary>
 public sealed class MarketDataCache(IMarketDataReader reader)
@@ -42,7 +44,9 @@ public sealed class MarketDataCache(IMarketDataReader reader)
         var key = $"{exchange}|{string.Join(',', symbols.Select(s => s.BaseAsset))}|{oi}|{funding}";
         if (_sentiments.TryGetValue(key, out var hit)) return hit;
         var value = await reader.GetSentimentAsync(exchange, symbols, oi, funding, ct);
-        if (value.Count > 0) _sentiments[key] = value;
+        // 情绪服务会为每个请求标的插入一条记录（即使字段全为 null）：只有出现工具可展示的
+        // OI 名义价值或资金费率时才缓存；全空结果不缓存，retryable 失败的重试能真正重新拉取。
+        if (value.Values.Any(sentiment => HasData(sentiment, oi, funding))) _sentiments[key] = value;
         return value;
     }
 
@@ -65,4 +69,10 @@ public sealed class MarketDataCache(IMarketDataReader reader)
         }
         return value;
     }
+
+    // 与 MarketTools.GetSentimentCoreAsync 的可展示字段口径一致：只有请求的 OI 名义价值或资金费率
+    // 至少一个存在时才算有数据；仅采集时间/窗口等附属字段不可展示，不计入。
+    private static bool HasData(SymbolSentiment sentiment, bool includeOi, bool includeFunding) =>
+        (includeOi && sentiment.OiUsd is not null)
+        || (includeFunding && sentiment.FundingRatePct is not null);
 }
