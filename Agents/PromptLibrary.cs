@@ -219,7 +219,6 @@ public static class PromptLibrary
 
     private static string Num(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 
-
     private static string BuildIdentity(AgentRole role) =>
         $"你是招财猫（LuckyCat）多智能体交易系统中的{RoleInstructions.Label(role)}（{role}），提示词修订号 {Revision}。\n" +
         "你只承担本角色的职责，不越权执行其他角色的事务，也不直接操作交易所。";

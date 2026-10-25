@@ -30,6 +30,20 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
         var prompt = await PromptLibrary.BuildTraderUserPrompt(ctx, input.Brief, ct);
         var (proposal, _) = await runner.RunAsync<AgentTradeProposal>(agent, prompt, ct);
 
+        // 契约校验（LC-STD-01 §4.1 第 3 步）：System.Text.Json 会原样接受越界枚举值，
+        // 未定义动作匹配不到任何出边会让周期中途死路；fail-closed 归一化为 Hold 走收尾边，
+        // 绝不放行未路由的越界提案（Hold=0 是有意的安全零值，属合法动作，只有越界值非法）。
+        if (!Enum.IsDefined(proposal.Action))
+        {
+            ctx.SetOutcome(new CycleOutcome("failed", "stage_contract_violation",
+                "交易员提案动作越界，本周期已按失败安全终止"));
+            var safe = proposal with { Action = ProposalAction.Hold };
+            ctx.Observe(safe);
+            await ctx.Recorder.RecordStageAsync(Stage, new ProposalMessage(safe),
+                PromptLibrary.Build(AgentRole.Trader, ctx.Config), ct);
+            return new ProposalMessage(safe);
+        }
+
         ctx.Observe(proposal);
         await ctx.Recorder.RecordStageAsync(Stage, new ProposalMessage(proposal),
             PromptLibrary.Build(AgentRole.Trader, ctx.Config), ct);

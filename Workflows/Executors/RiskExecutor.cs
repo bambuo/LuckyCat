@@ -31,6 +31,20 @@ public sealed class RiskExecutor(TradingCycleContext ctx, TradingAgentFactory fa
         var prompt = await ctx.BuildUserPrompt(AgentRole.Risk, ct);
         var (verdict, _) = await runner.RunAsync<AgentRiskVerdict>(agent, prompt, ct);
 
+        // 契约校验（LC-STD-01 §4.1 第 3 步）：同 TraderExecutor，越界 RiskDecision 匹配不到
+        // approved/rejected 任一出边会死路；Rejected=0 是有意的安全零值，fail-closed 归一化为 Rejected。
+        if (!Enum.IsDefined(verdict.Decision))
+        {
+            ctx.SetOutcome(new CycleOutcome("failed", "stage_contract_violation",
+                "风控裁决结果越界，本周期已按失败安全终止"));
+            var safeVerdict = verdict with { Decision = RiskDecision.Rejected };
+            var safeMessage = new VerdictMessage(input.Proposal, safeVerdict);
+            ctx.Observe(safeVerdict);
+            await ctx.Recorder.RecordStageAsync(Stage, safeMessage,
+                PromptLibrary.Build(AgentRole.Risk, ctx.Config), ct);
+            return safeMessage;
+        }
+
         var message = new VerdictMessage(input.Proposal, verdict);
         ctx.Observe(verdict);
         await ctx.Recorder.RecordStageAsync(Stage, message,

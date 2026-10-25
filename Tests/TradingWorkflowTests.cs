@@ -140,6 +140,48 @@ public class TradingWorkflowTests
         Assert.Equal(("completed", "execution_errors", run.Ctx.Outcome!.Error), run.Recorder.Completions.Single());
     }
 
+    // —— 越界枚举契约校验（fail-closed，LC-STD-01 §4.1 第 3 步）——
+
+    [Fact]
+    public async Task Out_of_range_proposal_action_fails_closed_via_finalizer()
+    {
+        // 越界动作被 JsonStringEnumConverter 原样反序列化；risk/executor 装 ForbiddenClient，
+        // 一旦运行即炸，证明没有阶段被路由到、更不可能下单。
+        var run = await RunAsync(BriefWithCandidates, OpenProposal with { Action = (ProposalAction)99 });
+
+        Assert.Equal("failed", run.Ctx.Outcome!.Status);
+        Assert.Equal("stage_contract_violation", run.Ctx.Outcome!.ErrorCode);
+        Assert.Equal("failed", run.Signal.Reason);
+        Assert.Equal(["analyst", "trader"], run.Recorder.Stages);
+        Assert.DoesNotContain("executor", run.Recorder.Stages);
+        // 收尾恰运行一次，且带失败终态与错误码。
+        var completion = run.Recorder.Completions.Single();
+        Assert.Equal(("failed", "stage_contract_violation", run.Ctx.Outcome!.Error), completion);
+        Assert.NotNull(run.Ctx.Outcome.Error);
+        // trader 出边消息已归一化为 Hold（图中唯一可达 finalizer 的路由）。
+        var proposalRecord = run.Recorder.StageRecords.Single(r => r.Role == "trader");
+        Assert.Equal(ProposalAction.Hold, Assert.IsType<ProposalMessage>(proposalRecord.Output).Proposal.Action);
+    }
+
+    [Fact]
+    public async Task Out_of_range_risk_decision_fails_closed_via_finalizer()
+    {
+        // executor 装 ForbiddenClient：越界裁决若未被归一化为 Rejected 就会死路或误路由。
+        var run = await RunAsync(BriefWithCandidates, OpenProposal,
+            RejectedVerdict with { Decision = (RiskDecision)99 });
+
+        Assert.Equal("failed", run.Ctx.Outcome!.Status);
+        Assert.Equal("stage_contract_violation", run.Ctx.Outcome!.ErrorCode);
+        Assert.Equal("failed", run.Signal.Reason);
+        Assert.Equal(["analyst", "trader", "risk"], run.Recorder.Stages);
+        var completion = run.Recorder.Completions.Single();
+        Assert.Equal(("failed", "stage_contract_violation", run.Ctx.Outcome!.Error), completion);
+        Assert.NotNull(run.Ctx.Outcome.Error);
+        var verdictRecord = run.Recorder.StageRecords.Single(r => r.Role == "risk");
+        Assert.Equal(RiskDecision.Rejected,
+            Assert.IsType<VerdictMessage>(verdictRecord.Output).Verdict.Decision);
+    }
+
     // —— 阶段落库契约 ——
 
     [Fact]
@@ -160,7 +202,7 @@ public class TradingWorkflowTests
         }
     }
 
-    // —— ToolRegistry 与 ToolCatalog 逐字一致 ——
+    // —— ToolRegistry 与工具绑定逐字一致（字面量交叉校验，刻意不复用 ToolCatalog 数组）——
 
     [Theory]
     [InlineData(AgentRole.Analyst)]
@@ -173,19 +215,66 @@ public class TradingWorkflowTests
         await using var env = await TestEnv.CreateAsync();
 
         var tools = env.Registry.For(role, "stage-run-1");
-        var expected = ExpectedCatalogNames(role);
+        var expected = ExpectedToolBindings(role);
 
-        Assert.Equal(expected, tools.Select(tool => tool.Name));
+        // 名称与顺序钉死为测试内字面量：若 ToolCatalog 数组被改动，本测试红。
+        Assert.Equal(expected.Select(b => b.Name), tools.Select(tool => tool.Name));
         Assert.Equal(expected.Length, tools.Count);
+
+        // 名称↔底层方法绑定同样钉死为字面量：若注册处两行 Fn(...) 连索引一起对调，
+        // 名称集合不变但配对断言必红（仅比名称数组抓不到这种交换）。
+        Assert.Equal(expected.Select(b => b.Method),
+            tools.Select(tool => Assert.IsAssignableFrom<AIFunction>(tool).UnderlyingMethod?.Name));
     }
 
-    private static string[] ExpectedCatalogNames(AgentRole role) => role switch
+    /// <summary>字面量副本：名字逐字抄自 ToolCatalog、方法名逐字抄自 ToolRegistry 的 Fn 绑定，
+    /// 两边同时被改才会一起绿——这正是交叉校验的意义。</summary>
+    private static (string Name, string Method)[] ExpectedToolBindings(AgentRole role) => role switch
     {
-        AgentRole.Analyst => ToolCatalog.Analyst,
-        AgentRole.Trader => ToolCatalog.Trader,
-        AgentRole.Risk => ToolCatalog.Risk,
-        AgentRole.Executor => ToolCatalog.Executor,
-        AgentRole.Reviewer => ToolCatalog.Reviewer,
+        AgentRole.Analyst =>
+        [
+            ("get_coin_candidates", "GetCoinCandidatesAsync"),
+            ("get_market_overview", "GetMarketOverviewAsync"),
+            ("get_klines", "GetKlinesAsync"),
+            ("get_indicators", "GetIndicatorsAsync"),
+            ("get_sentiment", "GetSentimentAsync"),
+            ("get_news", "GetNewsAsync"),
+        ],
+        AgentRole.Trader =>
+        [
+            ("get_klines", "GetKlinesAsync"),
+            ("get_indicators", "GetIndicatorsAsync"),
+            ("get_sentiment", "GetSentimentAsync"),
+            ("get_account", "GetAccountAsync"),
+            ("get_positions", "GetPositionsAsync"),
+            ("get_recent_orders", "GetRecentOrdersAsync"),
+            ("get_closed_trades", "GetClosedTradesAsync"),
+            ("get_decision_memory", "GetDecisionMemoryAsync"),
+            ("get_lessons", "GetLessonsAsync"),
+            ("get_trading_discipline", "GetTradingDisciplineAsync"),
+        ],
+        AgentRole.Risk =>
+        [
+            ("get_account", "GetAccountAsync"),
+            ("get_positions", "GetPositionsAsync"),
+            ("get_risk_policy", "GetRiskPolicyAsync"),
+            ("get_trading_discipline", "GetTradingDisciplineAsync"),
+        ],
+        AgentRole.Executor =>
+        [
+            ("get_account", "GetAccountAsync"),
+            ("get_positions", "GetPositionsAsync"),
+            ("get_recent_orders", "GetRecentOrdersAsync"),
+            ("place_order", "PlaceOrderAsync"),
+            ("close_position", "ClosePositionAsync"),
+            ("cancel_order", "CancelOrderAsync"),
+        ],
+        AgentRole.Reviewer =>
+        [
+            ("get_closed_trades", "GetClosedTradesAsync"),
+            ("get_cycles", "GetCyclesAsync"),
+            ("get_lessons", "GetLessonsAsync"),
+        ],
         _ => throw new ArgumentOutOfRangeException(nameof(role), role, null),
     };
 
