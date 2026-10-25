@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using LuckyCat.Contracts;
 using LuckyCat.Data;
@@ -15,6 +16,8 @@ public interface ICycleBudget
 /// <summary>
 /// 所有工具共用的审计包装器：读工具也落 ToolInvocation（入参/回执/耗时/错误码/截断标记），
 /// 消耗单周期工具预算，并在写工具或失败时向该交易员的 SSE 频道发布 tool 事件。
+/// 未预期异常统一兜底为 <c>tool_internal_error</c>（不回显异常原文，避免泄漏上游 URL/SQL）；
+/// 取消（token 已取消）如实上抛。
 /// </summary>
 public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget budget,
     string? cycleId, string stageRunId, int? traderId)
@@ -30,13 +33,23 @@ public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget b
         }
         else
         {
-            try { result = await action(); }
-            catch (Exception ex) { result = ToolEnvelope.Failure(ToolErrors.ToolInternalError, ex.Message); }
+            try
+            {
+                result = await action();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                result = ToolEnvelope.Failure(ToolErrors.ToolInternalError, "工具执行失败（内部错误）");
+            }
         }
         var argsJson = JsonSerializer.Serialize(args, ApiJson.Options);
         var resultJson = JsonSerializer.Serialize(result, ApiJson.Options);
-        var truncated = resultJson.Length > 16 * 1024;
-        if (truncated) resultJson = resultJson[..(16 * 1024)];
+        var actualOverflow = Encoding.UTF8.GetByteCount(resultJson) > ToolEnvelope.MaxSerializedBytes;
+        if (actualOverflow) resultJson = JsonSerializer.Serialize(new { truncated = true }, ApiJson.Options);
         db.ToolInvocations.Add(new ToolInvocation
         {
             CycleId = cycleId,
@@ -47,7 +60,7 @@ public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget b
             Success = result.Ok,
             ErrorCode = result.Error?.Code,
             ElapsedMs = started.ElapsedMilliseconds,
-            Truncated = truncated,
+            Truncated = result.Truncated || actualOverflow,
             CreatedAt = DateTime.UtcNow
         });
         await db.SaveChangesAsync(ct);
