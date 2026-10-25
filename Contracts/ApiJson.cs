@@ -9,6 +9,8 @@ public static class ApiJson
     public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        // 请求体不得包含多余字段（LC-STD-03 §1.1）；仅影响反序列化。
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 }

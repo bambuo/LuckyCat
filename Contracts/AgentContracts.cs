@@ -2,9 +2,10 @@ namespace LuckyCat.Contracts;
 
 // 智能体结构化输出契约：模型按 AgentJson.Options 反序列化；
 // 与 Models.TradeProposal / Models.RiskVerdict 实体同名但职责不同，引用时使用命名空间全名或别名。
-public enum ProposalAction { Open, Close, Hold }
+// 零值取安全分支（Hold/Rejected），缺失字段不得 fail-open。
+public enum ProposalAction { Hold = 0, Open = 1, Close = 2 }
 public enum TradeSide { Long, Short }
-public enum RiskDecision { Approved, Rejected }
+public enum RiskDecision { Rejected = 0, Approved = 1 }
 
 public sealed record ResearchBrief(
     string MarketContext,

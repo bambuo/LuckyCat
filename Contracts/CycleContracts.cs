@@ -18,4 +18,4 @@ public sealed class TradeProposalDto
 }
 
 // 手动平仓请求（Task 14 端点使用，Task 11 CloseManuallyAsync 消费）。
-public sealed record ManualCloseRequest(string Symbol, decimal? Quantity, string OrderType, decimal? Price, string Reason);
+public sealed record ManualCloseRequest(string Symbol, string? Quantity, string OrderType, string? Price, string Reason);

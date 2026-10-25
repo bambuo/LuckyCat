@@ -37,4 +37,72 @@ public class ContractSerializationTests
         Assert.False(doc.RootElement.GetProperty("success").GetBoolean());
         Assert.Equal("provider_capability_missing", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
     }
+
+    [Fact]
+    public void Missing_action_deserializes_to_hold_not_open()
+    {
+        const string json = """
+        {
+          "symbol": "BTC/USDT",
+          "side": "long",
+          "confidence": 0.68,
+          "entryPrice": 68120.50,
+          "thesis": "突破回踩"
+        }
+        """;
+        var proposal = JsonSerializer.Deserialize<AgentTradeProposal>(json, AgentJson.Options)!;
+        Assert.Equal(ProposalAction.Hold, proposal.Action);
+    }
+
+    [Fact]
+    public void Missing_decision_deserializes_to_rejected_not_approved()
+    {
+        const string json = """
+        { "reasons": ["杠杆过高"], "maxLeverage": 5 }
+        """;
+        var verdict = JsonSerializer.Deserialize<AgentRiskVerdict>(json, AgentJson.Options)!;
+        Assert.Equal(RiskDecision.Rejected, verdict.Decision);
+    }
+
+    [Fact]
+    public void Api_json_rejects_unknown_request_fields()
+    {
+        const string valid = """
+        {"symbol":"BTC/USDT","quantity":"1.5","orderType":"market","price":"68120.50","reason":"手动平仓"}
+        """;
+        var request = JsonSerializer.Deserialize<ManualCloseRequest>(valid, ApiJson.Options)!;
+        Assert.Equal("1.5", request.Quantity);
+        Assert.Equal("68120.50", request.Price);
+
+        const string withExtra = """
+        {"symbol":"BTC/USDT","quantity":"1.5","orderType":"market","price":"68120.50","reason":"手动平仓","extra":true}
+        """;
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<ManualCloseRequest>(withExtra, ApiJson.Options));
+    }
+
+    [Fact]
+    public void Agent_json_maps_camel_case_enum_strings_and_numbers_and_skips_unknown_members()
+    {
+        const string json = """
+        {
+          "action": "open",
+          "symbol": "BTC/USDT",
+          "side": "long",
+          "confidence": "0.68",
+          "entryPrice": "68120.50",
+          "thesis": "突破回踩",
+          "unknownField": { "anything": true }
+        }
+        """;
+        var proposal = JsonSerializer.Deserialize<AgentTradeProposal>(json, AgentJson.Options)!;
+        Assert.Equal(ProposalAction.Open, proposal.Action);
+        Assert.Equal(TradeSide.Long, proposal.Side);
+        Assert.Equal(0.68m, proposal.Confidence);
+        Assert.Equal(68120.50m, proposal.EntryPrice);
+        Assert.Equal("突破回踩", proposal.Thesis);
+
+        var verdict = JsonSerializer.Deserialize<AgentRiskVerdict>(
+            """{"decision":"approved","reasons":[]}""", AgentJson.Options)!;
+        Assert.Equal(RiskDecision.Approved, verdict.Decision);
+    }
 }
