@@ -98,7 +98,8 @@ public static class ProposalRiskAdapter
         }
 
         List<string>? checklist = null;
-        if (p.ReviewChecklistJson is not null)
+        // 空/纯空白清单视为未提供（旧数据常见空串），不得把合法开仓拦在 JSON 校验上。
+        if (!string.IsNullOrWhiteSpace(p.ReviewChecklistJson))
         {
             try
             {

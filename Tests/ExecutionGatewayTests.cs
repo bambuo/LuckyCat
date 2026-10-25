@@ -150,4 +150,66 @@ public class ExecutionGatewayTests
         Assert.Equal("限价单缺少有效价格", error);
         Assert.Null(orderId);
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Gateway_place_rejects_non_positive_stop_loss_before_touching_exchange(decimal stopLoss)
+    {
+        var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
+
+        var (ok, error, orderId, filled, averagePrice) = await gateway.PlaceAsync(
+            Btc, isLong: true, quantity: 0.1m, stopLossPrice: stopLoss, takeProfitPrice: 110m,
+            leverage: 3m, orderType: "market", price: null, clientOrderId: "lc-open-1", CancellationToken.None);
+
+        Assert.False(ok);
+        Assert.Equal("止损价必须大于 0", error);
+        Assert.Null(orderId);
+        Assert.Null(filled);
+        Assert.Null(averagePrice);
+    }
+
+    [Fact]
+    public async Task Gateway_place_rejects_negative_take_profit_before_touching_exchange()
+    {
+        var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
+
+        var (ok, error, orderId, _, _) = await gateway.PlaceAsync(
+            Btc, isLong: true, quantity: 0.1m, stopLossPrice: 95m, takeProfitPrice: -1m,
+            leverage: 3m, orderType: "market", price: null, clientOrderId: "lc-open-1", CancellationToken.None);
+
+        Assert.False(ok);
+        Assert.Equal("止盈价不能为负数", error);
+        Assert.Null(orderId);
+    }
+
+    [Fact]
+    public async Task Gateway_close_returns_exchange_order_id_slot()
+    {
+        var gateway = new ExecutionGateway(Account(), new ExchangeTradingService());
+
+        var (ok, error, quantity, price, exchangeOrderId) = await gateway.CloseAsync(
+            Btc, 0.5m, isLong: true, "stop", null, "lc-close-1", CancellationToken.None);
+
+        Assert.False(ok);
+        Assert.Equal("不支持的订单类型：stop", error);
+        Assert.Null(quantity);
+        Assert.Null(price);
+        Assert.Null(exchangeOrderId);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task Detailed_close_returns_exchange_order_id_slot(decimal quantity)
+    {
+        var (ok, error, submitted, price, exchangeOrderId) = await new ExchangeTradingService()
+            .ClosePositionAsync(Account(), Btc, quantity, "market", null, "lc-close-1", true, CancellationToken.None);
+
+        Assert.False(ok);
+        Assert.Equal("平仓数量必须大于 0", error);
+        Assert.Null(submitted);
+        Assert.Null(price);
+        Assert.Null(exchangeOrderId);
+    }
 }

@@ -193,6 +193,24 @@ public class ProposalRiskAdapterTests
         _ = ProposalRiskAdapter.ToLegacyDecision(entity);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t\r\n")]
+    public void Empty_or_whitespace_checklist_is_normalized_to_null(string checklistJson)
+    {
+        var entity = Entity();
+        entity.ReviewChecklistJson = checklistJson;
+
+        Assert.True(ProposalRiskAdapter.TryToContract(entity, out var contract, out var error));
+        Assert.Null(error);
+        Assert.Null(contract!.ReviewChecklist);
+
+        var validationError = ProposalRiskAdapter.ValidateOpen(entity, new RiskControlConfig(), Context, out var plan);
+        Assert.Null(validationError);
+        Assert.NotNull(plan);
+    }
+
     private static AgentTradeProposal Proposal(TradeSide side, decimal? stop, decimal? take) => new(
         ProposalAction.Open, "BTC/USDT", side, 0.9m, 100m, stop, take, 3m, 3m, "test", "invalid", null);
 

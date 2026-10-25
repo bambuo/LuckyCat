@@ -24,14 +24,21 @@ public interface IExecutionGateway
         decimal leverage, CancellationToken ct) =>
         PlaceAsync(symbol, isLong, quantity, stopLossPrice, takeProfitPrice, leverage, "market", null, null, ct);
 
-    Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> CloseAsync(
+    /// <summary>
+    /// 平仓（市价/限价、整仓/部分）。成功时返回实际提交数量、参考价与交易所订单号：
+    /// 整仓原生平仓可能无订单号（null）；部分/限价反向减仓单返回交易所订单号，供 Task 8 撤单/审计。
+    /// </summary>
+    Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> CloseAsync(
         SharedSymbol symbol, decimal? quantity, bool isLong, string orderType, decimal? price,
         string? clientOrderId, CancellationToken ct);
 
-    /// <summary>旧调用方兼容：市价平仓、无客户端订单号。</summary>
-    Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> CloseAsync(
-        SharedSymbol symbol, decimal? quantity, bool isLong, CancellationToken ct) =>
-        CloseAsync(symbol, quantity, isLong, "market", null, null, ct);
+    /// <summary>旧调用方兼容：市价平仓、无客户端订单号、丢弃交易所订单号。</summary>
+    async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> CloseAsync(
+        SharedSymbol symbol, decimal? quantity, bool isLong, CancellationToken ct)
+    {
+        var result = await CloseAsync(symbol, quantity, isLong, "market", null, null, ct).ConfigureAwait(false);
+        return (result.Ok, result.Error, result.Quantity, result.Price);
+    }
 
     Task<(bool Ok, string? Error)> CancelAsync(SharedSymbol symbol, string orderId, CancellationToken ct);
     TradingAudit Audit();

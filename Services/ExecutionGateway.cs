@@ -29,6 +29,8 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
         decimal leverage, string orderType, decimal? price, string? clientOrderId, CancellationToken ct)
     {
         if (quantity <= 0) return (false, "下单数量必须大于 0", null, null, null);
+        if (stopLossPrice <= 0) return (false, "止损价必须大于 0", null, null, null);
+        if (takeProfitPrice is < 0) return (false, "止盈价不能为负数", null, null, null);
         if (!ExchangeTradingService.TryParseOrderType(orderType, out var parsedType))
             return (false, $"不支持的订单类型：{orderType}", null, null, null);
         if (parsedType == SharedOrderType.Limit && price is not > 0)
@@ -43,11 +45,11 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
             ? (isLong ? SharedPositionSide.Long : SharedPositionSide.Short)
             : (SharedPositionSide?)null;
 
-        // 保护价只接受正数；0 视为未提供，绝不把 0 当作真实价格发给交易所，也不伪造止盈。
+        // 止损是开仓硬性保护：<= 0 直接拒绝，绝不静默丢弃；止盈 0 视为未提供（本轮策略允许无固定止盈）。
         var (ok, error, orderId) = await ExchangeTradingService.PlaceOrderAsync(
             account, symbol, isLong, quantity, parsedType,
             parsedType == SharedOrderType.Limit ? price : null,
-            stopLossPrice > 0 ? stopLossPrice : null,
+            stopLossPrice,
             takeProfitPrice is > 0 ? takeProfitPrice : null,
             crossMargin, side, clientOrderId, ct).ConfigureAwait(false);
 
@@ -55,12 +57,12 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
         return (ok, error, orderId, null, null);
     }
 
-    public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> CloseAsync(
+    public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price, string? ExchangeOrderId)> CloseAsync(
         SharedSymbol symbol, decimal? quantity, bool isLong, string orderType, decimal? price,
         string? clientOrderId, CancellationToken ct)
     {
         if (!ExchangeTradingService.TryParseOrderType(orderType, out _))
-            return (false, $"不支持的订单类型：{orderType}", null, null);
+            return (false, $"不支持的订单类型：{orderType}", null, null, null);
 
         _ = isLong; // 方向由交易所最新持仓判定；调用方传入值仅作审计参考。
         return await trading.ClosePositionAsync(account, symbol, quantity, orderType, price, clientOrderId,
