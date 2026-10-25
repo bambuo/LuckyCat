@@ -161,4 +161,6 @@ public record TraderDashboardDto(
     IReadOnlyList<DashboardPosition> Positions,
     IReadOnlyList<DashboardDecision> Decisions,
     DashboardHistory History,
-    IReadOnlyList<TraderOrderDto> RecentOrders);
+    IReadOnlyList<TraderOrderDto> RecentOrders,
+    // 新链路最新周期块（Task 14 B：周期/阶段/提案/裁决/订单；无周期时为 null）。
+    CycleDetailDto? LatestCycle = null);

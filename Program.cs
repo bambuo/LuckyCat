@@ -33,20 +33,16 @@ builder.Services.AddScoped<ExternalDataSourceService>();
 builder.Services.AddScoped<StrategyTestRunner>();
 builder.Services.AddScoped<DecisionMemoryService>();
 builder.Services.AddScoped<ExchangeTradingService>();
-builder.Services.AddSingleton<TraderRunnerService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>());
-// P4 周期宿主（Task 11）迁移期（到 Task 18 删除旧 TraderRunnerService 为止）：
-// TradingCycleRunner 只注册为可解析单例，**不得**注册为 hosted 调度（R-11-6）——旧 TraderRunnerService
-// 仍是唯一自动调度链，双宿主会对同一 IsRunning 交易员起两条循环、实盘双重开仓。
-// 启动恢复由 CycleStartupRecovery 单独承担（只标记遗留 running 周期，不起任何循环）。
-// Task 18 切流步骤：把 TradingCycleRunner 重新 AddHostedService、删除 CycleStartupRecovery 与旧链路；
-// 切流前请勿为 TradingCycleRunner 恢复任何 hosted 注册。
+// P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的 hosted 注册已摘除——
+// 本进程恰好一条交易调度链（TradingCycleRunner），双调度器正是 Task 11 按 R-11-6 防住的缺陷。
+// TradingCycleRunner 仍是可解析单例而非 hosted 服务：调度循环只经端点 start 与
+// CycleStartupRecovery（先 RecoverAsync 收敛遗留 running，再为 IsRunning 交易员 Start）驱动。
+// TraderRunnerService 类保留可编译，Task 18（P7）连同旧链路一起删除；回滚 = 恢复下面这一对注册行。
 builder.Services.AddScoped<CycleRecorder>();
 builder.Services.AddSingleton<TradingCycleRunner>();
 builder.Services.AddHostedService<CycleStartupRecovery>();
 // P5 复盘（Task 13）：复盘宿主 + 每日本地时刻调度。
-// 与 R-11-6 的关系：那条禁令针对的是迁移期不得把**交易**宿主（TradingCycleRunner）注册为 hosted 调度
-// ——旧 TraderRunnerService 仍是唯一自动调度链，双宿主会对同一 IsRunning 交易员双重开仓。
+// 与 R-11-6 的关系：那条禁令针对的是迁移期不得把**交易**宿主（TradingCycleRunner）注册为 hosted 调度。
 // 复盘员不下单、不改策略/风控/交易员状态（LC-STD-01 §1.35、§9「只读工具；不修改任何配置」），
 // 因此 ReviewScheduler 不构成第二条交易调度链；而 §9 的「本地时刻（默认 00:10）」定时触发
 // 只能由宿主驱动，这里必须托管。它与交易周期各用各的闸，互不占用（R-13-5）。
@@ -125,6 +121,7 @@ app.MapProviders();
 app.MapExchanges();
 app.MapStrategies();
 app.MapTraders();
+app.MapCycles();
 app.MapHealth();
 
 app.Run();

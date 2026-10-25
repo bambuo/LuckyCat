@@ -87,6 +87,9 @@ public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget b
                 tool,
                 success = result.Ok,
                 errorCode = result.Error?.Code,
+                // R-14-3（LC-STD-03 §4.2 的有意扩展，见 task-14 报告）：拒绝必须对 UI 可读——
+                // 载荷只带工具信封的固定中文摘要（本仓库自产文案），绝不带上游原始异常文本（LC-STD-02）。
+                error = result.Error?.Message,
                 elapsedMs = started.ElapsedMilliseconds,
                 at = DateTime.UtcNow
             }));

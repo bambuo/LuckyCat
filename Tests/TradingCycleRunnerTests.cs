@@ -72,10 +72,12 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task Startup_recovery_marks_stale_cycles_without_starting_any_loop()
+    public async Task Startup_recovery_resumes_is_running_traders_and_aborts_stale_cycles()
     {
-        // R-11-6：迁移期启动宿主只做恢复（LC-STD-01 §8.7 / FLOW-13），绝不启动任何调度循环——
-        // 自动调度仍唯一归旧 TraderRunnerService，双循环会对同一 IsRunning 交易员双重开仓。
+        // R-14-5 切流（LC-STD-01 §8.7、LC-STD-05 FLOW-13）：启动宿主先收敛遗留 running
+        // （aborted + process_restart、交易员侧同步收口），再为 IsRunning 交易员经
+        // **新链路** TradingCycleRunner.Start 恢复调度——旧 TraderRunnerService 的 hosted 注册
+        // 已随切流摘除（注册形状由 ApiContractTests 的 Program 源码扫描钉死），本进程恰好一条调度链。
         await using var env = await RunnerEnv.CreateAsync();
         env.Trader.IsRunning = true;
         env.Trader.LastCycleStatus = "running";
@@ -87,26 +89,36 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         });
         await env.Db.SaveChangesAsync();
 
-        var hosted = new CycleStartupRecovery(env.Runner);
-        await hosted.StartAsync(default);
-        // StopAsync 不等 ExecuteAsync 收尾（停止令牌已置位），轮询直到两处恢复更新都可见。
-        await WaitUntilAsync(async () =>
-            "aborted" == (await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale")).Status
-            && "aborted" == (await env.Db.Traders.AsNoTracking().SingleAsync(t => t.Id == env.Trader.Id))
-                .LastCycleStatus);
-        await hosted.StopAsync(default);
+        var hosted = new CycleStartupRecovery(env.Runner, env.ScopeFactory);
+        try
+        {
+            await hosted.StartAsync(default);
+            // 恢复发生在 ExecuteAsync 的后台续跑里：轮询到「遗留行已收敛 + 新链路已接管调度」。
+            await WaitUntilAsync(async () =>
+                "aborted" == (await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale")).Status
+                && env.Runner.IsRunning(env.Trader.Id)
+                && await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Trigger == "schedule"));
+            await hosted.StopAsync(default);
 
-        var stale = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale");
-        Assert.Equal("aborted", stale.Status);
-        Assert.Equal("process_restart", stale.ErrorCode);
-        Assert.NotNull(stale.CompletedAt);
-        var trader = await env.Db.Traders.AsNoTracking().SingleAsync(t => t.Id == env.Trader.Id);
-        Assert.Equal("aborted", trader.LastCycleStatus);
-        // 恢复路径不起循环、不为 IsRunning 交易员新建任何周期行。留一小段观察窗：
-        // 若宿主像旧 ExecuteAsync 那样自动恢复循环，这个窗口内必然会 Start 并开出新周期。
-        await Task.Delay(150);
-        Assert.False(env.Runner.IsRunning(env.Trader.Id));
-        Assert.Equal(1, await env.Db.TradingCycles.CountAsync());
+            var stale = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale");
+            Assert.Equal("aborted", stale.Status);
+            Assert.Equal("process_restart", stale.ErrorCode);
+            Assert.NotNull(stale.CompletedAt);
+
+            // 续跑只发生一次：除遗留行外恰好一条新的定时周期（同交易员周期闸 + Start 幂等）。
+            Assert.True(env.Runner.IsRunning(env.Trader.Id));
+            Assert.Equal(2, await env.Db.TradingCycles.CountAsync());
+            var resumed = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id != "stale");
+            Assert.Equal("schedule", resumed.Trigger);
+            Assert.Equal(env.Trader.Id, resumed.TraderId);
+        }
+        finally
+        {
+            // 停掉恢复起来的循环，绝不留 running 给夹具释放后的内存库（终态守卫兜底）。
+            env.Runner.Stop(env.Trader.Id, "process_restart");
+            await WaitUntilAsync(async () =>
+                !await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+        }
     }
 
     // —— 预算 ——
@@ -830,6 +842,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         public required ScriptedMarketReader MarketReader { get; init; }
         public required RecordingGateway Gateway { get; init; }
         public required ScriptedChatClient Clients { get; init; }
+        public required IServiceScopeFactory ScopeFactory { get; init; }
         public FaultOnceDbContext? Faulty { get; init; }
         public required string CycleId { get; init; }
         public required string StageRunId { get; init; }
@@ -841,9 +854,14 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             bool hangPositions = false, bool terminalFaultOnce = false, string traderBehavior = "proposal",
             int inputTokenBudget = 0)
         {
-            var connection = new SqliteConnection("Data Source=:memory:");
+            // 命名共享缓存内存库 + keeper 连接：宿主恢复/循环写入与测试轮询读取并发进行，
+            // 单连接共享模式会直接抛 "database is locked"；共享缓存 + Default Timeout=30
+            // 让读写按 SQLite busy 语义排队（与 CycleHttpTests 的宿主同口径）。
+            var connectionString =
+                $"Data Source=file:runnertest-{Guid.NewGuid():N}?mode=memory&cache=shared;Default Timeout=30";
+            var connection = new SqliteConnection(connectionString);
             await connection.OpenAsync();
-            var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connection).Options;
+            var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlite(connectionString).Options;
             var db = new AppDbContext(options);
             await db.Database.EnsureCreatedAsync();
 
@@ -901,6 +919,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             return new RunnerEnv
             {
                 Db = db,
+                ScopeFactory = serviceProvider.GetRequiredService<IServiceScopeFactory>(),
                 Hub = hub,
                 Runner = new TestRunner(serviceProvider.GetRequiredService<IServiceScopeFactory>(), hub, accountReader, marketReader, gateway),
                 Trader = trader,

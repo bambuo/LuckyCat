@@ -387,6 +387,50 @@ public class ApiContractTests
             ((await ReadJsonAsync(keyChange)).GetProperty("data")).GetProperty("toolCallingSupported").ValueKind);
     }
 
+    // —— 切流证明（R-14-5）：旧 TraderRunnerService 的 hosted 注册必须整体摘除，调度只剩新链路 ——
+
+    [Fact]
+    public void Program_has_no_legacy_hosted_scheduler_and_maps_cycles_endpoints()
+    {
+        // 生产 Program 是顶级语句、无法以 WebApplicationFactory 直接起宿主；
+        // 用源码扫描钉死「恰好一个调度链」的注册形状——这正是 Task 11 R-11-6 要防的双调度器缺陷面。
+        var program = ReadProductionFile("Program.cs");
+        Assert.DoesNotContain("AddSingleton<TraderRunnerService>", program, StringComparison.Ordinal);
+        Assert.DoesNotContain("AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>())",
+            program, StringComparison.Ordinal);
+        Assert.DoesNotContain("AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>",
+            program, StringComparison.Ordinal);
+        // 新链路：恰好一个恢复宿主 + 单例周期引擎 + 周期端点已接线。
+        Assert.Single(CountOccurrences(program, "AddHostedService<CycleStartupRecovery>"));
+        Assert.Contains("AddSingleton<TradingCycleRunner>", program, StringComparison.Ordinal);
+        Assert.Contains("MapCycles", program, StringComparison.Ordinal);
+        // 旧类仍要能编译（Task 18 才删除）。
+        Assert.True(File.Exists(Path.Combine(FindRepoRoot(), "Services", "TraderRunnerService.cs")));
+    }
+
+    private static IEnumerable<string> CountOccurrences(string text, string needle)
+    {
+        for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = text.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            yield return needle;
+        }
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "LuckyCat.csproj")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new DirectoryNotFoundException("未找到 LuckyCat.csproj 所在目录");
+    }
+
+    private static string ReadProductionFile(string relativePath) =>
+        File.ReadAllText(Path.Combine(FindRepoRoot(), relativePath));
+
     // —— 宿主与辅助 ——
 
     private sealed class TestApp : IAsyncDisposable
@@ -430,6 +474,10 @@ public class ApiContractTests
             builder.Services.AddScoped<ExchangeTradingService>();
             builder.Services.AddScoped<ExchangeVerificationRunner>();
             builder.Services.AddSingleton<SseEventHub>();
+            // B 组接线后策略端点新增 /test-run（TradingCycleRunner）；A 组用例绝不触发它，
+            // 这里只为满足端点参数推断的「可解析」要求——周期/复盘宿主同样只注册、不调用（§4）。
+            builder.Services.AddSingleton<TradingCycleRunner>();
+            builder.Services.AddSingleton<ReviewRunner>();
             // A 组端点绝不触达行情/账户/执行边界：注册即抛守卫，误触达会让测试立刻失败
             builder.Services.AddSingleton<IMarketDataReader>(_ => throw new NotSupportedException("A 组端点不得触达行情接口"));
             builder.Services.AddSingleton<IAccountReader>(_ => throw new NotSupportedException("A 组端点不得触达账户接口"));
