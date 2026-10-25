@@ -46,7 +46,7 @@ public sealed class AnalystExecutor(TradingCycleContext ctx, TradingAgentFactory
 
         ctx.Observe(brief);
         await ctx.Recorder.RecordStageAsync(Stage, StageRunId, brief,
-            PromptLibrary.Build(AgentRole.Analyst, ctx.Config), stats, ct);
+            PromptLibrary.Build(AgentRole.Analyst, ctx.Config), stats, 1, ct);
 
         if (brief.Candidates.Count == 0)
         {

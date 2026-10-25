@@ -56,14 +56,14 @@ public sealed class RiskExecutor(TradingCycleContext ctx, TradingAgentFactory fa
             var safeMessage = new VerdictMessage(input.Proposal, safeVerdict);
             ctx.Observe(safeVerdict);
             await ctx.Recorder.RecordStageAsync(Stage, StageRunId, safeMessage,
-                PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, ct);
+                PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, 1, ct);
             return safeMessage;
         }
 
         var message = new VerdictMessage(input.Proposal, verdict);
         ctx.Observe(verdict);
         await ctx.Recorder.RecordStageAsync(Stage, StageRunId, message,
-            PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, ct);
+            PromptLibrary.Build(AgentRole.Risk, ctx.Config), stats, 1, ct);
 
         if (verdict.Decision == RiskDecision.Rejected)
         {

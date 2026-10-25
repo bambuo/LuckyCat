@@ -17,9 +17,11 @@ public interface ICycleRecorder
     /// <summary>
     /// 记录一个角色阶段。<paramref name="stageRunId"/> **必须**是执行器自身的
     /// <c>StageRunId</c>：ToolAuditor 已按同一 ID 落 ToolInvocation，宿主另造 ID 会让工具审计行悬空。
+    /// <paramref name="attempt"/> 是阶段内的模型尝试次数（LC-STD-05 FLOW-07 契约重试），从 1 起，
+    /// 非重试阶段一律传 1。
     /// </summary>
     Task RecordStageAsync(string role, string stageRunId, object output, string instructions,
-        StageRunStats stats, CancellationToken ct);
+        StageRunStats stats, int attempt, CancellationToken ct);
 
     Task CompleteCycleAsync(TradingCycleContext ctx, string status, string? errorCode, string? error,
         CancellationToken ct);

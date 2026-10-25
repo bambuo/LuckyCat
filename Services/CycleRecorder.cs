@@ -105,7 +105,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
 
     /// <summary>记录一个成功阶段：AgentStageRun 原文落库 + 提案/裁决落库 + stage/proposal/verdict 事件。</summary>
     public async Task RecordStageAsync(string role, string stageRunId, object output, string instructions,
-        StageRunStats stats, CancellationToken ct)
+        StageRunStats stats, int attempt, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(role);
         ArgumentNullException.ThrowIfNull(stageRunId);
@@ -113,6 +113,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
         ArgumentNullException.ThrowIfNull(stats);
         if (_ctx is not { } ctx || _cycle is null) return;
 
+        var attemptNumber = Math.Max(1, attempt);
         if (await IsRecordedAsync(stageRunId)) return;
         var toolCalls = await db.ToolInvocations.CountAsync(i => i.StageRunId == stageRunId, CancellationToken.None);
         var (transcript, truncated) = BuildTranscript(stats.Messages);
@@ -123,7 +124,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
             CycleId = ctx.CycleId,
             TraderId = ctx.Trigger == "test" ? null : ctx.Trader.Id,
             Role = role,
-            Attempt = 1,
+            Attempt = attemptNumber,
             Status = "completed",
             ProviderName = ctx.Provider.Name,
             Model = ctx.Provider.Model,
@@ -158,7 +159,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
         // 先提交，再推送：SSE 只宣告已落库的事实（回滚或写失败不会留下不存在的事件）。
         await db.SaveChangesAsync(CancellationToken.None);
         hub.Publish(_channelKey!, new SseEvent("stage", new StageRecordedEvent(ctx.CycleId, stageRunId, role,
-            "completed", 1, stats.ElapsedMs, stats.InputTokens, stats.OutputTokens, toolCalls,
+            "completed", attemptNumber, stats.ElapsedMs, stats.InputTokens, stats.OutputTokens, toolCalls,
             SummaryOf(output), null)));
         if (proposalPayload is not null) hub.Publish(_channelKey!, new SseEvent("proposal", proposalPayload));
         if (verdictPayload is not null) hub.Publish(_channelKey!, new SseEvent("verdict", verdictPayload));

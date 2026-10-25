@@ -55,7 +55,7 @@ public sealed class ExecutionExecutor(TradingCycleContext ctx, TradingAgentFacto
         var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
 
         await ctx.Recorder.RecordStageAsync(Stage, StageRunId, report,
-            PromptLibrary.Build(AgentRole.Executor, ctx.Config), stats, ct);
+            PromptLibrary.Build(AgentRole.Executor, ctx.Config), stats, 1, ct);
 
         ctx.SetOutcome(report.Errors.Count > 0
             ? new CycleOutcome("completed", "execution_errors", string.Join("; ", report.Errors))

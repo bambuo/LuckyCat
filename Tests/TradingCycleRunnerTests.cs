@@ -297,6 +297,54 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.Equal("failed", (await env.Db.AgentStageRuns.SingleAsync()).Status);
     }
 
+    // —— FLOW-07 交易员契约失败重试 1 次（LC-STD-05:98）——
+
+    [Fact]
+    public async Task Trader_contract_failure_retries_once_and_continues_on_valid_proposal()
+    {
+        // 首轮越界 → 重试 1 次得到合法 open 提案：周期照常走完，Attempt=2 落库。
+        await using var env = await RunnerEnv.CreateAsync(traderBehavior: "invalid-once");
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal(2, env.Clients.CallsFor("trader"));
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        Assert.Equal("completed", cycle.Status);
+        Assert.Null(cycle.ErrorCode);
+        var traderStage = await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "trader");
+        Assert.Equal(2, traderStage.Attempt);
+        Assert.Equal("completed", traderStage.Status);
+        // 重试轮提案正常路由：越界首轮没有生效，风控/执行照常。
+        var proposal = await env.Db.TradeProposals.SingleAsync();
+        Assert.Equal("open", proposal.Action);
+        Assert.NotNull(await env.Db.RiskVerdicts.SingleAsync());
+        Assert.NotNull(await env.Db.AgentStageRuns.SingleOrDefaultAsync(r => r.Role == "executor"));
+    }
+
+    [Fact]
+    public async Task Trader_contract_failure_after_retry_is_fail_closed_with_single_terminal_write()
+    {
+        // 重试仍越界 → 维持既有 fail-closed：failed + stage_contract_violation + Hold 归一化收尾。
+        // 终态恰好写一次（宿主的守卫不再补写）；无后续阶段、无订单；Attempt=2 落库。
+        await using var env = await RunnerEnv.CreateAsync(traderBehavior: "invalid");
+        var stream = env.Subscribe(env.Trader.Id);
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal(2, env.Clients.CallsFor("trader"));
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        Assert.Equal("failed", cycle.Status);
+        Assert.Equal("stage_contract_violation", cycle.ErrorCode);
+        var traderStage = await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "trader");
+        Assert.Equal(2, traderStage.Attempt);
+        var proposal = await env.Db.TradeProposals.SingleAsync();
+        Assert.Equal("hold", proposal.Action);
+        Assert.Empty(await env.Db.AgentStageRuns.Where(r => r.Role == "risk" || r.Role == "executor").ToListAsync());
+        Assert.Empty(env.Db.TraderOrders);
+        // 终态 cycle 事件恰好一次（开始 + 终态 = 2）：守卫没有重复终态写入。
+        Assert.Equal(2, stream.Drain().Count(e => e.Name == "cycle"));
+    }
+
     // —— 成功路径：落库与 SSE 负载契约 ——
 
     [Fact]
@@ -760,7 +808,8 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             string analystBehavior = "brief", string riskBehavior = "approve",
             string executorBehavior = "clean", string clientFactoryBehavior = "normal",
             int cycleTimeoutSeconds = 300, int riskTimeoutSeconds = 45, List<SymbolPosition>? positions = null,
-            bool hangPositions = false, bool terminalFaultOnce = false)
+            bool hangPositions = false, bool terminalFaultOnce = false, string traderBehavior = "proposal",
+            int inputTokenBudget = 0)
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
@@ -777,6 +826,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                     RiskTimeoutSeconds = riskTimeoutSeconds,
                 }
             };
+            if (inputTokenBudget > 0) config.AgentBudget.InputTokenBudget = inputTokenBudget;
             config.CoinSource.StaticCoins = ["BTC", "ETH", "SOL"];
 
             var provider = ScriptedProvider(128_000);
@@ -805,7 +855,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             var marketReader = new ScriptedMarketReader();
             var gateway = new RecordingGateway();
             var clients = new ScriptedChatClient(analystBehavior, riskBehavior, executorBehavior,
-                clientFactoryBehavior == "throw");
+                clientFactoryBehavior == "throw", traderBehavior);
 
             var services = new ServiceCollection();
             // terminalFaultOnce：注入「终态落库失败一次」的瞬时 DB 故障（A1）；scope 解析返回同一实例，
@@ -891,7 +941,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
 
     /// <summary>按角色工具集识别当前阶段；同一实例同时充当工厂产物（每个周期一个 client）。</summary>
     private sealed class ScriptedChatClient(string analystBehavior, string riskBehavior, string executorBehavior,
-        bool throwOnCreate) : ChatClientFactory, IChatClient
+        bool throwOnCreate, string traderBehavior = "proposal") : ChatClientFactory, IChatClient
     {
         private readonly Dictionary<string, string> _prompts = new(StringComparer.Ordinal);
         private readonly Dictionary<string, int> _callsByRole = new(StringComparer.Ordinal);
@@ -921,7 +971,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 "analyst" => analystBehavior,
                 "risk" => riskBehavior,
                 "executor" => executorBehavior,
-                _ => "proposal",
+                _ => traderBehavior,
             };
 
             // 脚本化模型走真实的 ChatClientAgent 工具循环：分析师首轮先调用读工具，再产出结构化结果
@@ -931,6 +981,18 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 return new ChatResponse(new ChatMessage(ChatRole.Assistant,
                     [new FunctionCallContent("call-1", "get_klines",
                         new Dictionary<string, object?> { ["symbol"] = "BTC/USDT", ["timeframe"] = "5m", ["bars"] = 30 })]));
+            }
+
+            // overcap：首轮工具调用即回报恰好打满预算的 prompt 用量——第二轮必须被每次调用前的
+            // 预算闸拦下、不得转发给本 inner client（LC-STD-01 §6「超限不再发起调用」）。
+            if (behavior == "overcap" && role == "analyst" && call == 1)
+            {
+                var gated = new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                    [new FunctionCallContent("call-gate", "get_klines",
+                        new Dictionary<string, object?> { ["symbol"] = "BTC/USDT", ["timeframe"] = "5m", ["bars"] = 30 })]));
+                // 真实提供商在每次响应上都带 usage_metadata；假 client 按同一形状填 Usage。
+                gated.Usage = new UsageDetails { InputTokenCount = 2_000, OutputTokenCount = 10 };
+                return gated;
             }
 
             // 「order」：执行员首轮发起一次 place_order 写调用——试运行会被周期归属硬闸拒绝（不落订单、
@@ -975,7 +1037,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             {
                 "huge" => HugeBriefJson,
                 "errors" => ErrorReportJson,
-                _ => PayloadFor(role, behavior),
+                _ => PayloadFor(role, behavior, call),
             };
             var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, json));
             // burst：分析师一次性回报远超预算的输入用量，触发后续阶段的 token 预算闸（FLOW-09）。
@@ -983,10 +1045,16 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             return response;
         }
 
-        private static string PayloadFor(string? role, string behavior) => role switch
+        private static string PayloadFor(string? role, string behavior, int call) => role switch
         {
             "analyst" => BriefJson,
-            "trader" => OpenProposalJson,
+            "trader" => behavior switch
+            {
+                // FLOW-07：越界动作注入——invalid 两轮都越界；invalid-once 首轮越界、重试轮合法。
+                "invalid" => InvalidActionJson,
+                "invalid-once" when call == 1 => InvalidActionJson,
+                _ => OpenProposalJson,
+            },
             "risk" when behavior == "reject" => RejectedVerdictJson,
             "risk" => ApprovedVerdictJson,
             "executor" => CleanReportJson,
@@ -1017,6 +1085,10 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
 
         private const string OpenProposalJson =
             """{"action":"open","symbol":"BTC/USDT","side":"long","confidence":0.8,"entryPrice":100,"stopLossPrice":95,"takeProfitPrice":110,"positionPct":1,"leverage":5,"thesis":"趋势向上，回踩确认","invalidation":"跌破 90 失效","reviewChecklist":["检查新鲜度"]}""";
+
+        /// <summary>越界动作（FLOW-07 契约重试注入）：JsonStringEnumConverter 原样接受数值 99。</summary>
+        private const string InvalidActionJson =
+            """{"action":99,"symbol":"BTC/USDT","side":"long","confidence":0.8,"entryPrice":100,"stopLossPrice":95,"takeProfitPrice":110,"positionPct":1,"leverage":5,"thesis":"越界动作注入","invalidation":null,"reviewChecklist":[]}""";
 
         private static string ApprovedVerdictJson =>
             $$"""{"decision":"approved","reasons":["边界内"],"maxPositionPct":1,"maxLeverage":5,"entryZoneMin":95,"entryZoneMax":105,"allowMarket":true,"validUntilUtc":"{{DateTime.UtcNow.AddMinutes(5).ToString("O", CultureInfo.InvariantCulture)}}"}""";
