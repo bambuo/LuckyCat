@@ -8,6 +8,7 @@ import {
   createStrategy,
   deleteStrategy,
   duplicateStrategy,
+  getCycle,
   getStrategyDefaults,
   listProviders,
   listStrategies,
@@ -179,13 +180,11 @@ function applyBudgetFallbacks() {
   }
 }
 
-/** 保存前校验：角色指令上限、复盘时刻/回看天数、预算正整数。 */
-function validateDraft(): string | null {
-  const config = draft.value
-  if (!config) return null
-
+/** 配置校验（保存与导入共用）：角色指令上限、复盘时刻/回看天数、预算正整数。 */
+function validateConfig(config: StrategyConfig): string | null {
   for (const key of ROLE_KEYS) {
-    const length = (config.roleInstructions[key] ?? '').length
+    // 先按去空白后的长度判定：2001 字但首尾空白去掉后恰为 2000 字应放行
+    const length = (config.roleInstructions[key] ?? '').trim().length
     if (length > ROLE_INSTRUCTION_MAX) {
       return `「${ROLE_LABELS[key]}」指令 ${length} 字，超出 ${ROLE_INSTRUCTION_MAX} 字上限，请精简后再保存`
     }
@@ -216,13 +215,19 @@ function validateDraft(): string | null {
   return null
 }
 
-/** 保存前收敛：角色指令去首尾空白。 */
-function applyDraftNormalization() {
-  const config = draft.value
-  if (!config) return
+function validateDraft(): string | null {
+  return draft.value ? validateConfig(draft.value) : null
+}
+
+/** 角色指令去首尾空白（保存与导入共用）。 */
+function trimRoleInstructions(config: StrategyConfig) {
   for (const key of ROLE_KEYS) {
     config.roleInstructions[key] = (config.roleInstructions[key] ?? '').trim()
   }
+}
+
+function applyDraftNormalization() {
+  if (draft.value) trimRoleInstructions(draft.value)
 }
 
 async function save() {
@@ -354,30 +359,48 @@ function importStrategy() {
   input.onchange = async () => {
     const file = input.files?.[0]
     if (!file) return
+    let parsed: { name?: unknown; description?: unknown; config?: unknown }
     try {
-      const parsed = JSON.parse(await file.text()) as { name?: unknown; description?: unknown; config?: unknown }
-      if (
-        typeof parsed?.name !== 'string' ||
-        parsed.name.trim() === '' ||
-        !parsed.config ||
-        typeof parsed.config !== 'object'
-      ) {
-        Message.error('无效的策略文件')
-        return
-      }
+      parsed = JSON.parse(await file.text()) as typeof parsed
+    } catch {
+      Message.error('无效的策略文件')
+      return
+    }
+    if (
+      typeof parsed?.name !== 'string' ||
+      parsed.name.trim() === '' ||
+      !parsed.config ||
+      typeof parsed.config !== 'object'
+    ) {
+      Message.error('无效的策略文件')
+      return
+    }
+    if (!defaults.value) {
+      Message.error('策略默认配置尚未加载，请稍后重试')
+      return
+    }
+    const config = normalizeImportedConfig(parsed.config as Partial<StrategyConfig>)
+    // 导入文件与手工编辑走同一套校验，非法角色指令/预算/复盘配置不得落库
+    const validationError = validateConfig(config)
+    if (validationError) {
+      Message.error(validationError)
+      return
+    }
+    trimRoleInstructions(config)
+    try {
       const created = await createStrategy({
         name: `${parsed.name.trim()}（导入）`,
         description:
           typeof parsed.description === 'string' && parsed.description.trim() !== ''
             ? parsed.description.trim()
             : null,
-        config: normalizeImportedConfig(parsed.config as Partial<StrategyConfig>),
+        config,
       })
       strategies.value = [created, ...strategies.value]
       selectStrategy(created)
       Message.success('策略已导入')
-    } catch {
-      Message.error('无效的策略文件')
+    } catch (err) {
+      Message.error(err instanceof Error ? err.message : '导入失败')
     }
   }
   input.click()
@@ -420,6 +443,8 @@ const testError = ref<string | null>(null)
 const testCapabilityMissing = ref(false)
 const testWarnings = ref<string[]>([])
 const testCycle = ref<CycleEventPayload | null>(null)
+const testCycleErrorCode = ref<string | null>(null)
+const testCycleErrorText = ref<string | null>(null)
 const testRunActive = ref(false)
 const testProposal = ref<ProposalDto | null>(null)
 const testVerdict = ref<VerdictDto | null>(null)
@@ -428,6 +453,8 @@ const testStages = ref<Record<string, StageDto>>({})
 const testTools = ref<Record<string, ToolEventPayload[]>>({})
 const testToolKeys = new Set<string>()
 let disposeTestRun: (() => void) | null = null
+let testDetailFetched = false
+let testRunToken = 0
 
 const STREAM_STATUS_META: Record<
   ConnectionState,
@@ -546,6 +573,8 @@ function handleTestEvent(event: CycleEvent) {
       break
     case 'cycle':
       testCycle.value = event
+      // 周期级错误（执行阶段拒绝、token 预算提前结束等）必须留在界面上
+      if (event.error) testCycleErrorText.value = event.error
       if (event.status !== 'running') testRunActive.value = false
       break
     case 'stage': {
@@ -581,11 +610,32 @@ function handleTestEvent(event: CycleEvent) {
   }
 }
 
+/** 流结束后补拉一次周期详情：SSE 的 cycle 帧不带 errorCode，详情才有 execution_errors 等码。 */
+async function fetchTestCycleDetail() {
+  const cycleId = testCycle.value?.cycleId
+  if (!cycleId || testDetailFetched) return
+  testDetailFetched = true
+  const token = testRunToken
+  try {
+    const detail = await getCycle(cycleId)
+    if (token !== testRunToken || testCycle.value?.cycleId !== cycleId) return
+    if (detail.cycle.errorCode) testCycleErrorCode.value = detail.cycle.errorCode
+    if (detail.cycle.error) testCycleErrorText.value = detail.cycle.error
+  } catch {
+    // 补拉失败不覆盖流内错误：阶段/工具错误仍已展示
+  }
+}
+
 function handleTestStatus(state: ConnectionState) {
   streamStatus.value = state
-  if (state === 'closed' || state === 'error') {
+  if (state === 'error') {
     testRunning.value = false
     testRunActive.value = false
+  }
+  if (state === 'closed') {
+    testRunning.value = false
+    testRunActive.value = false
+    void fetchTestCycleDetail()
   }
 }
 
@@ -612,6 +662,9 @@ function resetTestView() {
   testCapabilityMissing.value = false
   testWarnings.value = []
   testCycle.value = null
+  testCycleErrorCode.value = null
+  testCycleErrorText.value = null
+  testDetailFetched = false
   testRunActive.value = false
   testProposal.value = null
   testVerdict.value = null
@@ -636,6 +689,7 @@ function startTestRun() {
   disposeTestRun?.()
   disposeTestRun = null
   resetTestView()
+  testRunToken += 1
   testStarted.value = true
   testRunning.value = true
   streamStatus.value = 'connecting'
@@ -929,6 +983,19 @@ onMounted(load)
           </span>
           <span v-else-if="testRunning">等待周期事件…</span>
           <span v-else>未收到周期事件。</span>
+          <span v-if="testCycle?.error" class="run-error-line"> · {{ testCycle.error }}</span>
+        </a-alert>
+
+        <a-alert
+          v-if="testCycleErrorCode || (testCycleErrorText && testCycleErrorText !== testCycle?.error)"
+          type="warning"
+          banner
+          title="周期级提示（执行阶段被拒属于试运行的正常结果）"
+        >
+          <code v-if="testCycleErrorCode" class="error-code">{{ testCycleErrorCode }}</code>
+          <span v-if="testCycleErrorText && testCycleErrorText !== testCycle?.error">
+            {{ testCycleErrorText }}
+          </span>
         </a-alert>
 
         <a-alert v-if="testCapabilityMissing" type="error" banner title="提供商未通过工具调用验证">
@@ -946,7 +1013,11 @@ onMounted(load)
         <template v-if="testStarted">
           <div v-if="testStageBlocks.length === 0" class="test-empty">
             <a-spin v-if="testRunning" />
-            <span>{{ testRunning ? '等待智能体阶段事件…' : '试运行已结束，未收到阶段事件。' }}</span>
+            <span v-if="testRunning">等待智能体阶段事件…</span>
+            <span v-else-if="testCycleErrorCode || testCycleErrorText || testError">
+              试运行未能启动或已中断，请根据上方错误提示处理后重试。
+            </span>
+            <span v-else>试运行已结束，未收到阶段事件。</span>
           </div>
 
           <div v-else class="test-flow">
@@ -1259,6 +1330,17 @@ onMounted(load)
 }
 
 .stream-banner {
+  font-size: 12px;
+}
+
+.run-error-line {
+  color: rgb(var(--warning-6));
+  word-break: break-word;
+}
+
+.error-code {
+  margin-right: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
 

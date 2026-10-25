@@ -40,7 +40,8 @@ const RUN_STATUS_META: Record<ReviewRunStatus, { label: string; color: string }>
 // —— 交易员选择（?trader=<id>，与看板同一约定） ——
 
 const traders = ref<Trader[]>([])
-const tradersLoading = ref(false)
+// 首次加载前即为加载态：避免空数组先闪一下「暂无交易员/暂无记录」
+const tradersLoading = ref(true)
 const errorText = ref<string | null>(null)
 const selectedId = computed<number | null>(() => {
   const raw = route.query.trader
@@ -65,6 +66,9 @@ async function loadTraders() {
     }
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : '加载交易员失败'
+    // 没有交易员就无法发起列表请求：结束初始加载态，避免 spinner 永久旋转
+    reviewLoading.value = false
+    lessonLoading.value = false
   } finally {
     tradersLoading.value = false
   }
@@ -77,7 +81,7 @@ const reviews = ref<ReviewListItemDto[]>([])
 const reviewTotal = ref(0)
 const reviewPage = ref(1)
 const reviewPageSize = ref(10)
-const reviewLoading = ref(false)
+const reviewLoading = ref(true)
 const reviewError = ref<string | null>(null)
 let reviewSeq = 0
 
@@ -120,7 +124,7 @@ const lessons = ref<LessonDto[]>([])
 const lessonTotal = ref(0)
 const lessonPage = ref(1)
 const lessonPageSize = ref(10)
-const lessonLoading = ref(false)
+const lessonLoading = ref(true)
 const lessonError = ref<string | null>(null)
 let lessonSeq = 0
 
@@ -219,8 +223,10 @@ async function onRunReview() {
   } catch (err) {
     // 409 / 422 都是契约内的正常结果：用警告呈现，不按失败弹错误框。
     if (err instanceof ApiRequestError && (err.code === 'review_in_progress' || err.status === 409)) {
-      runWarning.value = '60 秒内已触发过，请稍候'
-      Message.warning('60 秒内已触发过，请稍候')
+      // 后端区分「进行中」与「近期已触发」，直接展示其文案而不是固定 60 秒提示
+      const message = err.message || '复盘触发被拒绝，请稍候'
+      runWarning.value = message
+      Message.warning(message)
     } else if (err instanceof ApiRequestError && (err.code === 'review_no_data' || err.status === 422)) {
       runWarning.value = err.message
       Message.warning(err.message)

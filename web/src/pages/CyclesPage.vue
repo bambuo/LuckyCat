@@ -70,7 +70,8 @@ const TRANSCRIPT_ROLE_LABELS: Record<string, string> = {
 // —— 交易员选择（?trader=<id>，与看板同一约定） ——
 
 const traders = ref<Trader[]>([])
-const tradersLoading = ref(false)
+// 首次加载前即为加载态：避免空数组先闪一下「暂无交易员/暂无周期」
+const tradersLoading = ref(true)
 const selectedId = computed<number | null>(() => {
   const raw = route.query.trader
   const id = Number(Array.isArray(raw) ? raw[0] : raw)
@@ -94,6 +95,8 @@ async function loadTraders() {
     }
   } catch (err) {
     errorText.value = err instanceof Error ? err.message : '加载交易员失败'
+    // 没有交易员就无法发起列表请求：结束初始加载态，避免 spinner 永久旋转
+    listLoading.value = false
   } finally {
     tradersLoading.value = false
   }
@@ -105,7 +108,7 @@ const cycles = ref<CycleDto[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
-const listLoading = ref(false)
+const listLoading = ref(true)
 const errorText = ref<string | null>(null)
 let listSeq = 0
 

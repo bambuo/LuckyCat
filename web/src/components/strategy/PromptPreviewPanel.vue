@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconRefresh } from '@arco-design/web-vue/es/icon'
 import { previewStrategyPrompts } from '../../api'
@@ -11,6 +11,16 @@ const props = defineProps<{ config: StrategyConfig }>()
 const preview = ref<PromptPreviewResult | null>(null)
 const loading = ref(false)
 const errorText = ref<string | null>(null)
+const stale = ref(false)
+
+// 配置（含角色指令/指标/风控等）任何改动后，已生成的预览不再对应当前草稿
+watch(
+  () => props.config,
+  () => {
+    if (preview.value) stale.value = true
+  },
+  { deep: true },
+)
 
 const ROLE_ORDER: StageRole[] = ['analyst', 'trader', 'risk', 'executor', 'reviewer']
 
@@ -41,6 +51,7 @@ async function generate() {
   errorText.value = null
   try {
     preview.value = await previewStrategyPrompts(props.config)
+    stale.value = false
   } catch (err) {
     const message = err instanceof Error ? err.message : '生成预览失败'
     errorText.value = message
@@ -67,6 +78,7 @@ async function generate() {
     </div>
 
     <a-alert v-if="errorText" type="error">{{ errorText }}</a-alert>
+    <a-alert v-if="stale && preview" type="warning">配置已变更，当前预览可能过期，请重新生成。</a-alert>
 
     <div v-if="!preview" class="panel-empty">
       <div class="empty-title">五角色系统指令预览</div>
