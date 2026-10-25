@@ -7,6 +7,7 @@ using Polly;
 using LuckyCat.Contracts;
 using LuckyCat.Data;
 using LuckyCat.Endpoints;
+using LuckyCat.Memory;
 using LuckyCat.Services;
 using System.Text.Json.Serialization;
 
@@ -46,6 +47,14 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<TraderRunnerServic
 builder.Services.AddScoped<CycleRecorder>();
 builder.Services.AddSingleton<TradingCycleRunner>();
 builder.Services.AddHostedService<CycleStartupRecovery>();
+// P5 复盘（Task 13）：复盘宿主 + 每日本地时刻调度。
+// 与 R-11-6 的关系：那条禁令针对的是迁移期不得把**交易**宿主（TradingCycleRunner）注册为 hosted 调度
+// ——旧 TraderRunnerService 仍是唯一自动调度链，双宿主会对同一 IsRunning 交易员双重开仓。
+// 复盘员不下单、不改策略/风控/交易员状态（LC-STD-01 §1.35、§9「只读工具；不修改任何配置」），
+// 因此 ReviewScheduler 不构成第二条交易调度链；而 §9 的「本地时刻（默认 00:10）」定时触发
+// 只能由宿主驱动，这里必须托管。它与交易周期各用各的闸，互不占用（R-13-5）。
+builder.Services.AddSingleton<ReviewRunner>();
+builder.Services.AddHostedService<ReviewScheduler>();
 builder.Services.AddSingleton<PositionHistorySyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionHistorySyncService>());
 builder.Services.AddSingleton<AccountStreamService>();

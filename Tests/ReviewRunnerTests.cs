@@ -490,6 +490,68 @@ public class ReviewRunnerTests(ITestOutputHelper output)
         Assert.Equal(0, await env.CreateScheduler().RunTickAsync(DateTime.UtcNow, default));
     }
 
+    // —— 标准条款补测：窗口交给模型（§9 窗口行）/ 复盘只读边界（§1.35、§9 限制行）/
+    //    复盘耗时可观测（§10）/ 经验注入合计 ≤1,200 字（§9 注入行）——
+
+    [Fact]
+    public async Task User_prompt_hands_the_model_the_window_and_the_read_only_boundary()
+    {
+        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1);
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        var lesson = env.Db.TraderLessons.Single();
+        const string marker = "复盘窗口起点 ";
+        var line = env.Client.Prompt.Split('\n').Single(l => l.StartsWith(marker, StringComparison.Ordinal));
+        var since = DateTimeOffset.Parse(line[marker.Length..].Trim(), CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+        // §9 窗口行：窗口是宿主算好交给模型的，模型只能按这个起点取数（工具默认只查最近 7 天）。
+        Assert.True((since.UtcDateTime - lesson.PeriodStart).Duration() < TimeSpan.FromSeconds(1),
+            $"提示词窗口起点 {since.UtcDateTime:O} 应与落库窗口起点 {lesson.PeriodStart:O} 一致");
+        Assert.Contains(lesson.PeriodEnd.ToString("O", CultureInfo.InvariantCulture), env.Client.Prompt);
+
+        // §1.35 + §9「限制」行的提示词侧：复盘员只读、不改配置、不预测价格。
+        Assert.Contains("只读复盘角色", env.Client.Prompt);
+        Assert.Contains("不得修改策略、风控配置、交易员状态或历史交易记录", env.Client.Prompt);
+        Assert.Contains("不得给出未来价格预测", env.Client.Prompt);
+    }
+
+    [Fact]
+    public async Task Completed_review_is_observable_through_the_stage_row()
+    {
+        // LC-STD-01 §10：复盘耗时可观测——阶段行必须带耗时、消息记录与结构化输出。
+        await using var env = await ReviewEnv.CreateAsync(closedTrades: 1, behavior: "report_with_tool");
+
+        var result = await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal("completed", result.Status);
+        Assert.True(result.ElapsedMs > 0);
+        var stage = await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "reviewer");
+        Assert.Equal(result.ElapsedMs, stage.ElapsedMs);
+        Assert.NotNull(stage.OutputJson);
+        using var transcript = JsonDocument.Parse(stage.TranscriptJson);
+        Assert.Equal(JsonValueKind.Array, transcript.RootElement.ValueKind);
+        // 密钥与上游地址既不进 error，也不进 transcript / outputJson。
+        Assert.DoesNotContain("sk-test", stage.TranscriptJson);
+        Assert.DoesNotContain("invalid.test", stage.OutputJson);
+    }
+
+    [Fact]
+    public async Task Maximum_size_lesson_stays_inside_the_injection_budget()
+    {
+        // §9 注入行（最近 3 份、合计 ≤1,200 字）必须对「复盘写出的最大经验」依然成立：
+        // summary 取 LC-STD-03 §2.1 的列上限 2,000 字，注入块仍要裁到 1,200 字以内。
+        await using var env = await ReviewEnv.CreateAsync();
+        env.SeedLesson(TimeSpan.FromHours(1), new string('总', 2_000));
+
+        var memory = new TradingMemoryContextProvider(env.Reader, env.Config);
+        var blocks = await memory.BuildContextAsync(default);
+
+        Assert.NotNull(blocks.LessonsBlock);
+        Assert.True(blocks.LessonsBlock!.Length <= 1_200,
+            $"经验注入块 {blocks.LessonsBlock.Length} 字超 §9 上限");
+    }
+
     // —— 夹具 ——
 
     private static async Task WaitUntilAsync(Func<bool> condition, string message, int timeoutMs = 10_000)
