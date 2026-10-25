@@ -9,7 +9,6 @@ using LuckyCat.Data;
 using LuckyCat.Endpoints;
 using LuckyCat.Memory;
 using LuckyCat.Services;
-using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,12 +18,10 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite("Data Source=luckycat.db"));
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    // 属性命名与 ApiJson.Options 对齐（camelCase、大小写不敏感、忽略未映射字段以兼容旧客户端）。
-    options.SerializerOptions.PropertyNamingPolicy = ApiJson.Options.PropertyNamingPolicy;
-    options.SerializerOptions.PropertyNameCaseInsensitive = ApiJson.Options.PropertyNameCaseInsensitive;
-    // 旧端点仍依赖 PascalCase 枚举（ProviderType/ExchangeType 由现前端按值匹配），
-    // 保留旧 JsonStringEnumConverter 直到 P7 端点重写；新代码使用 ApiJson.Options / AgentJson.Options 的 camelCase 枚举。
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    // 请求绑定与结果序列化统一对齐 ApiJson 约定（LC-STD-03 §1.1/§1.2）：
+    // camelCase 属性与 camelCase 枚举字符串；请求体禁止未映射字段（Disallow → 400 validation_failed）。
+    // P5/P6 端点重写（Task 14）起生效；旧前端与新契约同步适配。
+    ApiJson.Configure(options.SerializerOptions);
 });
 builder.Services.AddScoped<ChatClientFactory>();
 builder.Services.AddScoped<VerificationRunner>();
@@ -121,9 +118,13 @@ using (var scope = app.Services.CreateScope())
     db.Database.EnsureCreated();
 }
 
+// 未预期异常与请求体绑定失败的统一包裹（LC-STD-03 §1.2/§6；响应不含堆栈/SQL/上游地址，LC-STD-02）
+app.UseApiErrorWrapper();
+
 app.MapProviders();
 app.MapExchanges();
 app.MapStrategies();
 app.MapTraders();
+app.MapHealth();
 
 app.Run();

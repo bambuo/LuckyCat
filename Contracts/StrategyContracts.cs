@@ -35,6 +35,14 @@ public record PromptPreviewDto(
     string SystemPrompt,
     List<PromptSummaryItem> Summary);
 
+/// <summary>preview-prompts 单角色产物：系统指令全文与估算 token（LC-STD-03 §3.3，不调用模型）。</summary>
+public record RolePromptPreviewDto(LuckyCat.Agents.AgentRole Role, string Prompt, int EstimatedTokens);
+
+public record PromptPreviewResultDto(IReadOnlyList<RolePromptPreviewDto> Roles);
+
+/// <summary>validate 通过时的载荷；不通过走 400 validation_failed（错误码表 LC-STD-03 §6）。</summary>
+public record StrategyValidationDto(bool Valid, IReadOnlyList<string> Errors);
+
 public record StrategyTestRequest(
     StrategyConfig? Config,
     int ProviderId,

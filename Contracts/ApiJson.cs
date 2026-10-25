@@ -13,6 +13,24 @@ public static class ApiJson
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
+
+    /// <summary>
+    /// 把 ASP.NET Core HTTP JSON（请求绑定与结果序列化）对齐到 <see cref="Options"/> 约定：
+    /// camelCase、camelCase 枚举字符串、请求体禁止未映射字段。生产 Program 与测试宿主共用本入口，
+    /// 保证「测试证明的绑定行为」与「运行时绑定行为」同源。
+    /// </summary>
+    public static void Configure(JsonSerializerOptions target)
+    {
+        target.PropertyNamingPolicy = Options.PropertyNamingPolicy;
+        target.DictionaryKeyPolicy = Options.DictionaryKeyPolicy;
+        target.PropertyNameCaseInsensitive = Options.PropertyNameCaseInsensitive;
+        target.UnmappedMemberHandling = Options.UnmappedMemberHandling;
+        target.DefaultIgnoreCondition = Options.DefaultIgnoreCondition;
+        foreach (var converter in Options.Converters)
+        {
+            target.Converters.Add(converter);
+        }
+    }
 }
 
 // 模型结构化输出反序列化：camelCase、大小写不敏感、忽略未映射字段（模型可能返回额外字段）。

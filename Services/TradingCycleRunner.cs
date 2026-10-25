@@ -249,6 +249,9 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     /// 不落交易员与真实账户（周期行 TraderId/ExchangeAccountId 为 null），事件经 <paramref name="onEvent"/>
     /// 回写给调用方（test-run 的 SSE 响应流）。行情只读允许，交易与账户接口一律不访问。
     /// <paramref name="includeMemory"/>=false 时记忆与经验完全不读库。
+    /// 注：试运行永不下单的真正原因不是 <c>mode=dry</c> 本身，而是写工具硬闸对**周期归属**fail-closed
+    /// ——试运行周期的 traderId/exchangeAccountId 为 null，归属校验必不通过（R-11-8、ExecutionTools
+    /// "周期归属不匹配"）；mode=dry 只是额外把真实提交降级为模拟成交（R-14-4）。
     /// </summary>
     public async Task<string> RunTestAsync(Provider provider, Strategy strategy, decimal testEquity,
         bool includeMemory, Func<SseEvent, Task>? onEvent, CancellationToken ct)
@@ -750,43 +753,7 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     /// <summary>执行器 ID → 阶段标识与 StageRunId（阶段失败时按此对齐 AgentStageRun）。</summary>
     private sealed record StageSlot(string Role, string StageRunId);
 
-    /// <summary>
-    /// 试运行账户读取器：权益固定为合成值、持仓为空，绝不触达交易/账户接口（API-06）；
-    /// includeMemory=false 时记忆、经验、订单与平仓历史完全不读库。
-    /// </summary>
-    private sealed class SyntheticAccountReader(IAccountReader inner, decimal equity, bool includeMemory)
-        : IAccountReader
-    {
-        public Task<AccountSnapshot> GetAccountAsync(CancellationToken ct) =>
-            Task.FromResult(new AccountSnapshot(true, equity, equity, null));
-
-        public Task<PositionReadResult> GetPositionsAsync(CancellationToken ct) =>
-            Task.FromResult(new PositionReadResult(true, [], null));
-
-        public Task<RiskControlConfig> GetRiskPolicyAsync(CancellationToken ct) => inner.GetRiskPolicyAsync(ct);
-
-        public Task<TradingDiscipline> GetDisciplineAsync(CancellationToken ct) => inner.GetDisciplineAsync(ct);
-
-        public Task<IReadOnlyList<TraderOrder>> GetRecentOrdersAsync(int limit, CancellationToken ct) =>
-            includeMemory ? inner.GetRecentOrdersAsync(limit, ct) : Task.FromResult<IReadOnlyList<TraderOrder>>([]);
-
-        public Task<IReadOnlyList<PositionHistory>> GetClosedTradesAsync(DateTime sinceUtc, int limit,
-            CancellationToken ct) => includeMemory
-            ? inner.GetClosedTradesAsync(sinceUtc, limit, ct)
-            : Task.FromResult<IReadOnlyList<PositionHistory>>([]);
-
-        public Task<IReadOnlyList<TradeProposal>> GetDecisionMemoryAsync(int limit, CancellationToken ct) =>
-            includeMemory
-                ? inner.GetDecisionMemoryAsync(limit, ct)
-                : Task.FromResult<IReadOnlyList<TradeProposal>>([]);
-
-        public Task<IReadOnlyList<TradingCycle>> GetCyclesAsync(DateTime sinceUtc, int limit, CancellationToken ct) =>
-            includeMemory
-                ? inner.GetCyclesAsync(sinceUtc, limit, ct)
-                : Task.FromResult<IReadOnlyList<TradingCycle>>([]);
-
-        public Task<IReadOnlyList<TraderLesson>> GetLessonsAsync(int limit, CancellationToken ct) => includeMemory
-            ? inner.GetLessonsAsync(limit, ct)
-            : Task.FromResult<IReadOnlyList<TraderLesson>>([]);
-    }
+    // 试运行账户读取器已提取为 Services/SyntheticAccountReader.cs（Task 14 R-14-2）：
+    // 语义与内嵌版逐字一致——合成权益+空持仓、风控/纪律委托 inner、includeMemory 门控记忆读库，
+    // 不伪造任何数据；试运行与测试共用该单一实现。
 }
