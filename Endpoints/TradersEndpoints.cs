@@ -25,581 +25,584 @@ public static class TradersEndpoints
     /// <summary>复盘重复触发窗口（秒，LC-STD-03 §1.4/§6：60 秒内重复触发 → 409 review_in_progress）。</summary>
     private const int ReviewTriggerCooldownSeconds = 60;
 
-    public static RouteGroupBuilder MapTraders(this IEndpointRouteBuilder app)
+    extension(IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/api/traders");
-
-        group.MapGet("/", async (AppDbContext db, CancellationToken ct) =>
+        public RouteGroupBuilder MapTraders()
         {
-            var items = await db.Traders.OrderByDescending(t => t.Id).ToListAsync(ct);
-            var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
-            var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
-            var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
-            return ApiResults.Ok(items.Select(t => ToDto(t, providers, accounts, strategies)).ToList());
-        });
+            var group = app.MapGroup("/api/traders");
 
-        group.MapPost("/", async (TraderUpsertRequest request, AppDbContext db, CancellationToken ct) =>
-        {
-            var error = await ValidateAsync(request, db, ct);
-            if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
-
-            var now = DateTime.UtcNow;
-            var trader = new Trader
+            group.MapGet("/", async (AppDbContext db, CancellationToken ct) =>
             {
-                Name = request.Name.Trim(),
-                ProviderId = request.ProviderId,
-                ExchangeAccountId = request.ExchangeAccountId,
-                StrategyId = request.StrategyId,
-                IsRunning = false,
-                ExecutionMode = NormalizeMode(request.ExecutionMode),
-                IsCrossMargin = request.IsCrossMargin,
-                ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60),
-                InitialBalance = request.InitialBalance,
-                CreatedAt = now,
-                UpdatedAt = now,
-            };
-            db.Traders.Add(trader);
-            await db.SaveChangesAsync(ct);
+                var items = await db.Traders.OrderByDescending(t => t.Id).ToListAsync(ct);
+                var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
+                var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
+                var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
+                return ApiResults.Ok(items.Select(t => ToDto(t, providers, accounts, strategies)).ToList());
+            });
 
-            var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
-            var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
-            var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
-            return ApiResults.Created(ToDto(trader, providers, accounts, strategies));
-        });
-
-        group.MapPut("/{id:int}", async (int id, TraderUpsertRequest request, AppDbContext db,
-            TradingCycleRunner runner, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            var error = await ValidateAsync(request, db, ct);
-            if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
-
-            trader.Name = request.Name.Trim();
-            trader.ProviderId = request.ProviderId;
-            trader.ExchangeAccountId = request.ExchangeAccountId;
-            trader.StrategyId = request.StrategyId;
-            trader.ExecutionMode = NormalizeMode(request.ExecutionMode);
-            trader.IsCrossMargin = request.IsCrossMargin;
-            trader.ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60);
-            trader.InitialBalance = request.InitialBalance;
-            trader.UpdatedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync(ct);
-
-            // 运行中：以新配置重启循环（新间隔/新绑定立即生效）——仍是唯一调度链（R-14-5）。
-            if (trader.IsRunning) runner.Restart(trader.Id);
-
-            var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
-            var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
-            var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
-            return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
-        });
-
-        group.MapDelete("/{id:int}", async (int id, AppDbContext db, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            if (trader.IsRunning)
+            group.MapPost("/", async (TraderUpsertRequest request, AppDbContext db, CancellationToken ct) =>
             {
-                return ApiResults.Fail("conflict", "交易员正在运行，请先停止再删除", 409);
-            }
+                var error = await ValidateAsync(request, db, ct);
+                if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
 
-            // 已有周期或订单审计历史的交易员不得硬删除（LC-STD-03 §1.4：审计链完整，用停止代替）。
-            if (await db.TradingCycles.AnyAsync(c => c.TraderId == id, ct)
-                || await db.TraderOrders.AnyAsync(o => o.TraderId == id, ct))
-            {
-                return ApiResults.Fail("resource_in_use",
-                    "该交易员已有周期或订单审计历史，不得硬删除，请以停止代替", 409);
-            }
-
-            db.Traders.Remove(trader);
-            await db.SaveChangesAsync(ct);
-            return Results.NoContent();
-        });
-
-        group.MapPost("/{id:int}/start", async (int id, AppDbContext db, TradingCycleRunner runner,
-            SseEventHub hub, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            var provider = await db.Providers.FindAsync(new object[] { trader.ProviderId }, ct);
-            if (provider is null)
-            {
-                return ApiResults.Fail("validation_failed", "绑定的模型提供商不存在，请先完成绑定", 400);
-            }
-
-            // API-09：未通过工具调用验证（或编辑连接信息后被重置）的提供商不得启动。
-            if (provider.ToolCallingSupported != true || provider.ToolCallingVerifiedAt is null)
-            {
-                return ApiResults.Fail("provider_capability_missing",
-                    "该提供商未通过工具调用验证，请先完成验证再启动交易员", 422);
-            }
-
-            // 实盘模式：启动前校验交易所能力（下标单/持仓/余额/止损支持，缺一拒绝）。
-            if (trader.ExecutionMode == "live")
-            {
-                var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
-                if (account is null) return ApiResults.Fail("validation_failed", "绑定的交易所账户不存在", 400);
-
-                var audit = ExchangeTradingService.Audit(account);
-                if (!audit.CanTrade)
+                var now = DateTime.UtcNow;
+                var trader = new Trader
                 {
-                    return ApiResults.Fail("validation_failed",
-                        $"实盘启动被拒：{string.Join("；", audit.Notes)}", 400);
+                    Name = request.Name.Trim(),
+                    ProviderId = request.ProviderId,
+                    ExchangeAccountId = request.ExchangeAccountId,
+                    StrategyId = request.StrategyId,
+                    IsRunning = false,
+                    ExecutionMode = NormalizeMode(request.ExecutionMode),
+                    IsCrossMargin = request.IsCrossMargin,
+                    ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60),
+                    InitialBalance = request.InitialBalance,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                };
+                db.Traders.Add(trader);
+                await db.SaveChangesAsync(ct);
+
+                var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
+                var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
+                var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
+                return ApiResults.Created(ToDto(trader, providers, accounts, strategies));
+            });
+
+            group.MapPut("/{id:int}", async (int id, TraderUpsertRequest request, AppDbContext db,
+                TradingCycleRunner runner, CancellationToken ct) =>
+            {
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
+
+                var error = await ValidateAsync(request, db, ct);
+                if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
+
+                trader.Name = request.Name.Trim();
+                trader.ProviderId = request.ProviderId;
+                trader.ExchangeAccountId = request.ExchangeAccountId;
+                trader.StrategyId = request.StrategyId;
+                trader.ExecutionMode = NormalizeMode(request.ExecutionMode);
+                trader.IsCrossMargin = request.IsCrossMargin;
+                trader.ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60);
+                trader.InitialBalance = request.InitialBalance;
+                trader.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
+
+                // 运行中：以新配置重启循环（新间隔/新绑定立即生效）——仍是唯一调度链（R-14-5）。
+                if (trader.IsRunning) runner.Restart(trader.Id);
+
+                var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
+                var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
+                var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
+                return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
+            });
+
+            group.MapDelete("/{id:int}", async (int id, AppDbContext db, CancellationToken ct) =>
+            {
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
+
+                if (trader.IsRunning)
+                {
+                    return ApiResults.Fail("conflict", "交易员正在运行，请先停止再删除", 409);
                 }
-            }
 
-            if (!trader.IsRunning)
-            {
-                trader.IsRunning = true;
-                trader.StartedAt = DateTime.UtcNow;
-                trader.LastCycleStatus = null;
-                trader.UpdatedAt = DateTime.UtcNow;
+                // 已有周期或订单审计历史的交易员不得硬删除（LC-STD-03 §1.4：审计链完整，用停止代替）。
+                if (await db.TradingCycles.AnyAsync(c => c.TraderId == id, ct)
+                    || await db.TraderOrders.AnyAsync(o => o.TraderId == id, ct))
+                {
+                    return ApiResults.Fail("resource_in_use",
+                        "该交易员已有周期或订单审计历史，不得硬删除，请以停止代替", 409);
+                }
+
+                db.Traders.Remove(trader);
                 await db.SaveChangesAsync(ct);
-            }
+                return Results.NoContent();
+            });
 
-            // 已在运行则幂等（Start 内部对同交易员去重，绝不起第二条循环）。
-            runner.Start(trader.Id);
-            hub.Publish(SseChannels.Trader(trader.Id), StateEvent(trader));
-
-            var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
-            var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
-            var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
-            return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
-        });
-
-        group.MapPost("/{id:int}/stop", async (int id, AppDbContext db, TradingCycleRunner runner,
-            SseEventHub hub, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            // 停止语义（LC-STD-01 §8.6）：取消该交易员周期的 CancellationToken，终态由宿主写
-            // aborted + cancelled_by_user；已停止时幂等（Stop 内部对缺失条目为空操作）。
-            runner.Stop(trader.Id);
-            if (trader.IsRunning)
+            group.MapPost("/{id:int}/start", async (int id, AppDbContext db, TradingCycleRunner runner,
+                SseEventHub hub, CancellationToken ct) =>
             {
-                trader.IsRunning = false;
-                trader.StartedAt = null;
-                trader.UpdatedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(ct);
-            }
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
 
-            hub.Publish(SseChannels.Trader(trader.Id), StateEvent(trader));
+                var provider = await db.Providers.FindAsync(new object[] { trader.ProviderId }, ct);
+                if (provider is null)
+                {
+                    return ApiResults.Fail("validation_failed", "绑定的模型提供商不存在，请先完成绑定", 400);
+                }
 
-            var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
-            var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
-            var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
-            return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
-        });
+                // API-09：未通过工具调用验证（或编辑连接信息后被重置）的提供商不得启动。
+                if (provider.ToolCallingSupported != true || provider.ToolCallingVerifiedAt is null)
+                {
+                    return ApiResults.Fail("provider_capability_missing",
+                        "该提供商未通过工具调用验证，请先完成验证再启动交易员", 422);
+                }
 
-        // 手动平仓（§3.4）：创建 trigger=manual 周期，复用 ExecutionTools 写工具硬闸与审计。
-        // R-14-1：字符串金额在创建任何行之前先解析；R-14-7：周期闸冲突 → 409 cycle_in_progress。
-        group.MapPost("/{id:int}/close-position", async (int id, ManualCloseRequest request,
-            AppDbContext db, TradingCycleRunner runner, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
+                // 实盘模式：启动前校验交易所能力（下标单/持仓/余额/止损支持，缺一拒绝）。
+                if (trader.ExecutionMode == "live")
+                {
+                    var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
+                    if (account is null) return ApiResults.Fail("validation_failed", "绑定的交易所账户不存在", 400);
 
-            var validationError = ValidateManualClose(request);
-            if (validationError is not null) return ApiResults.Fail("validation_failed", validationError, 400);
+                    var audit = ExchangeTradingService.Audit(account);
+                    if (!audit.CanTrade)
+                    {
+                        return ApiResults.Fail("validation_failed",
+                            $"实盘启动被拒：{string.Join("；", audit.Notes)}", 400);
+                    }
+                }
 
-            string cycleId;
-            try
+                if (!trader.IsRunning)
+                {
+                    trader.IsRunning = true;
+                    trader.StartedAt = DateTime.UtcNow;
+                    trader.LastCycleStatus = null;
+                    trader.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(ct);
+                }
+
+                // 已在运行则幂等（Start 内部对同交易员去重，绝不起第二条循环）。
+                runner.Start(trader.Id);
+                hub.Publish(SseChannels.Trader(trader.Id), StateEvent(trader));
+
+                var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
+                var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
+                var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
+                return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
+            });
+
+            group.MapPost("/{id:int}/stop", async (int id, AppDbContext db, TradingCycleRunner runner,
+                SseEventHub hub, CancellationToken ct) =>
             {
-                cycleId = await runner.CloseManuallyAsync(trader, request, ct);
-            }
-            catch (CycleInProgressException ex)
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
+
+                // 停止语义（LC-STD-01 §8.6）：取消该交易员周期的 CancellationToken，终态由宿主写
+                // aborted + cancelled_by_user；已停止时幂等（Stop 内部对缺失条目为空操作）。
+                runner.Stop(trader.Id);
+                if (trader.IsRunning)
+                {
+                    trader.IsRunning = false;
+                    trader.StartedAt = null;
+                    trader.UpdatedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync(ct);
+                }
+
+                hub.Publish(SseChannels.Trader(trader.Id), StateEvent(trader));
+
+                var providers = await db.Providers.ToDictionaryAsync(p => p.Id, ct);
+                var accounts = await db.ExchangeAccounts.ToDictionaryAsync(a => a.Id, ct);
+                var strategies = await db.Strategies.ToDictionaryAsync(s => s.Id, ct);
+                return ApiResults.Ok(ToDto(trader, providers, accounts, strategies));
+            });
+
+            // 手动平仓（§3.4）：创建 trigger=manual 周期，复用 ExecutionTools 写工具硬闸与审计。
+            // R-14-1：字符串金额在创建任何行之前先解析；R-14-7：周期闸冲突 → 409 cycle_in_progress。
+            group.MapPost("/{id:int}/close-position", async (int id, ManualCloseRequest request,
+                AppDbContext db, TradingCycleRunner runner, CancellationToken ct) =>
             {
-                // 已有周期在跑：不排队、不落行（Task 11 结转，§5.2 示例逐字文案）。
-                return ApiResults.Fail(ex.Code, "该交易员已有运行中的周期，请等待当前周期结束后再试", 409);
-            }
-            catch (FormatException ex)
-            {
-                // 兜底：runner 内解析拒绝同样先于建行；原始文本只进日志（LC-STD-02）。
-                Console.WriteLine($"[Api] 手动平仓参数解析失败：{LogRedaction.Scrub(ex.Message)}");
-                return ApiResults.Fail("validation_failed", "quantity/price 必须是十进制数字字符串", 400);
-            }
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
 
-            var order = await db.TraderOrders.AsNoTracking()
-                .Where(o => o.CycleId == cycleId)
-                .OrderByDescending(o => o.Id)
-                .FirstOrDefaultAsync(ct);
-            return ApiResults.Ok(new ManualCloseResultDto(cycleId, order is null ? null : CycleDtoMapper.ToOrder(order)));
-        });
+                var validationError = ValidateManualClose(request);
+                if (validationError is not null) return ApiResults.Fail("validation_failed", validationError, 400);
 
-        // 看板快照（§3.4 + 简报「最新周期/阶段/提案/裁决/订单/权益」）。
-        // GET 无副作用：不再触发持仓采样与历史同步写库（原为每轮看板刷新手段，已移出读路径，见 task-14 报告）。
-        group.MapGet("/{id:int}/dashboard", async (int id, AppDbContext db, ExchangeTradingService trading,
-            CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            var provider = await db.Providers.FindAsync(new object[] { trader.ProviderId }, ct);
-            var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
-            var strategy = await db.Strategies.FindAsync(new object[] { trader.StrategyId }, ct);
-
-            var strategyType = "ai_trading";
-            if (strategy is not null)
-            {
+                string cycleId;
                 try
                 {
-                    var config = JsonSerializer.Deserialize<StrategyConfig>(strategy.ConfigJson, VerificationJson.Options);
-                    strategyType = config?.StrategyType ?? "ai_trading";
+                    cycleId = await runner.CloseManuallyAsync(trader, request, ct);
                 }
-                catch (JsonException)
+                catch (CycleInProgressException ex)
                 {
-                    // 配置解析失败时按默认类型展示
+                    // 已有周期在跑：不排队、不落行（Task 11 结转，§5.2 示例逐字文案）。
+                    return ApiResults.Fail(ex.Code, "该交易员已有运行中的周期，请等待当前周期结束后再试", 409);
                 }
-            }
-
-            var audit = account is null
-                ? new TradingAudit(false, false, false, false, false, false, ["绑定账户缺失"])
-                : ExchangeTradingService.Audit(account);
-
-            var positionMode = account is null
-                ? null
-                : (await trading.GetPositionModeAsync(account, ct)) switch
+                catch (FormatException ex)
                 {
-                    SharedPositionMode.HedgeMode => "双向",
-                    SharedPositionMode.OneWay => "单向",
-                    _ => null,
-                };
-
-            var info = new DashboardTraderInfo(
-                trader.Id,
-                trader.Name,
-                provider?.Name ?? "（已删除）",
-                provider?.Model ?? "",
-                account?.ExchangeType.ToString() ?? "",
-                account?.AccountName ?? "",
-                strategy?.Name ?? "（已删除）",
-                strategyType,
-                trader.IsRunning,
-                trader.ExecutionMode,
-                trader.IsCrossMargin,
-                trader.ScanIntervalMinutes,
-                trader.InitialBalance,
-                trader.StartedAt,
-                trader.LastCycleAt,
-                trader.LastCycleStatus,
-                audit.CanTrade,
-                audit.Notes,
-                positionMode);
-
-            // 账户与持仓（真实；只读，读取失败如实返回错误）
-            DashboardAccount? accountDto = null;
-            IReadOnlyList<DashboardPosition> positions = [];
-            if (account is not null)
-            {
-                var snapshot = await trading.GetAccountAsync(account, ct);
-                var livePositions = await trading.GetPositionsAsync(account, ct);
-                positions = livePositions
-                    .Select(p => new DashboardPosition(p.Symbol, p.Side.ToString(), p.Quantity, p.AverageOpenPrice, p.UnrealizedPnl, p.LiquidationPrice, p.Leverage))
-                    .ToList();
-
-                decimal? pnl = null;
-                double? pnlPct = null;
-                if (snapshot.Success && trader.InitialBalance is { } initial && initial > 0)
-                {
-                    pnl = Math.Round(snapshot.UsdtEquity - initial, 2);
-                    pnlPct = Math.Round((double)((snapshot.UsdtEquity - initial) / initial * 100m), 2);
+                    // 兜底：runner 内解析拒绝同样先于建行；原始文本只进日志（LC-STD-02）。
+                    Console.WriteLine($"[Api] 手动平仓参数解析失败：{LogRedaction.Scrub(ex.Message)}");
+                    return ApiResults.Fail("validation_failed", "quantity/price 必须是十进制数字字符串", 400);
                 }
 
-                // 保证金占用 = Σ(数量 × 均价 / 杠杆) / 净值
-                decimal? marginPct = null;
-                if (snapshot.Success && snapshot.UsdtEquity > 0)
-                {
-                    var used = positions
-                        .Where(p => p.Leverage is > 0)
-                        .Sum(p => p.Quantity * p.AverageOpenPrice / p.Leverage!.Value);
-                    marginPct = Math.Round(used / snapshot.UsdtEquity * 100m, 2);
-                }
-
-                accountDto = new DashboardAccount(
-                    snapshot.Success, snapshot.Error,
-                    snapshot.Success ? snapshot.UsdtEquity : null,
-                    snapshot.Success ? snapshot.UsdtAvailable : null,
-                    pnl, pnlPct,
-                    positions.Count,
-                    marginPct,
-                    DateTime.UtcNow);
-            }
-
-            // 净值样本（账户级，最近 200 个，时间升序供绘图；由同步宿主每约 60 秒采样）
-            IReadOnlyList<DashboardSample> samples = account is null
-                ? []
-                : (await db.AccountEquitySamples
-                        .Where(s => s.ExchangeAccountId == account.Id)
-                        .OrderByDescending(s => s.Id)
-                        .Take(200)
-                        .ToListAsync(ct))
-                    .OrderBy(s => s.At)
-                    .Select(s => new DashboardSample(s.At, s.Equity))
-                    .ToList();
-
-            // 最近决策（旧 DecisionRecord 链路，P7 随旧宿主一并移除；新链数据在 latestCycle）
-            var decisions = await LoadDecisionsAsync(db, id, 50, ct);
-
-            // 历史仓位只读本系统的库；不再在 GET 路径触发的交易所同步（syncError 恒 null 的口径见上）。
-            var history = account is null
-                ? EmptyHistory("绑定账户缺失")
-                : await BuildHistoryAsync(db, account, trader.InitialBalance, null, ct);
-
-            // 历史仓位「杠杆」回填：Binance 等对已平仓位不提供杠杆，用持仓期间采样值补（仅补空值，只读）
-            if (account is not null && history.Rows.Any(r => r.Leverage is null))
-            {
-                var snapshots = await db.AccountPositionSnapshots
-                    .Where(s => s.ExchangeAccountId == account.Id && s.Leverage != null)
-                    .OrderByDescending(s => s.Id)
-                    .Take(500)
-                    .ToListAsync(ct);
-                if (snapshots.Count > 0)
-                {
-                    var bySymbol = snapshots
-                        .GroupBy(s => s.Symbol, StringComparer.Ordinal)
-                        .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.At).ToList(), StringComparer.Ordinal);
-                    var updatedRows = history.Rows
-                        .Select(r =>
-                        {
-                            if (r.Leverage is not null || !bySymbol.TryGetValue(r.Symbol, out var list)) return r;
-                            var hit = list.FirstOrDefault(s => s.At <= r.CloseTime && (r.Side is null || s.Side is null || s.Side == r.Side));
-                            return hit is null ? r : r with { Leverage = hit.Leverage };
-                        })
-                        .ToList();
-                    var leverageNote = "杠杆取自持仓期间采样（每轮运行采样）";
-                    history = history with
-                    {
-                        Rows = updatedRows,
-                        Note = history.Note is null ? leverageNote : $"{history.Note}；{leverageNote}",
-                    };
-                }
-            }
-
-            var orders = (await db.TraderOrders
-                    .Where(o => o.TraderId == id)
+                var order = await db.TraderOrders.AsNoTracking()
+                    .Where(o => o.CycleId == cycleId)
                     .OrderByDescending(o => o.Id)
-                    .Take(20)
-                    .ToListAsync(ct))
-                .Select(ToOrderDto)
-                .ToList();
+                    .FirstOrDefaultAsync(ct);
+                return ApiResults.Ok(new ManualCloseResultDto(cycleId, order is null ? null : CycleDtoMapper.ToOrder(order)));
+            });
 
-            // 新链路最新周期块（简报：dashboard 返回最新周期/阶段/提案/裁决/订单/权益）。
-            var latestCycle = await CycleDtoMapper.BuildLatestAsync(db, id, ct);
-
-            return ApiResults.Ok(new TraderDashboardDto(info, accountDto, samples, positions, decisions,
-                history, orders, latestCycle));
-        });
-
-        // 实时推送（SSE，LC-STD-03 §4.2 事件集）：模块落库后经 SseEventHub 发布，连接只订阅转发、
-        // 不做轮询、绝不触发周期（GET 无副作用）。心跳 ping 每 15 秒（§4.1）。
-        group.MapGet("/{id:int}/stream", async (int id, AppDbContext db, AccountStreamService stream,
-            SseEventHub hub, HttpContext http, CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-            var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
-
-            http.Response.Headers.ContentType = "text/event-stream";
-            http.Response.Headers.CacheControl = "no-cache";
-            http.Response.Headers["X-Accel-Buffering"] = "no";
-
-            // 先订阅再播种：订阅之后产生的事件进入通道不丢失。
-            var (traderEvents, traderSubscription) = hub.Subscribe(SseChannels.Trader(id));
-            ChannelReader<SseEvent>? accountEvents = null;
-            IDisposable? accountSubscription = null;
-            if (account is not null)
+            // 看板快照（§3.4 + 简报「最新周期/阶段/提案/裁决/订单/权益」）。
+            // GET 无副作用：不再触发持仓采样与历史同步写库（原为每轮看板刷新手段，已移出读路径，见 task-14 报告）。
+            group.MapGet("/{id:int}/dashboard", async (int id, AppDbContext db, ExchangeTradingService trading,
+                CancellationToken ct) =>
             {
-                (accountEvents, accountSubscription) = hub.Subscribe(SseChannels.Account(account.Id));
-                await stream.AcquireAsync(account, ct); // 账户实时只读订阅（引用计数），不写业务数据
-            }
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
 
-            try
-            {
-                // state 种子帧（§4.2 触发列「连接建立」；API-10：lastCycleStatus 约定枚举或 null）。
-                await WriteFrameAsync(http, "state",
-                    new TraderStateEvent(trader.IsRunning, trader.LastCycleStatus,
-                        CycleDtoMapper.Utc(trader.LastCycleAt)), ct);
+                var provider = await db.Providers.FindAsync(new object[] { trader.ProviderId }, ct);
+                var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
+                var strategy = await db.Strategies.FindAsync(new object[] { trader.StrategyId }, ct);
 
-                var lastVersion = -1;
-                var lastWriteAt = Environment.TickCount64;
-                while (!ct.IsCancellationRequested)
+                var strategyType = "ai_trading";
+                if (strategy is not null)
                 {
-                    // 事件帧：即时转发（巡检节拍 1 秒，事件送达延迟上限 1 秒）
-                    while (traderEvents.TryRead(out var evt) || (accountEvents?.TryRead(out evt) ?? false))
+                    try
                     {
-                        if (ToEventFrame(evt) is not { } frame) continue;
-                        await http.Response.WriteAsync($"event: {frame.Name}\ndata: {frame.Json}\n\n", ct);
-                        await http.Response.Body.FlushAsync(ct);
-                        lastWriteAt = Environment.TickCount64;
+                        var config = JsonSerializer.Deserialize<StrategyConfig>(strategy.ConfigJson, VerificationJson.Options);
+                        strategyType = config?.StrategyType ?? "ai_trading";
+                    }
+                    catch (JsonException)
+                    {
+                        // 配置解析失败时按默认类型展示
+                    }
+                }
+
+                var audit = account is null
+                    ? new TradingAudit(false, false, false, false, false, false, ["绑定账户缺失"])
+                    : ExchangeTradingService.Audit(account);
+
+                var positionMode = account is null
+                    ? null
+                    : (await trading.GetPositionModeAsync(account, ct)) switch
+                    {
+                        SharedPositionMode.HedgeMode => "双向",
+                        SharedPositionMode.OneWay => "单向",
+                        _ => null,
+                    };
+
+                var info = new DashboardTraderInfo(
+                    trader.Id,
+                    trader.Name,
+                    provider?.Name ?? "（已删除）",
+                    provider?.Model ?? "",
+                    account?.ExchangeType.ToString() ?? "",
+                    account?.AccountName ?? "",
+                    strategy?.Name ?? "（已删除）",
+                    strategyType,
+                    trader.IsRunning,
+                    trader.ExecutionMode,
+                    trader.IsCrossMargin,
+                    trader.ScanIntervalMinutes,
+                    trader.InitialBalance,
+                    trader.StartedAt,
+                    trader.LastCycleAt,
+                    trader.LastCycleStatus,
+                    audit.CanTrade,
+                    audit.Notes,
+                    positionMode);
+
+                // 账户与持仓（真实；只读，读取失败如实返回错误）
+                DashboardAccount? accountDto = null;
+                IReadOnlyList<DashboardPosition> positions = [];
+                if (account is not null)
+                {
+                    var snapshot = await trading.GetAccountAsync(account, ct);
+                    var livePositions = await trading.GetPositionsAsync(account, ct);
+                    positions = livePositions
+                        .Select(p => new DashboardPosition(p.Symbol, p.Side.ToString(), p.Quantity, p.AverageOpenPrice, p.UnrealizedPnl, p.LiquidationPrice, p.Leverage))
+                        .ToList();
+
+                    decimal? pnl = null;
+                    double? pnlPct = null;
+                    if (snapshot.Success && trader.InitialBalance is { } initial && initial > 0)
+                    {
+                        pnl = Math.Round(snapshot.UsdtEquity - initial, 2);
+                        pnlPct = Math.Round((double)((snapshot.UsdtEquity - initial) / initial * 100m), 2);
                     }
 
-                    // 账户实时状态 → equity 帧（§4.2 只约定 { equity, at }；持仓明细走 dashboard 拉取）
-                    if (account is not null)
+                    // 保证金占用 = Σ(数量 × 均价 / 杠杆) / 净值
+                    decimal? marginPct = null;
+                    if (snapshot.Success && snapshot.UsdtEquity > 0)
                     {
-                        var state = stream.GetState(account.Id);
-                        if (state is { Equity: not null } snapshot && snapshot.Version != lastVersion)
-                        {
-                            lastVersion = snapshot.Version;
-                            await WriteFrameAsync(http, "equity", new
+                        var used = positions
+                            .Where(p => p.Leverage is > 0)
+                            .Sum(p => p.Quantity * p.AverageOpenPrice / p.Leverage!.Value);
+                        marginPct = Math.Round(used / snapshot.UsdtEquity * 100m, 2);
+                    }
+
+                    accountDto = new DashboardAccount(
+                        snapshot.Success, snapshot.Error,
+                        snapshot.Success ? snapshot.UsdtEquity : null,
+                        snapshot.Success ? snapshot.UsdtAvailable : null,
+                        pnl, pnlPct,
+                        positions.Count,
+                        marginPct,
+                        DateTime.UtcNow);
+                }
+
+                // 净值样本（账户级，最近 200 个，时间升序供绘图；由同步宿主每约 60 秒采样）
+                IReadOnlyList<DashboardSample> samples = account is null
+                    ? []
+                    : (await db.AccountEquitySamples
+                            .Where(s => s.ExchangeAccountId == account.Id)
+                            .OrderByDescending(s => s.Id)
+                            .Take(200)
+                            .ToListAsync(ct))
+                        .OrderBy(s => s.At)
+                        .Select(s => new DashboardSample(s.At, s.Equity))
+                        .ToList();
+
+                // 最近决策（旧 DecisionRecord 链路，P7 随旧宿主一并移除；新链数据在 latestCycle）
+                var decisions = await LoadDecisionsAsync(db, id, 50, ct);
+
+                // 历史仓位只读本系统的库；不再在 GET 路径触发的交易所同步（syncError 恒 null 的口径见上）。
+                var history = account is null
+                    ? EmptyHistory("绑定账户缺失")
+                    : await BuildHistoryAsync(db, account, trader.InitialBalance, null, ct);
+
+                // 历史仓位「杠杆」回填：Binance 等对已平仓位不提供杠杆，用持仓期间采样值补（仅补空值，只读）
+                if (account is not null && history.Rows.Any(r => r.Leverage is null))
+                {
+                    var snapshots = await db.AccountPositionSnapshots
+                        .Where(s => s.ExchangeAccountId == account.Id && s.Leverage != null)
+                        .OrderByDescending(s => s.Id)
+                        .Take(500)
+                        .ToListAsync(ct);
+                    if (snapshots.Count > 0)
+                    {
+                        var bySymbol = snapshots
+                            .GroupBy(s => s.Symbol, StringComparer.Ordinal)
+                            .ToDictionary(g => g.Key, g => g.OrderByDescending(x => x.At).ToList(), StringComparer.Ordinal);
+                        var updatedRows = history.Rows
+                            .Select(r =>
                             {
-                                equity = CycleDtoMapper.Num(snapshot.Equity),
-                                at = CycleDtoMapper.Utc(snapshot.At),
-                            }, ct);
+                                if (r.Leverage is not null || !bySymbol.TryGetValue(r.Symbol, out var list)) return r;
+                                var hit = list.FirstOrDefault(s => s.At <= r.CloseTime && (r.Side is null || s.Side is null || s.Side == r.Side));
+                                return hit is null ? r : r with { Leverage = hit.Leverage };
+                            })
+                            .ToList();
+                        var leverageNote = "杠杆取自持仓期间采样（每轮运行采样）";
+                        history = history with
+                        {
+                            Rows = updatedRows,
+                            Note = history.Note is null ? leverageNote : $"{history.Note}；{leverageNote}",
+                        };
+                    }
+                }
+
+                var orders = (await db.TraderOrders
+                        .Where(o => o.TraderId == id)
+                        .OrderByDescending(o => o.Id)
+                        .Take(20)
+                        .ToListAsync(ct))
+                    .Select(ToOrderDto)
+                    .ToList();
+
+                // 新链路最新周期块（简报：dashboard 返回最新周期/阶段/提案/裁决/订单/权益）。
+                var latestCycle = await CycleDtoMapper.BuildLatestAsync(db, id, ct);
+
+                return ApiResults.Ok(new TraderDashboardDto(info, accountDto, samples, positions, decisions,
+                    history, orders, latestCycle));
+            });
+
+            // 实时推送（SSE，LC-STD-03 §4.2 事件集）：模块落库后经 SseEventHub 发布，连接只订阅转发、
+            // 不做轮询、绝不触发周期（GET 无副作用）。心跳 ping 每 15 秒（§4.1）。
+            group.MapGet("/{id:int}/stream", async (int id, AppDbContext db, AccountStreamService stream,
+                SseEventHub hub, HttpContext http, CancellationToken ct) =>
+            {
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
+                var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
+
+                http.Response.Headers.ContentType = "text/event-stream";
+                http.Response.Headers.CacheControl = "no-cache";
+                http.Response.Headers["X-Accel-Buffering"] = "no";
+
+                // 先订阅再播种：订阅之后产生的事件进入通道不丢失。
+                var (traderEvents, traderSubscription) = hub.Subscribe(SseChannels.Trader(id));
+                ChannelReader<SseEvent>? accountEvents = null;
+                IDisposable? accountSubscription = null;
+                if (account is not null)
+                {
+                    (accountEvents, accountSubscription) = hub.Subscribe(SseChannels.Account(account.Id));
+                    await stream.AcquireAsync(account, ct); // 账户实时只读订阅（引用计数），不写业务数据
+                }
+
+                try
+                {
+                    // state 种子帧（§4.2 触发列「连接建立」；API-10：lastCycleStatus 约定枚举或 null）。
+                    await WriteFrameAsync(http, "state",
+                        new TraderStateEvent(trader.IsRunning, trader.LastCycleStatus,
+                            CycleDtoMapper.Utc(trader.LastCycleAt)), ct);
+
+                    var lastVersion = -1;
+                    var lastWriteAt = Environment.TickCount64;
+                    while (!ct.IsCancellationRequested)
+                    {
+                        // 事件帧：即时转发（巡检节拍 1 秒，事件送达延迟上限 1 秒）
+                        while (traderEvents.TryRead(out var evt) || (accountEvents?.TryRead(out evt) ?? false))
+                        {
+                            if (ToEventFrame(evt) is not { } frame) continue;
+                            await http.Response.WriteAsync($"event: {frame.Name}\ndata: {frame.Json}\n\n", ct);
+                            await http.Response.Body.FlushAsync(ct);
                             lastWriteAt = Environment.TickCount64;
                         }
-                    }
 
-                    // 心跳帧：每 15 秒（静默期）写一帧轻量事件——防代理空闲超时掐断长连接，客户端据此判活
-                    if (Environment.TickCount64 - lastWriteAt >= 15000)
-                    {
-                        await WriteFrameAsync(http, "ping", new { at = DateTime.UtcNow }, ct);
-                        lastWriteAt = Environment.TickCount64;
-                    }
+                        // 账户实时状态 → equity 帧（§4.2 只约定 { equity, at }；持仓明细走 dashboard 拉取）
+                        if (account is not null)
+                        {
+                            var state = stream.GetState(account.Id);
+                            if (state is { Equity: not null } snapshot && snapshot.Version != lastVersion)
+                            {
+                                lastVersion = snapshot.Version;
+                                await WriteFrameAsync(http, "equity", new
+                                {
+                                    equity = CycleDtoMapper.Num(snapshot.Equity),
+                                    at = CycleDtoMapper.Utc(snapshot.At),
+                                }, ct);
+                                lastWriteAt = Environment.TickCount64;
+                            }
+                        }
 
-                    await Task.Delay(1000, ct);
+                        // 心跳帧：每 15 秒（静默期）写一帧轻量事件——防代理空闲超时掐断长连接，客户端据此判活
+                        if (Environment.TickCount64 - lastWriteAt >= 15000)
+                        {
+                            await WriteFrameAsync(http, "ping", new { at = DateTime.UtcNow }, ct);
+                            lastWriteAt = Environment.TickCount64;
+                        }
+
+                        await Task.Delay(1000, ct);
+                    }
                 }
-            }
-            catch (OperationCanceledException)
+                catch (OperationCanceledException)
+                {
+                    // 客户端断开
+                }
+                finally
+                {
+                    traderSubscription.Dispose();
+                    accountSubscription?.Dispose();
+                    if (account is not null) stream.Release(account.Id);
+                }
+
+                return Results.Empty;
+            });
+
+            // 周期列表（分页 §1.3；周期快照字段不外泄 §2.1）
+            group.MapGet("/{id:int}/cycles", async (int id, string? page, string? pageSize,
+                AppDbContext db, CancellationToken ct) =>
             {
-                // 客户端断开
-            }
-            finally
+                if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
+                {
+                    return ApiResults.Fail("not_found", "交易员不存在", 404);
+                }
+
+                if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
+                {
+                    return ApiResults.Fail("validation_failed", error!, 400);
+                }
+
+                var query = db.TradingCycles.AsNoTracking().Where(c => c.TraderId == id);
+                var total = await query.CountAsync(ct);
+                var rows = await query
+                    .OrderByDescending(c => c.StartedAt)
+                    .ThenByDescending(c => c.Id)
+                    .Skip((pageNumber - 1) * size)
+                    .Take(size)
+                    .ToListAsync(ct);
+                return ApiResults.Ok(new PagedResult<CycleInfoDto>(
+                    rows.Select(CycleDtoMapper.ToInfo).ToList(), total, pageNumber, size));
+            });
+
+            // 复盘列表：持久 reviewer 阶段行（skipped/failed/completed 都留痕，复盘页数据源）
+            group.MapGet("/{id:int}/reviews", async (int id, string? page, string? pageSize,
+                AppDbContext db, CancellationToken ct) =>
             {
-                traderSubscription.Dispose();
-                accountSubscription?.Dispose();
-                if (account is not null) stream.Release(account.Id);
-            }
+                if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
+                {
+                    return ApiResults.Fail("not_found", "交易员不存在", 404);
+                }
 
-            return Results.Empty;
-        });
+                if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
+                {
+                    return ApiResults.Fail("validation_failed", error!, 400);
+                }
 
-        // 周期列表（分页 §1.3；周期快照字段不外泄 §2.1）
-        group.MapGet("/{id:int}/cycles", async (int id, string? page, string? pageSize,
-            AppDbContext db, CancellationToken ct) =>
-        {
-            if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
+                var query = db.AgentStageRuns.AsNoTracking()
+                    .Where(s => s.TraderId == id && s.Role == ToolRegistry.ReviewerRoleName);
+                var total = await query.CountAsync(ct);
+                var rows = await query
+                    .OrderByDescending(s => s.CreatedAt)
+                    .ThenByDescending(s => s.Id)
+                    .Skip((pageNumber - 1) * size)
+                    .Take(size)
+                    .ToListAsync(ct);
+                return ApiResults.Ok(new PagedResult<ReviewListItemDto>(
+                    rows.Select(s => new ReviewListItemDto(s.Id, s.Status, s.Attempt, s.ProviderName, s.Model,
+                        s.ElapsedMs, s.InputTokens, s.OutputTokens, s.ToolCallCount, s.Error,
+                        CycleDtoMapper.Utc(s.CreatedAt))).ToList(),
+                    total, pageNumber, size));
+            });
+
+            // 手动触发复盘（§9 触发行「本地时刻 + 手动端点」）。
+            // R-14-6：60 秒重复触发闸在本端点侧完成——ReviewRunner 的进行中拒绝只覆盖「同时并发」，
+            // 而契约（LC-STD-03 §1.4/§6）语义是「60 秒内重复触发 → 409」，判据必须是持久证据：
+            // 最近 60 秒内的 reviewer 阶段行（含 skipped/failed 留痕）。不改 ReviewRunner 的进行中语义。
+            group.MapPost("/{id:int}/reviews/run", async (int id, AppDbContext db, ReviewRunner reviewRunner,
+                CancellationToken ct) =>
             {
-                return ApiResults.Fail("not_found", "交易员不存在", 404);
-            }
+                var trader = await db.Traders.FindAsync(new object[] { id }, ct);
+                if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
 
-            if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
+                var cooldownStart = DateTime.UtcNow.AddSeconds(-ReviewTriggerCooldownSeconds);
+                if (await db.AgentStageRuns.AsNoTracking().AnyAsync(s =>
+                        s.TraderId == id && s.Role == ToolRegistry.ReviewerRoleName && s.CreatedAt > cooldownStart, ct))
+                {
+                    return ApiResults.Fail("review_in_progress",
+                        $"{ReviewTriggerCooldownSeconds} 秒内已触发过复盘，请稍后再试", 409);
+                }
+
+                var result = await reviewRunner.RunAsync(trader, ct);
+                return result.Status switch
+                {
+                    ReviewRunner.InProgressStatus => ApiResults.Fail("review_in_progress",
+                        "该交易员的复盘正在进行，请稍后再试", 409),
+                    ReviewRunner.SkippedStatus when result.ErrorCode == ReviewRunner.NoDataCode =>
+                        ApiResults.Fail(ReviewRunner.NoDataCode, "复盘窗口内无已平仓交易且无周期，本轮未产出经验", 422),
+                    // completed / failed：触发本身成功，执行结果原样上报（status 区分；失败留痕不伪装成 HTTP 错误）。
+                    _ => ApiResults.Ok(new ReviewRunDto(result.Status, result.ErrorCode, result.StageRunId,
+                        result.ElapsedMs, CycleDtoMapper.Utc(result.PeriodStartUtc),
+                        CycleDtoMapper.Utc(result.PeriodEndUtc))),
+                };
+            });
+
+            // 经验列表（分页；正文 JSON 数组解析为列表，§2.3）
+            group.MapGet("/{id:int}/lessons", async (int id, string? page, string? pageSize,
+                AppDbContext db, CancellationToken ct) =>
             {
-                return ApiResults.Fail("validation_failed", error!, 400);
-            }
+                if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
+                {
+                    return ApiResults.Fail("not_found", "交易员不存在", 404);
+                }
 
-            var query = db.TradingCycles.AsNoTracking().Where(c => c.TraderId == id);
-            var total = await query.CountAsync(ct);
-            var rows = await query
-                .OrderByDescending(c => c.StartedAt)
-                .ThenByDescending(c => c.Id)
-                .Skip((pageNumber - 1) * size)
-                .Take(size)
-                .ToListAsync(ct);
-            return ApiResults.Ok(new PagedResult<CycleInfoDto>(
-                rows.Select(CycleDtoMapper.ToInfo).ToList(), total, pageNumber, size));
-        });
+                if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
+                {
+                    return ApiResults.Fail("validation_failed", error!, 400);
+                }
 
-        // 复盘列表：持久 reviewer 阶段行（skipped/failed/completed 都留痕，复盘页数据源）
-        group.MapGet("/{id:int}/reviews", async (int id, string? page, string? pageSize,
-            AppDbContext db, CancellationToken ct) =>
-        {
-            if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
-            {
-                return ApiResults.Fail("not_found", "交易员不存在", 404);
-            }
+                var query = db.TraderLessons.AsNoTracking().Where(l => l.TraderId == id);
+                var total = await query.CountAsync(ct);
+                var rows = await query
+                    .OrderByDescending(l => l.CreatedAt)
+                    .ThenByDescending(l => l.Id)
+                    .Skip((pageNumber - 1) * size)
+                    .Take(size)
+                    .ToListAsync(ct);
+                return ApiResults.Ok(new PagedResult<LessonDto>(
+                    rows.Select(l => new LessonDto(l.Id, l.TraderId, l.StageRunId,
+                        CycleDtoMapper.Utc(l.PeriodStart), CycleDtoMapper.Utc(l.PeriodEnd), l.Summary,
+                        CycleDtoMapper.ReadStringArray(l.StrengthsJson),
+                        CycleDtoMapper.ReadStringArray(l.MistakesJson),
+                        CycleDtoMapper.ReadStringArray(l.RulesJson),
+                        CycleDtoMapper.ReadStringArray(l.EvidenceJson),
+                        CycleDtoMapper.Utc(l.CreatedAt))).ToList(),
+                    total, pageNumber, size));
+            });
 
-            if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
-            {
-                return ApiResults.Fail("validation_failed", error!, 400);
-            }
-
-            var query = db.AgentStageRuns.AsNoTracking()
-                .Where(s => s.TraderId == id && s.Role == ToolRegistry.ReviewerRoleName);
-            var total = await query.CountAsync(ct);
-            var rows = await query
-                .OrderByDescending(s => s.CreatedAt)
-                .ThenByDescending(s => s.Id)
-                .Skip((pageNumber - 1) * size)
-                .Take(size)
-                .ToListAsync(ct);
-            return ApiResults.Ok(new PagedResult<ReviewListItemDto>(
-                rows.Select(s => new ReviewListItemDto(s.Id, s.Status, s.Attempt, s.ProviderName, s.Model,
-                    s.ElapsedMs, s.InputTokens, s.OutputTokens, s.ToolCallCount, s.Error,
-                    CycleDtoMapper.Utc(s.CreatedAt))).ToList(),
-                total, pageNumber, size));
-        });
-
-        // 手动触发复盘（§9 触发行「本地时刻 + 手动端点」）。
-        // R-14-6：60 秒重复触发闸在本端点侧完成——ReviewRunner 的进行中拒绝只覆盖「同时并发」，
-        // 而契约（LC-STD-03 §1.4/§6）语义是「60 秒内重复触发 → 409」，判据必须是持久证据：
-        // 最近 60 秒内的 reviewer 阶段行（含 skipped/failed 留痕）。不改 ReviewRunner 的进行中语义。
-        group.MapPost("/{id:int}/reviews/run", async (int id, AppDbContext db, ReviewRunner reviewRunner,
-            CancellationToken ct) =>
-        {
-            var trader = await db.Traders.FindAsync(new object[] { id }, ct);
-            if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
-
-            var cooldownStart = DateTime.UtcNow.AddSeconds(-ReviewTriggerCooldownSeconds);
-            if (await db.AgentStageRuns.AsNoTracking().AnyAsync(s =>
-                    s.TraderId == id && s.Role == ToolRegistry.ReviewerRoleName && s.CreatedAt > cooldownStart, ct))
-            {
-                return ApiResults.Fail("review_in_progress",
-                    $"{ReviewTriggerCooldownSeconds} 秒内已触发过复盘，请稍后再试", 409);
-            }
-
-            var result = await reviewRunner.RunAsync(trader, ct);
-            return result.Status switch
-            {
-                ReviewRunner.InProgressStatus => ApiResults.Fail("review_in_progress",
-                    "该交易员的复盘正在进行，请稍后再试", 409),
-                ReviewRunner.SkippedStatus when result.ErrorCode == ReviewRunner.NoDataCode =>
-                    ApiResults.Fail(ReviewRunner.NoDataCode, "复盘窗口内无已平仓交易且无周期，本轮未产出经验", 422),
-                // completed / failed：触发本身成功，执行结果原样上报（status 区分；失败留痕不伪装成 HTTP 错误）。
-                _ => ApiResults.Ok(new ReviewRunDto(result.Status, result.ErrorCode, result.StageRunId,
-                    result.ElapsedMs, CycleDtoMapper.Utc(result.PeriodStartUtc),
-                    CycleDtoMapper.Utc(result.PeriodEndUtc))),
-            };
-        });
-
-        // 经验列表（分页；正文 JSON 数组解析为列表，§2.3）
-        group.MapGet("/{id:int}/lessons", async (int id, string? page, string? pageSize,
-            AppDbContext db, CancellationToken ct) =>
-        {
-            if (!await db.Traders.AnyAsync(t => t.Id == id, ct))
-            {
-                return ApiResults.Fail("not_found", "交易员不存在", 404);
-            }
-
-            if (!TryPagination(page, pageSize, out var pageNumber, out var size, out var error))
-            {
-                return ApiResults.Fail("validation_failed", error!, 400);
-            }
-
-            var query = db.TraderLessons.AsNoTracking().Where(l => l.TraderId == id);
-            var total = await query.CountAsync(ct);
-            var rows = await query
-                .OrderByDescending(l => l.CreatedAt)
-                .ThenByDescending(l => l.Id)
-                .Skip((pageNumber - 1) * size)
-                .Take(size)
-                .ToListAsync(ct);
-            return ApiResults.Ok(new PagedResult<LessonDto>(
-                rows.Select(l => new LessonDto(l.Id, l.TraderId, l.StageRunId,
-                    CycleDtoMapper.Utc(l.PeriodStart), CycleDtoMapper.Utc(l.PeriodEnd), l.Summary,
-                    CycleDtoMapper.ReadStringArray(l.StrengthsJson),
-                    CycleDtoMapper.ReadStringArray(l.MistakesJson),
-                    CycleDtoMapper.ReadStringArray(l.RulesJson),
-                    CycleDtoMapper.ReadStringArray(l.EvidenceJson),
-                    CycleDtoMapper.Utc(l.CreatedAt))).ToList(),
-                total, pageNumber, size));
-        });
-
-        return group;
+            return group;
+        }
     }
 
     // —— 内部辅助 ——

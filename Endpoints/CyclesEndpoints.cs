@@ -17,48 +17,52 @@ namespace LuckyCat.Endpoints;
 /// </summary>
 public static class CyclesEndpoints
 {
-    public static RouteGroupBuilder MapCycles(this IEndpointRouteBuilder app)
+    extension(IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/api/cycles");
-
-        // 周期详情：阶段、提案、裁决（仅 open 路径）、订单（API-08）。
-        group.MapGet("/{cycleId}", async (string cycleId, AppDbContext db, CancellationToken ct) =>
+        public RouteGroupBuilder MapCycles()
         {
-            var cycle = await db.TradingCycles.AsNoTracking()
-                .FirstOrDefaultAsync(c => c.Id == cycleId, ct);
-            if (cycle is null) return ApiResults.Fail("not_found", "交易周期不存在", 404);
+            var group = app.MapGroup("/api/cycles");
 
-            return ApiResults.Ok(await CycleDtoMapper.BuildDetailAsync(db, cycle, ct));
-        });
+            // 周期详情：阶段、提案、裁决（仅 open 路径）、订单（API-08）。
+            group.MapGet("/{cycleId}", async (string cycleId, AppDbContext db, CancellationToken ct) =>
+            {
+                var cycle = await db.TradingCycles.AsNoTracking()
+                    .FirstOrDefaultAsync(c => c.Id == cycleId, ct);
+                if (cycle is null) return ApiResults.Fail("not_found", "交易周期不存在", 404);
 
-        // 阶段全文：消息记录原文（受截断标记，§3.5）+ 工具调用摘要（不含入参/回执全文，§4.2 同口径）。
-        group.MapGet("/{cycleId}/stages/{stageRunId}", async (
-            string cycleId, string stageRunId, AppDbContext db, CancellationToken ct) =>
-        {
-            var cycleExists = await db.TradingCycles.AsNoTracking().AnyAsync(c => c.Id == cycleId, ct);
-            if (!cycleExists) return ApiResults.Fail("not_found", "交易周期不存在", 404);
+                return ApiResults.Ok(await CycleDtoMapper.BuildDetailAsync(db, cycle, ct));
+            });
 
-            // 阶段必须属于该周期：跨周期取回按 not_found 处理，不泄漏他人阶段。
-            var stage = await db.AgentStageRuns.AsNoTracking()
-                .FirstOrDefaultAsync(s => s.Id == stageRunId && s.CycleId == cycleId, ct);
-            if (stage is null) return ApiResults.Fail("not_found", "阶段不存在或不属于该周期", 404);
+            // 阶段全文：消息记录原文（受截断标记，§3.5）+ 工具调用摘要（不含入参/回执全文，§4.2 同口径）。
+            group.MapGet("/{cycleId}/stages/{stageRunId}", async (
+                string cycleId, string stageRunId, AppDbContext db, CancellationToken ct) =>
+            {
+                var cycleExists = await db.TradingCycles.AsNoTracking().AnyAsync(c => c.Id == cycleId, ct);
+                if (!cycleExists) return ApiResults.Fail("not_found", "交易周期不存在", 404);
 
-            var toolCalls = await db.ToolInvocations.AsNoTracking()
-                .Where(t => t.StageRunId == stageRunId)
-                .OrderBy(t => t.Id)
-                .Select(t => new StageToolCallDto(t.ToolName, t.Success, t.ErrorCode, t.ElapsedMs,
-                    t.Truncated, CycleDtoMapper.Utc(t.CreatedAt)))
-                .ToListAsync(ct);
+                // 阶段必须属于该周期：跨周期取回按 not_found 处理，不泄漏他人阶段。
+                var stage = await db.AgentStageRuns.AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.Id == stageRunId && s.CycleId == cycleId, ct);
+                if (stage is null) return ApiResults.Fail("not_found", "阶段不存在或不属于该周期", 404);
 
-            return ApiResults.Ok(new StageDetailDto(
-                stage.Id, stage.CycleId, stage.TraderId, stage.Role, stage.Attempt, stage.Status,
-                stage.ProviderName, stage.Model, stage.Instructions, stage.TranscriptJson, stage.OutputJson,
-                stage.Reasoning, stage.InputTokens, stage.OutputTokens, stage.ElapsedMs, stage.ToolCallCount,
-                stage.Error, stage.Truncated, CycleDtoMapper.Utc(stage.CreatedAt), toolCalls));
-        });
+                var toolCalls = await db.ToolInvocations.AsNoTracking()
+                    .Where(t => t.StageRunId == stageRunId)
+                    .OrderBy(t => t.Id)
+                    .Select(t => new StageToolCallDto(t.ToolName, t.Success, t.ErrorCode, t.ElapsedMs,
+                        t.Truncated, CycleDtoMapper.Utc(t.CreatedAt)))
+                    .ToListAsync(ct);
 
-        return group;
+                return ApiResults.Ok(new StageDetailDto(
+                    stage.Id, stage.CycleId, stage.TraderId, stage.Role, stage.Attempt, stage.Status,
+                    stage.ProviderName, stage.Model, stage.Instructions, stage.TranscriptJson, stage.OutputJson,
+                    stage.Reasoning, stage.InputTokens, stage.OutputTokens, stage.ElapsedMs, stage.ToolCallCount,
+                    stage.Error, stage.Truncated, CycleDtoMapper.Utc(stage.CreatedAt), toolCalls));
+            });
+
+            return group;
+        }
     }
+
 }
 
 /// <summary>
