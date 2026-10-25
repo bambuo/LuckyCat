@@ -5,9 +5,9 @@ namespace LuckyCat.Services;
 
 /// <summary>
 /// 实盘执行网关：包装 <see cref="ExchangeTradingService"/> 与账户，作为智能体写工具的唯一交易所出口。
-/// 开仓顺序与 <see cref="OpenOrderSubmission"/> 一致：先设杠杆（失败即不下单）→ 再取持仓模式（未知不下单）→ 市价下单；
-/// 平仓复用 <see cref="ExchangeTradingService.ClosePositionAsync"/> 的整仓语义；撤单走共享 API。
-/// 所有方法如实返回错误，不吞异常、不伪造成交。
+/// 开仓顺序与 <see cref="OpenOrderSubmission"/> 一致：先设杠杆（失败即不下单）→ 再取持仓模式（未知不下单）→ 下单（市价/限价）；
+/// 平仓支持整仓与部分数量（反向减仓单）；撤单走共享 API。
+/// 所有方法如实返回错误与交易所订单号，不吞异常、不伪造成交（成交量/均价待成交回报确认）。
 /// </summary>
 public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingService trading, bool crossMargin = true)
     : IExecutionGateway
@@ -25,9 +25,15 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
         trading.GetPositionModeAsync(account, ct);
 
     public async Task<(bool Ok, string? Error, string? ExchangeOrderId, decimal? FilledQuantity, decimal? AveragePrice)> PlaceAsync(
-        SharedSymbol symbol, bool isLong, decimal quantity, decimal stopLossPrice, decimal takeProfitPrice,
-        decimal leverage, CancellationToken ct)
+        SharedSymbol symbol, bool isLong, decimal quantity, decimal stopLossPrice, decimal? takeProfitPrice,
+        decimal leverage, string orderType, decimal? price, string? clientOrderId, CancellationToken ct)
     {
+        if (quantity <= 0) return (false, "下单数量必须大于 0", null, null, null);
+        if (!ExchangeTradingService.TryParseOrderType(orderType, out var parsedType))
+            return (false, $"不支持的订单类型：{orderType}", null, null, null);
+        if (parsedType == SharedOrderType.Limit && price is not > 0)
+            return (false, "限价单缺少有效价格", null, null, null);
+
         // 与 OpenOrderSubmission 相同的硬顺序：杠杆设置失败不下单；持仓模式未知不下单（无法安全表达方向）。
         var (leverageOk, leverageError) = await SetLeverageAsync(symbol, leverage, ct).ConfigureAwait(false);
         if (!leverageOk) return (false, $"杠杆设置失败，未下单：{leverageError}", null, null, null);
@@ -36,32 +42,29 @@ public sealed class ExecutionGateway(ExchangeAccount account, ExchangeTradingSer
         var side = mode == SharedPositionMode.HedgeMode
             ? (isLong ? SharedPositionSide.Long : SharedPositionSide.Short)
             : (SharedPositionSide?)null;
-        var (ok, error) = await ExchangeTradingService.PlaceMarketAsync(
-            account, symbol, isLong, quantity, stopLossPrice, takeProfitPrice, crossMargin, side, ct).ConfigureAwait(false);
-        // 现有 PlaceMarketAsync 只返回成功/错误，拿不到交易所订单号与成交明细；此处如实返回 null（不伪造成交）。
-        return (ok, error, null, null, null);
+
+        // 保护价只接受正数；0 视为未提供，绝不把 0 当作真实价格发给交易所，也不伪造止盈。
+        var (ok, error, orderId) = await ExchangeTradingService.PlaceOrderAsync(
+            account, symbol, isLong, quantity, parsedType,
+            parsedType == SharedOrderType.Limit ? price : null,
+            stopLossPrice > 0 ? stopLossPrice : null,
+            takeProfitPrice is > 0 ? takeProfitPrice : null,
+            crossMargin, side, clientOrderId, ct).ConfigureAwait(false);
+
+        // 成交量/均价由成交回报异步确认，此处如实返回 null（不伪造成交）；订单号必须透传。
+        return (ok, error, orderId, null, null);
     }
 
     public async Task<(bool Ok, string? Error, decimal? Quantity, decimal? Price)> CloseAsync(
-        SharedSymbol symbol, decimal? quantity, bool isLong, CancellationToken ct)
+        SharedSymbol symbol, decimal? quantity, bool isLong, string orderType, decimal? price,
+        string? clientOrderId, CancellationToken ct)
     {
-        // 现有链路只有整仓平仓（ICloseFullPosition + 反向市价兜底）：数量小于当前持仓时明确拒绝，
-        // 避免「部分平仓」被静默放大成整仓；数量为空或等于整仓时按整仓执行。
-        if (quantity is { } requested)
-        {
-            if (requested <= 0) return (false, "平仓数量必须大于 0", null, null);
-            var positions = await trading.GetPositionSnapshotAsync(account, ct).ConfigureAwait(false);
-            if (!positions.Success) return (false, $"持仓不可读：{positions.Error}", null, null);
-            var nativeName = (await ExchangeTradingService.GetFuturesSymbolAsync(account, symbol, ct).ConfigureAwait(false))?.Name;
-            var position = positions.Positions.FirstOrDefault(p =>
-                (nativeName is not null && string.Equals(p.Symbol, nativeName, StringComparison.OrdinalIgnoreCase))
-                || p.Symbol.Contains(symbol.BaseAsset, StringComparison.OrdinalIgnoreCase));
-            if (position is null) return (false, "未找到该标的持仓", null, null);
-            if (requested < Math.Abs(position.Quantity)) return (false, "当前仅支持整仓平仓，平仓数量小于持仓", null, null);
-        }
+        if (!ExchangeTradingService.TryParseOrderType(orderType, out _))
+            return (false, $"不支持的订单类型：{orderType}", null, null);
 
         _ = isLong; // 方向由交易所最新持仓判定；调用方传入值仅作审计参考。
-        return await trading.ClosePositionAsync(account, symbol, crossMargin, ct).ConfigureAwait(false);
+        return await trading.ClosePositionAsync(account, symbol, quantity, orderType, price, clientOrderId,
+            crossMargin, ct).ConfigureAwait(false);
     }
 
     public Task<(bool Ok, string? Error)> CancelAsync(SharedSymbol symbol, string orderId, CancellationToken ct) =>
