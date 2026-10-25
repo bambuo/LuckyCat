@@ -8,6 +8,7 @@ using LuckyCat.Data;
 using LuckyCat.Models;
 using LuckyCat.Services;
 using LuckyCat.Tools;
+using LuckyCat.Workflows;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
@@ -70,6 +71,44 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.NotNull(cycle.CompletedAt);
     }
 
+    [Fact]
+    public async Task Startup_recovery_marks_stale_cycles_without_starting_any_loop()
+    {
+        // R-11-6：迁移期启动宿主只做恢复（LC-STD-01 §8.7 / FLOW-13），绝不启动任何调度循环——
+        // 自动调度仍唯一归旧 TraderRunnerService，双循环会对同一 IsRunning 交易员双重开仓。
+        await using var env = await RunnerEnv.CreateAsync();
+        env.Trader.IsRunning = true;
+        env.Trader.LastCycleStatus = "running";
+        env.Db.TradingCycles.Add(new TradingCycle
+        {
+            Id = "stale", TraderId = 7, StrategyId = 1, ProviderId = 1, ExchangeAccountId = 1,
+            Mode = "dry", Trigger = "schedule", Status = "running",
+            StartedAt = DateTime.UtcNow, StrategyConfigJson = "{}", MemoryFingerprint = "f"
+        });
+        await env.Db.SaveChangesAsync();
+
+        var hosted = new CycleStartupRecovery(env.Runner);
+        await hosted.StartAsync(default);
+        // StopAsync 不等 ExecuteAsync 收尾（停止令牌已置位），轮询直到两处恢复更新都可见。
+        await WaitUntilAsync(async () =>
+            "aborted" == (await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale")).Status
+            && "aborted" == (await env.Db.Traders.AsNoTracking().SingleAsync(t => t.Id == env.Trader.Id))
+                .LastCycleStatus);
+        await hosted.StopAsync(default);
+
+        var stale = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale");
+        Assert.Equal("aborted", stale.Status);
+        Assert.Equal("process_restart", stale.ErrorCode);
+        Assert.NotNull(stale.CompletedAt);
+        var trader = await env.Db.Traders.AsNoTracking().SingleAsync(t => t.Id == env.Trader.Id);
+        Assert.Equal("aborted", trader.LastCycleStatus);
+        // 恢复路径不起循环、不为 IsRunning 交易员新建任何周期行。留一小段观察窗：
+        // 若宿主像旧 ExecuteAsync 那样自动恢复循环，这个窗口内必然会 Start 并开出新周期。
+        await Task.Delay(150);
+        Assert.False(env.Runner.IsRunning(env.Trader.Id));
+        Assert.Equal(1, await env.Db.TradingCycles.CountAsync());
+    }
+
     // —— 预算 ——
 
     [Fact]
@@ -98,7 +137,8 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     {
         await using var env = await RunnerEnv.CreateAsync();
         var budget = new CycleBudget(env.Config.AgentBudget);
-        var auditor = new ToolAuditor(env.Db, env.Hub, budget, env.CycleId, env.StageRunId, traderId: 7);
+        var auditor = new ToolAuditor(env.Db, env.Hub, budget, env.CycleId, env.StageRunId,
+            SseChannels.Trader(7));
         var tools = new MarketTools(new MarketDataCache(env.MarketReader), env.Config,
             new HashSet<string>(StringComparer.Ordinal) { "BTC/USDT" }, auditor, "analyst");
 
@@ -508,9 +548,104 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.Contains("权益 5000 USDT", env.Clients.PromptFor("trader"));
     }
 
+    [Fact]
+    public async Task Test_run_delivers_write_tool_events_to_on_event()
+    {
+        // R-11-7：试运行的 tool 事件必须送达 onEvent（订阅的就是本周期 test-run 频道），
+        // 绝不能再落到合成交易员的 trader:0 频道。
+        await using var env = await RunnerEnv.CreateAsync(executorBehavior: "order");
+        var legacyStream = env.Subscribe(TradingCycleRunner.SyntheticTraderChannelId);
+        var received = new List<SseEvent>();
+
+        var cycleId = await env.Runner.RunTestAsync(env.Provider, env.Strategy, 5_000m, false,
+            evt => { received.Add(evt); return Task.CompletedTask; }, default);
+
+        Assert.Contains("tool", received.Select(e => e.Name));
+        var tool = Json(received.First(e => e.Name == "tool"));
+        Assert.Equal("place_order", tool.GetProperty("tool").GetString());
+        Assert.False(tool.GetProperty("success").GetBoolean());
+        Assert.Equal(cycleId, tool.GetProperty("cycleId").GetString());
+        // 归属硬闸 fail-closed（API-06）：试运行写调用被拒，不落订单、不触网关，只有审计与事件。
+        Assert.Empty(env.Db.TraderOrders);
+        Assert.Equal(0, env.Gateway.PlaceCallCount);
+        // 回归守卫：trader:0 频道必须收不到任何事件。
+        Assert.Empty(legacyStream.Drain());
+    }
+
+    [Fact]
+    public async Task Write_tool_order_and_tool_events_route_to_the_context_channel()
+    {
+        // R-11-7：ExecutionTools 的 order 事件与 ToolAuditor 的 tool 事件必须发到 ctx.SseChannel
+        // ——试运行语境即 TestRunChannel(cycleId)，也正是 RunTestAsync 里 onEvent 泵送的频道，
+        // 不得再硬编码到交易员频道。真实试运行图被周期归属硬闸 fail-closed（见上一个测试，
+        // 试运行永远不落订单，API-06），故此处按 ToolRegistry 的装配口径直接装配写工具，
+        // 让写路径走到发布点，证明「事件送达频道」而非只断言频道字符串。
+        await using var env = await RunnerEnv.CreateAsync();
+        var account = await env.Db.ExchangeAccounts.FindAsync(1)
+                      ?? throw new InvalidOperationException("夹具缺少交易所账户");
+        // 周期行与上下文归属一致（TraderId/Strategy/Account/Mode 同值），让写工具通过归属硬闸。
+        env.Db.TradingCycles.Add(new TradingCycle
+        {
+            Id = env.CycleId, TraderId = env.Trader.Id, StrategyId = env.Trader.StrategyId,
+            ProviderId = env.Provider.Id, ExchangeAccountId = account.Id,
+            Mode = "dry", Trigger = "test", Status = "running",
+            StartedAt = DateTime.UtcNow, StrategyConfigJson = "{}", MemoryFingerprint = "f"
+        });
+        await env.Db.SaveChangesAsync();
+
+        var stageRunId = Ids.NewUlid();
+        var budget = new CycleBudget(env.Config.AgentBudget);
+        var market = new MarketDataCache(env.MarketReader);
+        var context = new TradingCycleContext(
+            cycleId: env.CycleId, trader: env.Trader, config: env.Config, provider: env.Provider,
+            account: account, mode: "dry", trigger: "test", exchange: "gate", timeframe: "5m",
+            market: market, accounts: env.AccountReader, budget: budget,
+            recorder: new CycleRecorder(env.Db, env.Hub));
+        Assert.Equal(CycleRecorder.TestRunChannel(env.CycleId), context.SseChannel);
+
+        var (reader, subscription) = env.Hub.Subscribe(context.SseChannel);
+        using var _ = subscription;
+        var traderStream = env.Subscribe(env.Trader.Id);
+        var audit = new ToolAuditor(env.Db, env.Hub, budget, env.CycleId, stageRunId, context.SseChannel);
+        var tools = new ExecutionTools(env.Db, context.ForStage(stageRunId), env.AccountReader,
+            env.Gateway, market, env.Hub, audit);
+
+        // 演练平仓：模拟成交、落订单行，order 与 tool 事件都必须到达试运行频道。
+        var result = await tools.ClosePositionAsync(null, "BTC/USDT", null, "market", null,
+            "事件路由回归", default);
+        Assert.True(result.Ok, result.Error?.Message);
+
+        var events = new List<SseEvent>();
+        while (reader.TryRead(out var evt)) events.Add(evt);
+        Assert.Contains("order", events.Select(e => e.Name));
+        Assert.Contains("tool", events.Select(e => e.Name));
+
+        var order = Json(events.First(e => e.Name == "order"));
+        Assert.Equal(env.CycleId, order.GetProperty("cycleId").GetString());
+        Assert.Equal("filled", order.GetProperty("status").GetString());
+        Assert.True(order.GetProperty("simulated").GetBoolean());
+        var tool = Json(events.First(e => e.Name == "tool"));
+        Assert.Equal("close_position", tool.GetProperty("tool").GetString());
+        Assert.True(tool.GetProperty("success").GetBoolean());
+        // 交易员频道（trader:7）必须收不到本次试运行语境的事件。
+        Assert.Empty(traderStream.Drain());
+    }
+
     // —— 夹具 ——
 
     private static JsonElement Json(SseEvent evt) => JsonSerializer.SerializeToElement(evt.Payload, ApiJson.Options);
+
+    /// <summary>轮询等待条件成立（hosted 服务的 ExecuteAsync 在首个 await 让出后由线程池继续）。</summary>
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, int timeoutMs = 5000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (await condition()) return;
+            await Task.Delay(25);
+        }
+        Assert.Fail($"等待条件在 {timeoutMs}ms 内未成立");
+    }
 
     private static Provider ScriptedProvider(int contextTokens) => new()
     {
@@ -682,6 +817,27 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 return new ChatResponse(new ChatMessage(ChatRole.Assistant,
                     [new FunctionCallContent("call-1", "get_klines",
                         new Dictionary<string, object?> { ["symbol"] = "BTC/USDT", ["timeframe"] = "5m", ["bars"] = 30 })]));
+            }
+
+            // 「order」：执行员首轮发起一次 place_order 写调用——试运行会被周期归属硬闸拒绝（不落订单、
+            // 不触网关），但必须留下写工具审计与 tool 事件；次轮照常产出干净报告（R-11-7 事件流回归）。
+            // 写工具入参全部必填（无默认值），一律显式给齐。
+            if (behavior == "order" && role == "executor" && call == 1)
+            {
+                return new ChatResponse(new ChatMessage(ChatRole.Assistant,
+                    [new FunctionCallContent("call-order", "place_order", new Dictionary<string, object?>
+                    {
+                        ["proposalId"] = "01PLACEDORDERATTEMPT",
+                        ["symbol"] = "BTC/USDT",
+                        ["side"] = "long",
+                        ["orderType"] = "market",
+                        ["quantity"] = 0.01m,
+                        ["price"] = null,
+                        ["leverage"] = 5m,
+                        ["stopLossPrice"] = 95m,
+                        ["takeProfitPrice"] = 110m,
+                        ["reason"] = "试运行事件流回归",
+                    })]));
             }
 
             switch (behavior)

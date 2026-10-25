@@ -15,7 +15,8 @@ namespace LuckyCat.Services;
 /// 周期落库记录器（LC-STD-01 §4.1、LC-STD-03 §2.1/§4.2）：把 <see cref="TradingCycle"/>、
 /// <see cref="AgentStageRun"/>、<see cref="TradeProposal"/>、<see cref="RiskVerdict"/> 写入本周期 DI 作用域的
 /// <see cref="AppDbContext"/>（一次写一次提交 = 短事务），并按约定负载向
-/// <see cref="SseChannels.Trader(int)"/> 推送 <c>cycle</c> / <c>stage</c> / <c>proposal</c> / <c>verdict</c>。
+/// <see cref="TradingCycleContext.SseChannel"/>（频道单点决策：试运行按周期独立频道，其余按交易员频道）
+/// 推送 <c>cycle</c> / <c>stage</c> / <c>proposal</c> / <c>verdict</c>。
 /// <para>
 /// 三条硬约束：
 /// ① 阶段行的 Id 复用执行器的 <c>StageRunId</c>，与 ToolAuditor 落的 ToolInvocation.stageRunId 同源；
@@ -92,7 +93,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
             MemoryFingerprint = PromptLibrary.MemoryFingerprint(ctx.Config),
         };
         _startedTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _channelKey = ctx.Trigger == "test" ? TestRunChannel(ctx.CycleId) : SseChannels.Trader(ctx.Trader.Id);
+        _channelKey = ctx.SseChannel;
 
         db.TradingCycles.Add(_cycle);
         await db.SaveChangesAsync(CancellationToken.None);

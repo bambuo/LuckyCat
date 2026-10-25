@@ -23,7 +23,8 @@ public sealed class ToolRegistry(
     /// <summary>返回指定角色在指定阶段可用的工具集（顺序与 <see cref="ToolCatalog"/> 一致）。</summary>
     public IList<AITool> For(AgentRole role, string stageRunId)
     {
-        var audit = new ToolAuditor(db, hub, cycle.Budget, cycle.CycleId, stageRunId, cycle.Trader.Id);
+        // 频道单点决策（R-11-7）：审计器与写工具都发到 cycle.SseChannel，试运行不再落 trader:0。
+        var audit = new ToolAuditor(db, hub, cycle.Budget, cycle.CycleId, stageRunId, cycle.SseChannel);
         return role switch
         {
             AgentRole.Analyst => AnalystTools(audit),

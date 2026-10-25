@@ -265,7 +265,7 @@ public class MarketToolsTests
         var hub = new SseEventHub();
         var (events, subscription) = hub.Subscribe(SseChannels.Trader(7));
         using var _ = subscription;
-        var auditor = new ToolAuditor(db, hub, new DenyBudget(), Ids.NewUlid(), Ids.NewUlid(), 7);
+        var auditor = new ToolAuditor(db, hub, new DenyBudget(), Ids.NewUlid(), Ids.NewUlid(), SseChannels.Trader(7));
 
         var result = await auditor.RunAsync("get_klines", "analyst", new { symbol = "BTC/USDT" },
             () => Task.FromResult(ToolEnvelope.Success("rows", DateTimeOffset.UtcNow, "live")), default);

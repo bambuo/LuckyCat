@@ -37,10 +37,15 @@ builder.Services.AddScoped<DecisionMemoryService>();
 builder.Services.AddScoped<ExchangeTradingService>();
 builder.Services.AddSingleton<TraderRunnerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>());
-// P4 周期宿主（Task 11）：与旧 TraderRunnerService 并存到 P7（Task 18）删除旧链路为止。
+// P4 周期宿主（Task 11）迁移期（到 Task 18 删除旧 TraderRunnerService 为止）：
+// TradingCycleRunner 只注册为可解析单例，**不得**注册为 hosted 调度（R-11-6）——旧 TraderRunnerService
+// 仍是唯一自动调度链，双宿主会对同一 IsRunning 交易员起两条循环、实盘双重开仓。
+// 启动恢复由 CycleStartupRecovery 单独承担（只标记遗留 running 周期，不起任何循环）。
+// Task 18 切流步骤：把 TradingCycleRunner 重新 AddHostedService、删除 CycleStartupRecovery 与旧链路；
+// 切流前请勿为 TradingCycleRunner 恢复任何 hosted 注册。
 builder.Services.AddScoped<CycleRecorder>();
 builder.Services.AddSingleton<TradingCycleRunner>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<TradingCycleRunner>());
+builder.Services.AddHostedService<CycleStartupRecovery>();
 builder.Services.AddSingleton<PositionHistorySyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionHistorySyncService>());
 builder.Services.AddSingleton<AccountStreamService>();

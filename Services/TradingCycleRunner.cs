@@ -37,8 +37,16 @@ public sealed record CycleDataSources(IAccountReader Accounts, IMarketDataReader
 /// <see cref="SseEventHub"/>，<see cref="AppDbContext"/>、<see cref="CycleRecorder"/>、
 /// <see cref="ChatClientFactory"/> 等都从「每周期一个 scope」解析，避免单例捕获 scoped 依赖。
 /// </para>
+/// <para>
+/// 迁移期调度边界（R-11-6）：本类是可解析的单例周期引擎，但<b>不是</b> hosted 调度——
+/// 旧 <see cref="TraderRunnerService"/> 仍是唯一自动恢复运行中交易员的调度链，本类若同时注册为
+/// hosted 服务会造成双循环双开仓。调度循环只经 <see cref="Start(int)"/> 显式启动（Task 14 端点、
+/// Task 18 切流后的自动恢复），启动恢复由 <see cref="CycleStartupRecovery"/> 单独承担；
+/// Task 18 删除旧链路时再把本类重新注册为 hosted 调度并恢复循环，<see cref="RunLoopAsync"/>
+/// 的循环机制保留备用，勿删。
+/// </para>
 /// </summary>
-public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub hub) : BackgroundService
+public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
 {
     /// <summary>试运行合成交易员的 SSE 频道 ID（周期与事件都发往该频道）。</summary>
     public const int SyntheticTraderChannelId = 0;
@@ -66,7 +74,10 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     /// <summary>该交易员的调度循环是否在运行。</summary>
     public bool IsRunning(int traderId) => _loops.ContainsKey(traderId);
 
-    /// <summary>启动交易员调度循环（首个周期立即执行；已在运行则幂等）。</summary>
+    /// <summary>
+    /// 启动交易员调度循环（首个周期立即执行；已在运行则幂等）。迁移期只有显式调用才会启动——
+    /// 本类不注册 hosted 调度（R-11-6），调用方是 Task 14 的端点与 Task 18 的切流恢复。
+    /// </summary>
     public void Start(int traderId)
     {
         if (_loops.ContainsKey(traderId)) return;
@@ -173,7 +184,8 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
 
         // 手动平仓没有 AI 阶段：直接装配执行员写工具（与 ToolRegistry 同一件装配口径）。
         var stageRunId = Ids.NewUlid();
-        var audit = new ToolAuditor(cycle.Db, hub, cycle.Context.Budget, cycle.Context.CycleId, stageRunId, trader.Id);
+        var audit = new ToolAuditor(cycle.Db, hub, cycle.Context.Budget, cycle.Context.CycleId, stageRunId,
+            cycle.Context.SseChannel);
         var tools = new ExecutionTools(cycle.Db, cycle.Context.ForStage(stageRunId), cycle.Sources.Accounts,
             cycle.Sources.Gateway, cycle.Market, hub, audit);
         try
@@ -240,50 +252,6 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         }
 
         return cycle.Context.CycleId;
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        try
-        {
-            await RecoverAsync(stoppingToken);
-        }
-        catch (Exception ex)
-        {
-            LogException("recover", ex);
-        }
-
-        var resumeIds = new List<int>();
-        try
-        {
-            using var scope = scopeFactory.CreateScope();
-            resumeIds = await scope.ServiceProvider.GetRequiredService<AppDbContext>()
-                .Traders.Where(trader => trader.IsRunning).Select(trader => trader.Id).ToListAsync(stoppingToken);
-        }
-        catch (Exception ex)
-        {
-            LogException("恢复调度失败", ex);
-        }
-
-        foreach (var traderId in resumeIds)
-        {
-            Console.WriteLine($"[Cycle] 恢复运行中的交易员 #{traderId}");
-            Start(traderId);
-        }
-
-        try
-        {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // 应用退出：停止全部循环，在途周期按重启口径中止。
-        }
-
-        foreach (var traderId in _loops.Keys.ToList())
-        {
-            Stop(traderId, ProcessRestartCode);
-        }
     }
 
     /// <summary>装配本周期使用的账户/行情/写网关边界实现（测试与试运行的注入缝）。</summary>

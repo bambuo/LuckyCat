@@ -27,12 +27,14 @@ public interface ICycleBudget
 
 /// <summary>
 /// 所有工具共用的审计包装器：读工具也落 ToolInvocation（入参/回执/耗时/错误码/截断标记），
-/// 消耗单周期工具预算，并在写工具或失败时向该交易员的 SSE 频道发布 tool 事件。
+/// 消耗单周期工具预算，并在写工具或失败时向调用方传入的 SSE 频道发布 tool 事件——
+/// 频道由 <see cref="LuckyCat.Workflows.TradingCycleContext.SseChannel"/> 单点决策（试运行走
+/// test-run 周期频道，其余走交易员频道；R-11-7），为空表示该装配位不推 SSE。
 /// 未预期异常统一兜底为 <c>tool_internal_error</c>（不回显异常原文，避免泄漏上游 URL/SQL）；
 /// 取消（token 已取消）如实上抛。
 /// </summary>
 public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget budget,
-    string? cycleId, string stageRunId, int? traderId)
+    string? cycleId, string stageRunId, string? sseChannel)
 {
     public async Task<ToolEnvelope> RunAsync(string tool, string role, object args,
         Func<Task<ToolEnvelope>> action, CancellationToken ct)
@@ -76,9 +78,9 @@ public sealed class ToolAuditor(AppDbContext db, SseEventHub hub, ICycleBudget b
             CreatedAt = DateTime.UtcNow
         });
         await db.SaveChangesAsync(ct);
-        if (traderId is { } tid && (ToolCatalog.IsWrite(tool) || !result.Ok))
+        if (sseChannel is { } channel && (ToolCatalog.IsWrite(tool) || !result.Ok))
         {
-            hub.Publish(SseChannels.Trader(tid), new SseEvent("tool", new
+            hub.Publish(channel, new SseEvent("tool", new
             {
                 cycleId,
                 stageId = stageRunId,

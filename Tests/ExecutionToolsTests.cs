@@ -1881,9 +1881,10 @@ public class ExecutionToolsTests
             };
             var hub = new SseEventHub();
             var budget = new RecordingBudget();
-            var auditor = new ToolAuditor(db, hub, budget, cycleId, stageRunId, TraderId);
+            // 频道显式传入（R-11-7 单点决策的装配口径）：本夹具的事件一律发往交易员频道。
+            var auditor = new ToolAuditor(db, hub, budget, cycleId, stageRunId, SseChannels.Trader(TraderId));
             var context = new ExecutionToolContext(cycleId, stageRunId, mode, "binance", "5m",
-                trader, account, config, budget);
+                trader, account, config, budget, SseChannels.Trader(TraderId));
             var tools = new ExecutionTools(db, context, accounts, gateway, new MarketDataCache(market),
                 hub, auditor);
 

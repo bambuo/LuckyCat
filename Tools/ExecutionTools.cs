@@ -16,10 +16,13 @@ namespace LuckyCat.Tools;
 /// <summary>
 /// 执行员工具上下文（永久保留）：一个周期内绑定交易员、账户、策略快照与预算；
 /// 工具只能访问该上下文，禁止模型传入账户/交易员/策略/密钥等归属参数。
+/// <paramref name="SseChannel"/> 是本周期事件的目标频道，由
+/// <see cref="LuckyCat.Workflows.TradingCycleContext.SseChannel"/> 单点决策并经 <c>ForStage</c> 线程化
+/// （R-11-7：试运行事件必须送达本周期频道，绝不硬编码到交易员频道）。
 /// </summary>
 public sealed record ExecutionToolContext(
     string CycleId, string StageRunId, string Mode, string Exchange, string Timeframe,
-    Trader Trader, ExchangeAccount Account, StrategyConfig Config, ICycleBudget Budget);
+    Trader Trader, ExchangeAccount Account, StrategyConfig Config, ICycleBudget Budget, string SseChannel);
 
 /// <summary>
 /// 执行员写工具：<c>place_order</c> 按 LC-STD-02 §6 的 12 步硬闸执行，所有校验失败一律拒绝（fail-closed）。
@@ -370,7 +373,7 @@ public sealed class ExecutionTools(
                 return raced is not null
                     ? ExistingOrder(raced, "已存在相同的 clientOrderId，未重复提交；如状态未知请人工核对")
                     : Fail(ToolErrors.DataUnavailable, "订单无法落库，未模拟成交", true);
-            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", simulated));
+            _hub.Publish(_ctx.SseChannel, new SseEvent("order", simulated));
             return ToolEnvelope.Success(OrderData(simulated), DateTimeOffset.UtcNow, "live",
                 ["演练模式：成交为模拟，不代表交易所真实成交"]);
         }
@@ -410,7 +413,7 @@ public sealed class ExecutionTools(
         ApplyPlaceResult(row, placed, request.Quantity);
         if (!await TryPersistOrderAsync(row))
             return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
-        _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+        _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
 
         return placed.Outcome switch
         {
@@ -546,7 +549,7 @@ public sealed class ExecutionTools(
                 return raced is not null
                     ? ExistingOrder(raced, "已存在相同的 clientOrderId，未重复提交；如状态未知请人工核对")
                     : Fail(ToolErrors.DataUnavailable, "订单无法落库，未模拟成交", true);
-            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+            _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
             return ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live",
                 ["演练模式：平仓为模拟，不代表交易所真实成交"]);
         }
@@ -574,7 +577,7 @@ public sealed class ExecutionTools(
         {
             // 网关抛异常（超时/网络/解析）无法确认是否已平仓：占位行保持 unknown，禁止按失败重试。
             LogGatewayError("close_position", ex.Message);
-            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+            _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
             return Fail(ToolErrors.ExchangeUnknown, CloseUnknownMessage);
         }
         ct.ThrowIfCancellationRequested();
@@ -591,7 +594,7 @@ public sealed class ExecutionTools(
                 row.Error = CloseUnknownMessage;
                 if (!await TryPersistOrderAsync(row))
                     return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
-                _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+                _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
                 return Fail(ToolErrors.ExchangeUnknown, CloseUnknownMessage);
 
             case CloseOutcome.Rejected:
@@ -605,7 +608,7 @@ public sealed class ExecutionTools(
                 row.Error = CloseRejectedMessage;
                 if (!await TryPersistOrderAsync(row))
                     return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
-                _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+                _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
                 return Fail(ToolErrors.ExchangeError, CloseRejectedMessage);
         }
 
@@ -625,13 +628,13 @@ public sealed class ExecutionTools(
             row.Error = "限价平仓已受理但未返回交易所订单号，无法撤单";
             if (!await TryPersistOrderAsync(row))
                 return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
-            _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+            _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
             return Fail(ToolErrors.ExchangeUnknown, "限价平仓已受理但未返回交易所订单号，无法撤单，请人工核对");
         }
 
         if (!await TryPersistOrderAsync(row))
             return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
-        _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", row));
+        _hub.Publish(_ctx.SseChannel, new SseEvent("order", row));
         return ToolEnvelope.Success(OrderData(row), DateTimeOffset.UtcNow, "live");
     }
 
@@ -715,7 +718,7 @@ public sealed class ExecutionTools(
         order.Success = false;
         if (!await TryPersistOrderAsync(order))
             return Fail(ToolErrors.ExchangeUnknown, "撤单结果无法落库，请人工核对");
-        _hub.Publish(SseChannels.Trader(_ctx.Trader.Id), new SseEvent("order", order));
+        _hub.Publish(_ctx.SseChannel, new SseEvent("order", order));
         return ToolEnvelope.Success(OrderData(order), DateTimeOffset.UtcNow, "live");
     }
 

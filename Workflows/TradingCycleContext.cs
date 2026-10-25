@@ -102,9 +102,19 @@ public sealed class TradingCycleContext(
 
     public void SetOutcome(CycleOutcome outcome) => Outcome = outcome;
 
+    /// <summary>
+    /// SSE 频道的单点决策（R-11-7）：试运行按周期独立成频道（<see cref="CycleRecorder.TestRunChannel"/>），
+    /// 其余触发一律 <see cref="SseChannels.Trader(int)"/>。周期落库（CycleRecorder）、工具审计
+    /// （ToolAuditor）与写工具订单事件（ExecutionTools，经 <see cref="ForStage"/> 线程化）共用本属性，
+    /// 任何发布者都不得自行拼频道键。
+    /// </summary>
+    public string SseChannel => Trigger == "test"
+        ? CycleRecorder.TestRunChannel(CycleId)
+        : SseChannels.Trader(Trader.Id);
+
     /// <summary>写工具阶段上下文：与 <see cref="ExecutionToolContext"/> 契约逐字段对齐（Task 7）。</summary>
     public ExecutionToolContext ForStage(string stageRunId) =>
-        new(CycleId, stageRunId, Mode, Exchange, Timeframe, Trader, Account, Config, Budget);
+        new(CycleId, stageRunId, Mode, Exchange, Timeframe, Trader, Account, Config, Budget, SseChannel);
 
     /// <summary>
     /// 阶段超时缝（LC-STD-01 §6）：返回与调用 token 链接的超时源，秒数取本周期预算的阶段口径；
