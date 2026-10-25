@@ -346,12 +346,8 @@ public sealed class MarketTools(
             return ToolEnvelope.Success("（策略未启用新闻）", DateTimeOffset.UtcNow, "incomplete", ["新闻已关闭"]);
         }
 
+        // 内置源（金十数据）不写入策略配置：即使未配置外部源也照常拉取，与配置源在聚合器内合并去重
         var sources = config.Indicators.ExternalDataSources;
-        if (sources.Count == 0)
-        {
-            return ToolEnvelope.Success("（未配置外部新闻源）", DateTimeOffset.UtcNow, "incomplete", ["未配置外部新闻源"]);
-        }
-
         var results = await cache.GetNewsAsync(sources, ct);
         var warnings = results
             .Where(r => r.Problem is not null)

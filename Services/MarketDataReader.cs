@@ -4,14 +4,14 @@ using LuckyCat.Contracts;
 namespace LuckyCat.Services;
 
 /// <summary>
-/// <see cref="IMarketDataReader"/> 的真实实现：仅做转发，行为完全沿用既有服务
-/// （行情快照的重试/缺失标注、情绪数据的 5 分钟缓存、外部数据源的 TTL 缓存、币源解析的口径均保持不变）。
+/// <see cref="IMarketDataReader"/> 的真实实现：行情快照/情绪/币源仍为转发（重试、缓存、币源解析口径不变）；
+/// 新闻经 <see cref="CryptoNewsAggregator"/> 把策略配置的外部源与内置源（金十数据）并行拉取后合并去重。
 /// </summary>
 public sealed class MarketDataReader(
     MarketSnapshotService snapshots,
     MarketSentimentService sentiment,
-    ExternalDataSourceService externalData,
-    CoinRankingService ranking) : IMarketDataReader
+    CoinRankingService ranking,
+    CryptoNewsAggregator news) : IMarketDataReader
 {
     public Task<MarketSnapshot> GetSnapshotAsync(string exchange, SharedSymbol symbol, string timeframe,
         int bars, int warmupBars, CancellationToken ct) =>
@@ -25,7 +25,7 @@ public sealed class MarketDataReader(
         sentiment.GetAsync(exchange, symbols, includeOi, includeFunding, ct);
 
     public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources, CancellationToken ct) =>
-        externalData.FetchAllAsync(sources, ct);
+        news.FetchAsync(sources, ct);
 
     public Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct) =>
         ranking.ResolveAsync(config, ct);

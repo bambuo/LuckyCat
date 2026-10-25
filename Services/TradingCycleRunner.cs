@@ -297,8 +297,8 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
             new AccountReaderScope(account, trader.Id, trader.StrategyId, config, memoryFingerprint));
         var market = new MarketDataReader(services.GetRequiredService<MarketSnapshotService>(),
             services.GetRequiredService<MarketSentimentService>(),
-            services.GetRequiredService<ExternalDataSourceService>(),
-            services.GetRequiredService<CoinRankingService>());
+            services.GetRequiredService<CoinRankingService>(),
+            services.GetRequiredService<CryptoNewsAggregator>());
         return new CycleDataSources(reader, market,
             new ExecutionGateway(account, trading, trader.IsCrossMargin));
     }

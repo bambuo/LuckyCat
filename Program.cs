@@ -9,6 +9,7 @@ using LuckyCat.Data;
 using LuckyCat.Endpoints;
 using LuckyCat.Memory;
 using LuckyCat.Services;
+using LuckyCat.Services.NewsSources;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,6 +31,11 @@ builder.Services.AddScoped<MarketSnapshotService>();
 builder.Services.AddScoped<CoinRankingService>();
 builder.Services.AddScoped<MarketSentimentService>();
 builder.Services.AddScoped<ExternalDataSourceService>();
+// 内置新闻源（金十数据）：只依赖单例 IHttpClientFactory，自身仅持 300s TTL 缓存，不俘获 HttpClient；
+// 聚合器与 ExternalDataSourceService 同为 scoped（后者是 scoped，单例注入会构成 captive 依赖）。
+builder.Services.AddSingleton<Jin10NewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());
+builder.Services.AddScoped<CryptoNewsAggregator>();
 builder.Services.AddScoped<StrategyTestRunner>();
 builder.Services.AddScoped<DecisionMemoryService>();
 builder.Services.AddScoped<ExchangeTradingService>();
