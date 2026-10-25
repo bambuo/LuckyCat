@@ -1,3 +1,4 @@
+using LuckyCat.Agents;
 using LuckyCat.Contracts;
 
 namespace LuckyCat.Services;
@@ -29,7 +30,7 @@ public static class SignalEvaluator
         IndicatorCalculator.SignalValues? p, IndicatorCalculator.SignalValues? d, decimal? price, string? directionFrame)
     {
         var settings = config.Indicators;
-        return new(symbol, directionFrame, PromptComposer.UsesDefaultEntry(config), Side(true), Side(false));
+        return new(symbol, directionFrame, PromptLibrary.UsesDefaultEntry(config), Side(true), Side(false));
 
         SignalSideAssessment Side(bool isLong)
         {

@@ -13,7 +13,6 @@ import type {
   ManualCloseResultDto,
   OutboundIp,
   PagedDto,
-  PromptPreview,
   PromptPreviewResult,
   Provider,
   ProviderUpsertRequest,
@@ -23,7 +22,6 @@ import type {
   Strategy,
   StrategyConfig,
   StrategyDefaults,
-  StrategyTestResult,
   StrategyUpsertRequest,
   StrategyValidationResult,
   TestRunRequest,
@@ -210,13 +208,6 @@ export const duplicateStrategy = (id: number) =>
 
 export const getStrategyDefaults = () => request<StrategyDefaults>('/api/strategies/default-config')
 
-/** 旧单角色预览：后端 /preview-prompt（单数）已删除，保留导出供当前页面编译；新页面用 previewStrategyPrompts。 */
-export const previewStrategyPrompt = (config: StrategyConfig) =>
-  request<PromptPreview>('/api/strategies/preview-prompt', {
-    method: 'POST',
-    body: JSON.stringify({ config }),
-  })
-
 /** preview-prompts：五角色系统提示词预览（不调用模型、不落库）。 */
 export const previewStrategyPrompts = (config: StrategyConfig) =>
   request<PromptPreviewResult>('/api/strategies/preview-prompts', {
@@ -229,13 +220,6 @@ export const validateStrategy = (config: StrategyConfig) =>
   request<StrategyValidationResult>('/api/strategies/validate', {
     method: 'POST',
     body: JSON.stringify({ config }),
-  })
-
-/** 旧 JSON 演练：/test-run 已改为 SSE，保留导出供当前页面编译；新页面用 openTestRunStream。 */
-export const runStrategyTest = (config: StrategyConfig, providerId: number, strategyId: number | null) =>
-  request<StrategyTestResult>('/api/strategies/test-run', {
-    method: 'POST',
-    body: JSON.stringify({ config, providerId, strategyId }),
   })
 
 // —— 交易员 ——

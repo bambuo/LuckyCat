@@ -9,7 +9,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Provider> Providers => Set<Provider>();
     public DbSet<ExchangeAccount> ExchangeAccounts => Set<ExchangeAccount>();
     public DbSet<Strategy> Strategies => Set<Strategy>();
-    public DbSet<DecisionRecord> DecisionRecords => Set<DecisionRecord>();
     public DbSet<Trader> Traders => Set<Trader>();
     public DbSet<AccountEquitySample> AccountEquitySamples => Set<AccountEquitySample>();
     public DbSet<TraderOrder> TraderOrders => Set<TraderOrder>();
@@ -59,18 +58,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(s => s.UpdatedAt).HasConversion(utcConverter);
             entity.Property(s => s.Name).HasMaxLength(100);
             entity.Property(s => s.Description).HasMaxLength(500);
-        });
-
-        modelBuilder.Entity<DecisionRecord>(entity =>
-        {
-            entity.Property(r => r.CreatedAt).HasConversion(utcConverter);
-            entity.Property(r => r.ProviderName).HasMaxLength(100);
-            entity.Property(r => r.Model).HasMaxLength(200);
-            entity.Property(r => r.Symbol).HasMaxLength(50);
-            entity.Property(r => r.Action).HasMaxLength(32);
-            entity.Property(r => r.Reasoning).HasMaxLength(2000);
-            entity.HasIndex(r => r.StrategyId);
-            entity.HasIndex(r => r.TraderId);
         });
 
         modelBuilder.Entity<Trader>(entity =>

@@ -36,14 +36,11 @@ builder.Services.AddScoped<ExternalDataSourceService>();
 builder.Services.AddSingleton<Jin10NewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());
 builder.Services.AddScoped<CryptoNewsAggregator>();
-builder.Services.AddScoped<StrategyTestRunner>();
-builder.Services.AddScoped<DecisionMemoryService>();
 builder.Services.AddScoped<ExchangeTradingService>();
-// P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的 hosted 注册已摘除——
-// 本进程恰好一条交易调度链（TradingCycleRunner），双调度器正是 Task 11 按 R-11-6 防住的缺陷。
+// P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的宿主与旧单发演练链路已在
+// Task 18（P7）整体删除——本进程恰好一条交易调度链（TradingCycleRunner）。
 // TradingCycleRunner 仍是可解析单例而非 hosted 服务：调度循环只经端点 start 与
 // CycleStartupRecovery（先 RecoverAsync 收敛遗留 running，再为 IsRunning 交易员 Start）驱动。
-// TraderRunnerService 类保留可编译，Task 18（P7）连同旧链路一起删除；回滚 = 恢复下面这一对注册行。
 builder.Services.AddScoped<CycleRecorder>();
 builder.Services.AddSingleton<TradingCycleRunner>();
 builder.Services.AddHostedService<CycleStartupRecovery>();

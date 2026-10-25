@@ -3,16 +3,13 @@ namespace LuckyCat.Contracts;
 // 配置 JSON 契约（camelCase 出入，属性名 PascalCase，STJ web 默认大小写不敏感）
 public class StrategyConfig
 {
-    public string StrategyType { get; set; } = "ai_trading";   // ai_trading | grid_trading
     public CoinSourceConfig CoinSource { get; set; } = new();
-    public GridConfig? GridConfig { get; set; } = new();       // 切出网格类型时前端置 null
     public IndicatorSettings Indicators { get; set; } = new();
     public RiskControlConfig RiskControl { get; set; } = new();
     public PromptSectionConfig PromptSections { get; set; } = new();
     public string CustomPrompt { get; set; } = "";
     public bool DecisionMemoryEnabled { get; set; } = true;
     public bool NewsEnabled { get; set; } = true;
-    public string Variant { get; set; } = "balanced";          // balanced | aggressive | conservative | scalping
     public RoleInstructionConfig RoleInstructions { get; set; } = new();
     public AgentBudgetConfig AgentBudget { get; set; } = new();
     public ReviewConfig Review { get; set; } = new();
@@ -30,25 +27,6 @@ public class CoinSourceConfig
     public int OiTopLimit { get; set; } = 10;
     public bool UseOiLow { get; set; }
     public int OiLowLimit { get; set; } = 10;
-}
-
-public class GridConfig
-{
-    public string Symbol { get; set; } = "BTC/USDT";
-    public int GridCount { get; set; } = 10;
-    public int TotalInvestment { get; set; } = 1000;
-    public int Leverage { get; set; } = 3;
-    public decimal UpperPrice { get; set; }
-    public decimal LowerPrice { get; set; }
-    public bool UseAtrBounds { get; set; } = true;
-    public decimal AtrMultiplier { get; set; } = 2.0m;
-    public string Distribution { get; set; } = "gaussian";      // uniform | gaussian | pyramid
-    public int MaxDrawdownPct { get; set; } = 10;
-    public int StopLossPct { get; set; } = 5;
-    public int DailyLossLimitPct { get; set; } = 8;
-    public bool UseMakerOnly { get; set; } = true;
-    public bool EnableDirectionAdjust { get; set; }
-    public decimal DirectionBiasRatio { get; set; } = 0.7m;
 }
 
 public class IndicatorSettings

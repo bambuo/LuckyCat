@@ -38,7 +38,7 @@ public class ContractSerializationTests
         {
           "trader": {
             "id": 1, "name": "t", "providerName": "p", "model": "m", "exchangeLabel": "GateIo",
-            "accountName": "a", "strategyName": "s", "strategyType": "ai_trading", "isRunning": true,
+            "accountName": "a", "strategyName": "s", "isRunning": true,
             "executionMode": "dry", "isCrossMargin": false, "scanIntervalMinutes": 3,
             "initialBalance": "1000", "startedAt": null, "lastCycleAt": null, "lastCycleStatus": null,
             "capabilityCanTrade": true, "capabilityNotes": [], "positionMode": null
@@ -52,14 +52,6 @@ public class ContractSerializationTests
           "positions": [{
             "symbol": "BTC/USDT", "side": "long", "quantity": "0.1", "averageOpenPrice": "100",
             "unrealizedPnl": "1", "liquidationPrice": "80", "leverage": "5"
-          }],
-          "decisions": [{
-            "id": 1, "at": "2026-01-01T00:00:00Z", "action": "open", "symbol": "BTC/USDT",
-            "confidence": "0.8", "entryPrice": "100", "stopLossPct": "5", "takeProfitPct": "10",
-            "positionPct": "1", "leverage": "5", "reason": "r", "reasoning": "rr", "inputTokens": 1,
-            "outputTokens": 2, "elapsedMs": 3, "traderId": 1, "systemPrompt": null, "userPrompt": null,
-            "status": "ok", "failureStage": null, "error": null, "rawOutput": null,
-            "promptRevision": null, "requestSent": null
           }],
           "history": {
             "success": true, "error": null,
@@ -99,12 +91,6 @@ public class ContractSerializationTests
         foreach (var field in new[] { "quantity", "averageOpenPrice", "unrealizedPnl", "liquidationPrice", "leverage" })
         {
             AssertString(position.GetProperty(field));
-        }
-
-        var decision = root.GetProperty("decisions")[0];
-        foreach (var field in new[] { "confidence", "entryPrice", "stopLossPct", "takeProfitPct", "positionPct", "leverage" })
-        {
-            AssertString(decision.GetProperty(field));
         }
 
         var metrics = root.GetProperty("history").GetProperty("metrics");

@@ -224,7 +224,7 @@ public class MemoryContextProviderTests
         var order = new TraderOrder
         {
             Id = 1, TraderId = 7, At = BaseTime, Action = "open", Symbol = "BTC/USDT",
-            Status = "unknown", Success = false, ProposalId = "p0",
+            Status = "unknown", ProposalId = "p0",
         };
         var reader = new MemoryReader
         {

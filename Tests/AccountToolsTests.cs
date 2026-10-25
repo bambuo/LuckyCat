@@ -343,8 +343,7 @@ public class AccountToolsTests
         Quantity = 0.01m,
         AveragePrice = 68_000m,
         Status = "filled",
-        ProposalId = proposalId,
-        Success = true
+        ProposalId = proposalId
     };
 
     private static PositionHistory Closed(int id, int accountId, DateTime closeAt, decimal pnl, decimal? fee = 0.5m) => new()

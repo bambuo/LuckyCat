@@ -15,7 +15,7 @@ namespace LuckyCat.Endpoints;
 /// <summary>
 /// 交易员端点（LC-STD-03 §3.4；Task 14 B 组接新链路）：
 /// 启停/手动平仓/复盘触发的调度一律走 <see cref="TradingCycleRunner"/>/<see cref="ReviewRunner"/>——
-/// 旧 TraderRunnerService 的 hosted 注册已随切流摘除（R-14-5，本仓库恰好一条调度链）。
+/// 旧 TraderRunnerService 调度链已在 P7 删除（R-14-5，本仓库恰好一条交易调度链）。
 /// 启停按状态幂等（200）；start 前置 provider 工具能力闸（422 provider_capability_missing，API-09）；
 /// stop 取消该交易员当前周期 token，周期按约定记 aborted + cancelled_by_user（LC-STD-01 §8.6）；
 /// GET 端点无副作用：dashboard/stream 不触发任何周期（stream 只订阅转发）。
@@ -263,20 +263,6 @@ public static class TradersEndpoints
                 var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
                 var strategy = await db.Strategies.FindAsync(new object[] { trader.StrategyId }, ct);
 
-                var strategyType = "ai_trading";
-                if (strategy is not null)
-                {
-                    try
-                    {
-                        var config = JsonSerializer.Deserialize<StrategyConfig>(strategy.ConfigJson, VerificationJson.Options);
-                        strategyType = config?.StrategyType ?? "ai_trading";
-                    }
-                    catch (JsonException)
-                    {
-                        // 配置解析失败时按默认类型展示
-                    }
-                }
-
                 var audit = account is null
                     ? new TradingAudit(false, false, false, false, false, false, ["绑定账户缺失"])
                     : ExchangeTradingService.Audit(account);
@@ -298,7 +284,6 @@ public static class TradersEndpoints
                     account?.ExchangeType.ToString() ?? "",
                     account?.AccountName ?? "",
                     strategy?.Name ?? "（已删除）",
-                    strategyType,
                     trader.IsRunning,
                     trader.ExecutionMode,
                     trader.IsCrossMargin,
@@ -365,9 +350,6 @@ public static class TradersEndpoints
                         .Select(s => new DashboardSample(s.At, CycleDtoMapper.Num(s.Equity)))
                         .ToList();
 
-                // 最近决策（旧 DecisionRecord 链路，P7 随旧宿主一并移除；新链数据在 latestCycle）
-                var decisions = await LoadDecisionsAsync(db, id, 50, ct);
-
                 // 历史仓位只读本系统的库；不再在 GET 路径触发的交易所同步（syncError 恒 null 的口径见上）。
                 var history = account is null
                     ? EmptyHistory("绑定账户缺失")
@@ -414,7 +396,7 @@ public static class TradersEndpoints
                 // 新链路最新周期块（简报：dashboard 返回最新周期/阶段/提案/裁决/订单/权益）。
                 var latestCycle = await CycleDtoMapper.BuildLatestAsync(db, id, ct);
 
-                return ApiResults.Ok(new TraderDashboardDto(info, accountDto, samples, positions, decisions,
+                return ApiResults.Ok(new TraderDashboardDto(info, accountDto, samples, positions,
                     history, orders, latestCycle));
             });
 
@@ -721,46 +703,7 @@ public static class TradersEndpoints
         _ => null,
     };
 
-    // —— 以下为旧看板聚合的只读段（DecisionRecord 链路到 P7 移除；GET 内不写库、不触交易所同步）——
-
-    private static async Task<List<DashboardDecision>> LoadDecisionsAsync(AppDbContext db, int traderId, int take, CancellationToken ct)
-    {
-        var records = await db.DecisionRecords
-            .Where(r => r.TraderId == traderId)
-            .OrderByDescending(r => r.Id)
-            .Take(take)
-            .ToListAsync(ct);
-        return records.Select(ToDecisionDto).ToList();
-    }
-
-    internal static DashboardDecision ToDecisionDto(DecisionRecord r)
-    {
-        decimal? entry = null, sl = null, tp = null, posPct = null, lev = null;
-        string? reason = null;
-        try
-        {
-            using var doc = JsonDocument.Parse(r.DecisionJson);
-            var root = doc.RootElement;
-            entry = ReadDecimal(root, "entry_price");
-            sl = ReadDecimal(root, "stop_loss_pct");
-            tp = ReadDecimal(root, "take_profit_pct");
-            posPct = ReadDecimal(root, "position_pct");
-            lev = ReadDecimal(root, "leverage");
-            reason = ReadString(root, "reason");
-        }
-        catch (JsonException)
-        {
-            // 落库 JSON 异常时仅展示基础字段
-        }
-
-        var round = DecisionRoundMetadata.Read(r);
-        return new DashboardDecision(r.Id, r.CreatedAt, r.Action, r.Symbol, CycleDtoMapper.Num(r.Confidence),
-            CycleDtoMapper.Num(entry), CycleDtoMapper.Num(sl), CycleDtoMapper.Num(tp),
-            CycleDtoMapper.Num(posPct), CycleDtoMapper.Num(lev), reason, r.Reasoning,
-            r.InputTokens, r.OutputTokens, r.ElapsedMs, r.TraderId,
-            r.SystemPrompt, r.UserPrompt, round?.Status ?? (r.Action == "error" ? "error" : "ok"),
-            round?.FailureStage, round?.Error, round?.RawOutput, round?.PromptRevision, round?.RequestSent);
-    }
+    // —— 看板聚合的只读段（GET 内不写库、不触交易所同步）——
 
     private static TraderOrderDto ToOrderDto(TraderOrder o) =>
         new(o.Id, o.At, o.Symbol, o.Action, CycleDtoMapper.Num(o.Quantity), CycleDtoMapper.Num(o.Price),
@@ -913,21 +856,4 @@ public static class TradersEndpoints
             t.IsRunning, t.ExecutionMode, t.IsCrossMargin, t.ScanIntervalMinutes, t.InitialBalance,
             t.StartedAt, t.LastCycleAt, t.LastCycleStatus, t.CreatedAt, t.UpdatedAt);
     }
-
-    private static decimal? ReadDecimal(JsonElement element, string property)
-    {
-        if (!element.TryGetProperty(property, out var value)) return null;
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number)) return number;
-        if (value.ValueKind == JsonValueKind.String
-            && decimal.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
-        {
-            return parsed;
-        }
-        return null;
-    }
-
-    private static string? ReadString(JsonElement element, string property) =>
-        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
 }

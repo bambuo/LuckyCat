@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
-import { IconArrowFall, IconArrowRise, IconClockCircle, IconCopy, IconDashboard, IconDownload, IconRobot } from '@arco-design/web-vue/es/icon'
+import { IconDashboard, IconRobot } from '@arco-design/web-vue/es/icon'
 import {
   ApiRequestError,
   closePosition as apiClosePosition,
@@ -20,14 +20,12 @@ import OrderCard from '../components/cycle/OrderCard.vue'
 import ProposalCard from '../components/cycle/ProposalCard.vue'
 import VerdictCard from '../components/cycle/VerdictCard.vue'
 import EquityChart from '../components/trader/EquityChart.vue'
-import MarkdownBlock from '../components/trader/MarkdownBlock.vue'
 import type {
   CycleDetailDto,
   CycleDto,
   CycleEvent,
   CycleOrderDto,
   CycleStatus,
-  DashboardDecisionDto,
   DashboardSample,
   DashboardSymbolStatDto,
   ExecutionMode,
@@ -58,7 +56,6 @@ const cycleErrorText = ref<string | null>(null)
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const percentMode = ref(false)
-const decisionsLimit = ref(2)
 const actionBusy = ref(false)
 
 // 走动的时钟：像「运行时间」这类随时间增长的显示，computed 的依赖不含 Date.now()，
@@ -792,18 +789,6 @@ function actionInfo(action: string | null) {
   return (action && ACTION_MAP[action]) || { label: action ?? '—', color: 'gray', icon: '·' }
 }
 
-function confidenceScore(value: string | null): number {
-  return toNumber(value) ?? 0
-}
-
-function confidenceColor(confidence: string | null): string {
-  const n = toNumber(confidence)
-  if (n === null || n <= 0) return 'gray'
-  if (n >= 80) return 'green'
-  if (n >= 60) return 'gold'
-  return 'red'
-}
-
 function sideLabel(side: string | null | undefined): string {
   if (!side) return '—'
   if (side.toLowerCase().includes('long') || side === 'Buy') return '多头'
@@ -812,16 +797,6 @@ function sideLabel(side: string | null | undefined): string {
 }
 
 // 决策卡止损/止盈幅度：后端字符串 → 解析 → 绝对值 + 2 位小数（纯展示）
-function stopLossText(value: string | null): string {
-  const n = toNumber(value)
-  return n === null ? '—' : `-${Math.abs(n).toFixed(2)}%`
-}
-
-function takeProfitText(value: string | null): string {
-  const n = toNumber(value)
-  return n === null ? '—' : `+${Math.abs(n).toFixed(2)}%`
-}
-
 function fmtTime(iso: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -856,35 +831,6 @@ const runtimeText = computed(() => {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟` : `${minutes} 分钟`
 })
 
-const visibleDecisions = computed<DashboardDecisionDto[]>(() =>
-  (dashboard.value?.decisions ?? []).slice(0, Math.max(1, Math.min(50, decisionsLimit.value))),
-)
-
-// 思维链三段解析（关键信号 / 风险点 / 失效条件，与输出契约同源）；模型未按格式输出时回退整段 Markdown
-const COT_SECTIONS = [
-  { label: '关键信号', tone: 'cot-chip-signal' },
-  { label: '风险点', tone: 'cot-chip-risk' },
-  { label: '失效条件', tone: 'cot-chip-invalid' },
-] as const
-
-function reasoningSections(text: string): Array<{ label: string; tone: string; text: string }> {
-  const starters = COT_SECTIONS.map((s) => s.label).join('|')
-  const sections: Array<{ label: string; tone: string; text: string }> = []
-  for (const section of COT_SECTIONS) {
-    const body = text.match(new RegExp(`${section.label}[：:]\\s*([\\s\\S]*?)(?=(?:${starters})[：:]|$)`))?.[1]?.trim()
-    if (body) sections.push({ label: section.label, tone: section.tone, text: body })
-  }
-  return sections
-}
-
-function riskReward(decision: DashboardDecisionDto): number | null {
-  // 字符串金额只在展示层解析；有限性与分母守卫后再算比值
-  const sl = Math.abs(toNumber(decision.stopLossPct) ?? 0)
-  const tp = Math.abs(toNumber(decision.takeProfitPct) ?? 0)
-  if (!Number.isFinite(sl) || !Number.isFinite(tp) || sl <= 0) return null
-  return Math.round((tp / sl) * 10) / 10
-}
-
 const historyMetrics = computed(() => {
   const m = dashboard.value?.history.metrics
   return m
@@ -902,26 +848,6 @@ const historyMetrics = computed(() => {
       ]
     : []
 })
-
-// 提示词页的复制 / 下载（对齐 nofx 的复制与 .txt 下载按钮）
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    Message.success('已复制')
-  } catch {
-    Message.error('复制失败（浏览器未授权剪贴板）')
-  }
-}
-
-function downloadText(filename: string, text: string) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
 
 // 启停/平仓错误：422 等业务错误原样展示后端文案；409 cycle_in_progress 是并发提示，用警告而非错误弹层
 function showActionError(err: unknown, fallback: string) {
@@ -1256,165 +1182,6 @@ function shortCycleId(id: string): string {
             </table>
           </a-card>
         </div>
-
-        <!-- 最近决策（旧决策表；新链路不再写入，空列表时整块隐藏，避免一个永远为空的死面板） -->
-        <a-card v-if="visibleDecisions.length > 0" class="decisions-card">
-          <template #title>最近决策</template>
-          <template #extra>
-            <span class="decisions-limit">
-              最近
-              <a-input-number v-model="decisionsLimit" :min="1" :max="50" size="mini" style="width: 56px" />
-              个交易周期
-            </span>
-          </template>
-
-          <div v-if="visibleDecisions.length === 0" class="card-empty">暂无决策记录（交易员启动后每轮落库）</div>
-          <div v-else class="decision-list">
-            <div v-for="d in visibleDecisions" :key="d.id" class="decision-card">
-              <div class="decision-head">
-                <div class="decision-icon"><IconRobot /></div>
-                <div class="decision-meta">
-                  <div class="decision-cycle">周期 #{{ d.id }}</div>
-                  <div class="decision-time">{{ fmtTime(d.at) }}</div>
-                </div>
-                <a-tag size="small" :color="d.status === 'error' ? 'red' : 'green'">{{ d.status === 'error' ? '轮次失败' : '已解析' }}</a-tag>
-              </div>
-
-              <div class="token-bar">
-                <a-tag v-if="d.elapsedMs" size="small" color="arcoblue">
-                  <template #icon><IconClockCircle /></template>
-                  {{ (d.elapsedMs / 1000).toFixed(1) }}s
-                </a-tag>
-                <a-tag v-if="d.inputTokens" size="small" color="purple">
-                  <template #icon><IconArrowFall /></template>
-                  {{ d.inputTokens.toLocaleString() }}
-                </a-tag>
-                <a-tag v-if="d.outputTokens" size="small" color="green">
-                  <template #icon><IconArrowRise /></template>
-                  {{ d.outputTokens.toLocaleString() }}
-                </a-tag>
-              </div>
-
-              <a-tabs size="small" type="text" class="decision-tabs">
-                <a-tab-pane key="coin" title="标的">
-                  <div class="action-card">
-                    <div class="action-head">
-                      <IconClockCircle class="action-clock" />
-                      <a-button v-if="d.symbol?.trim()" type="text" size="small" class="action-symbol-btn">
-                        {{ d.symbol }}
-                      </a-button>
-                      <a-tag size="small" :color="actionInfo(d.action).color">{{ actionInfo(d.action).label }}</a-tag>
-                      <a-tag v-if="confidenceScore(d.confidence) > 0" size="small" :color="confidenceColor(d.confidence)">
-                        评分 {{ d.confidence }}
-                      </a-tag>
-                      <span class="status-dot" :class="d.status === 'error' ? 'fail' : 'ok'" :title="d.status === 'error' ? '失败轮次已保存' : '决策已解析并落库'"></span>
-                    </div>
-
-                    <div v-if="d.action === 'buy' || d.action === 'sell'" class="price-grid">
-                      <div class="price-cell">
-                        <div class="price-label">入场价</div>
-                        <div class="price-value">{{ text(d.entryPrice) }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">止损</div>
-                        <div class="price-value loss">{{ stopLossText(d.stopLossPct) }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">止盈</div>
-                        <div class="price-value gain">{{ takeProfitText(d.takeProfitPct) }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">杠杆</div>
-                        <div class="price-value leverage">{{ d.leverage ? `${d.leverage}x` : '—' }}</div>
-                      </div>
-                    </div>
-
-                    <div v-if="riskReward(d) !== null" class="rr-row">
-                      <span class="price-label">风险回报比</span>
-                      <span class="loss">1</span>
-                      <span class="rr-colon">:</span>
-                      <span class="gain">{{ fmtNumber(riskReward(d), 1) }}</span>
-                      <div class="rr-track">
-                        <div class="rr-fill" :style="{ width: `${Math.min(100, (riskReward(d)! / 5) * 100)}%` }"></div>
-                      </div>
-                    </div>
-
-                    <a-alert v-if="d.error || d.reason" :type="d.status === 'error' ? 'error' : 'info'" class="reason-alert">{{ d.error ?? d.reason }}</a-alert>
-                  </div>
-                </a-tab-pane>
-                <a-tab-pane key="prompt" title="提示词">
-                  <a-collapse :bordered="false" expand-icon-position="right" class="prompt-collapse">
-                    <a-collapse-item key="sys">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label sys">系统提示词</span>
-                          <span v-if="d.systemPrompt" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.systemPrompt)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-系统提示词.txt`, d.systemPrompt)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <MarkdownBlock v-if="d.systemPrompt" :text="d.systemPrompt" />
-                      <div v-else class="card-empty">该轮未落库（历史记录）</div>
-                    </a-collapse-item>
-                    <a-collapse-item key="user">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label user">用户提示词</span>
-                          <span v-if="d.userPrompt" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.userPrompt)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-用户提示词.txt`, d.userPrompt)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <MarkdownBlock v-if="d.userPrompt" :text="d.userPrompt" />
-                      <div v-else class="card-empty">该轮未落库（历史记录）</div>
-                    </a-collapse-item>
-                    <a-collapse-item key="cot">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label cot">思维链分析</span>
-                          <span v-if="d.reasoning" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.reasoning)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-思维链.txt`, d.reasoning)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <template v-if="d.reasoning">
-                        <template v-if="reasoningSections(d.reasoning).length > 0">
-                          <div v-for="section in reasoningSections(d.reasoning)" :key="section.label" class="cot-section">
-                            <span class="cot-chip" :class="section.tone">{{ section.label }}</span>
-                            <MarkdownBlock :text="section.text" />
-                          </div>
-                        </template>
-                        <MarkdownBlock v-else :text="d.reasoning" />
-                      </template>
-                      <div v-else class="card-empty">该轮未保存思维链</div>
-                    </a-collapse-item>
-                  </a-collapse>
-                </a-tab-pane>
-              </a-tabs>
-            </div>
-          </div>
-        </a-card>
       </div>
 
       <!-- 历史仓位统计 -->

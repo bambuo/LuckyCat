@@ -11,8 +11,6 @@ namespace LuckyCat.Endpoints;
 
 public static class StrategiesEndpoints
 {
-    private static readonly string[] ValidStrategyTypes = ["ai_trading", "grid_trading"];
-
     private static readonly AgentRole[] PreviewRoles =
     [
         AgentRole.Analyst, AgentRole.Trader, AgentRole.Risk, AgentRole.Executor, AgentRole.Reviewer,
@@ -117,7 +115,7 @@ public static class StrategiesEndpoints
 
             // 字面量路由优先于 /{id:int}，无冲突
             group.MapGet("/default-config", () =>
-                ApiResults.Ok(new StrategyDefaultsDto(PromptComposer.CreateDefaultConfig(), PromptComposer.CreateDefaultSections())));
+                ApiResults.Ok(new StrategyDefaultsDto(new StrategyConfig(), PromptLibrary.DefaultSections())));
 
             // 五角色系统提示词预览（LC-STD-03 §3.3）：与正式周期同一 PromptLibrary.Build 产物，
             // 不调用模型、不落库、不改记忆指纹（LC-STD-04 §7：预览不是模板变更，不 bump 修订号）。
@@ -255,19 +253,13 @@ public static class StrategiesEndpoints
     private static string? Validate(StrategyUpsertRequest request) =>
         string.IsNullOrWhiteSpace(request.Name) ? "名称不能为空" : ValidateConfig(request.Config);
 
-    // 供 preview-prompt / preview-prompts / validate / test-run 复用
+    // 供 preview-prompts / validate / test-run 复用
     private static string? ValidateConfig(StrategyConfig? config)
     {
         if (config is null) return "config 不能为空";
         if (config.RiskControl is null || config.Indicators?.Klines is null || config.CoinSource is null || config.PromptSections is null)
             return "风控、指标、币种来源和提示词配置不能为空";
-        if (string.IsNullOrWhiteSpace(config.StrategyType))
-        {
-            config.StrategyType = "ai_trading";   // 缺省按智能交易
-        }
-        return ValidStrategyTypes.Contains(config.StrategyType)
-            ? TradingRiskPolicy.ValidateConfig(config.RiskControl)
-            : "config.strategyType 无效（仅支持 ai_trading / grid_trading）";
+        return TradingRiskPolicy.ValidateConfig(config.RiskControl);
     }
 
     private static string SerializeConfig(StrategyConfig config) =>

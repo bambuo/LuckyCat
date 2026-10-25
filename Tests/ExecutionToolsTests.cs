@@ -326,9 +326,7 @@ public class ExecutionToolsTests
             ProposalId = env.UnapprovedId,
             VerdictId = env.VerdictId,
             ClientOrderId = ClientOrderId(env.CycleId, env.ApprovedId),
-            Status = "failed",
-            Success = false
-        });
+            Status = "failed"        });
         await env.Db.SaveChangesAsync();
 
         var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
@@ -355,8 +353,7 @@ public class ExecutionToolsTests
             Price = 100m,
             CycleId = Ids.NewUlid(),
             ExchangeAccountId = AccountId,
-            Status = "filled",
-            Success = true
+            Status = "filled"
         });
         await env.Db.SaveChangesAsync();
 
@@ -384,8 +381,7 @@ public class ExecutionToolsTests
             CycleId = Ids.NewUlid(),
             ExchangeAccountId = AccountId,
             Status = "filled",
-            Simulated = true,
-            Success = true
+            Simulated = true
         });
         await env.Db.SaveChangesAsync();
 
@@ -426,7 +422,7 @@ public class ExecutionToolsTests
         Assert.Equal(4m, order.Leverage);
         Assert.Equal("filled", order.Status);
         Assert.True(order.Simulated);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Contains("手续费", order.Note);
         Assert.Equal(ClientOrderId(env.CycleId, env.ApprovedId), order.ClientOrderId);
@@ -499,7 +495,7 @@ public class ExecutionToolsTests
         Assert.Equal("EX-123", order.ExchangeOrderId);
         Assert.Equal("filled", order.Status);
         Assert.False(order.Simulated);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
         Assert.Equal(0.4m, order.FilledQuantity);
         Assert.Equal(100m, order.AveragePrice);
 
@@ -522,7 +518,7 @@ public class ExecutionToolsTests
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("submitted", order.Status);
         Assert.NotEqual("partial", order.Status);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
     }
 
     [Fact]
@@ -581,9 +577,7 @@ public class ExecutionToolsTests
                 ProposalId = env.ApprovedId,
                 VerdictId = env.VerdictId,
                 ClientOrderId = ClientOrderId(env.CycleId, env.ApprovedId, attempt),
-                Status = "failed",
-                Success = false
-            });
+                Status = "failed"            });
         }
         await env.Db.SaveChangesAsync();
 
@@ -614,9 +608,7 @@ public class ExecutionToolsTests
             ProposalId = env.ApprovedId,
             VerdictId = env.VerdictId,
             ClientOrderId = ClientOrderId(env.CycleId, env.ApprovedId, 0),
-            Status = "unknown",
-            Success = false
-        });
+            Status = "unknown"        });
         await env.Db.SaveChangesAsync();
 
         var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
@@ -645,9 +637,7 @@ public class ExecutionToolsTests
             ProposalId = env.UnapprovedId, // 另一个提案
             VerdictId = env.VerdictId,
             ClientOrderId = ClientOrderId(env.CycleId, env.UnapprovedId, 0),
-            Status = "unknown",
-            Success = false
-        });
+            Status = "unknown"        });
         await env.Db.SaveChangesAsync();
 
         var result = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
@@ -674,7 +664,7 @@ public class ExecutionToolsTests
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("failed", order.Status);
         Assert.False(order.Simulated);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Equal("交易所拒绝下单，订单未创建", order.Error);
     }
@@ -693,7 +683,7 @@ public class ExecutionToolsTests
         Assert.Equal(ToolErrors.ExchangeUnknown, first.Error!.Code);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Equal("交易所结果未知，请人工核对", order.Error);
 
         var retry = await env.Tools.PlaceOrderAsync(env.ApprovedId, "BTC/USDT", "long", "limit",
@@ -717,7 +707,7 @@ public class ExecutionToolsTests
         Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Equal(1, env.Gateway.PlaceCalls);
     }
 
@@ -735,7 +725,7 @@ public class ExecutionToolsTests
 
         var order = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Equal(1, env.Gateway.PlaceCalls);
         Assert.Empty(await env.Db.ToolInvocations.AsNoTracking().ToListAsync());
     }
@@ -754,7 +744,7 @@ public class ExecutionToolsTests
         Assert.Equal(ToolErrors.ExchangeUnknown, result.Error!.Code);
         var order = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Equal(1, env.Gateway.PlaceCalls);
     }
 
@@ -804,9 +794,7 @@ public class ExecutionToolsTests
                 ProposalId = env.ApprovedId,
                 VerdictId = env.VerdictId,
                 ClientOrderId = ClientOrderId(env.CycleId, env.ApprovedId),
-                Status = "unknown",
-                Success = false
-            };
+                Status = "unknown"            };
             other.TraderOrders.Add(competing);
             await other.SaveChangesAsync();
             competingId = competing.Id;
@@ -880,7 +868,7 @@ public class ExecutionToolsTests
         Assert.Null(order.FilledQuantity); // 提交数量不是成交
         Assert.Null(order.AveragePrice);   // 参考价不是成交均价
         Assert.False(order.Simulated);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
         Assert.Equal(call.ClientOrderId, order.ClientOrderId);
         Assert.Null(order.ProposalId);
         Assert.Null(order.VerdictId);
@@ -903,7 +891,7 @@ public class ExecutionToolsTests
         Assert.Equal(100m, order.Price); // 参考价（报价），不是成交价
         Assert.Null(order.FilledQuantity);
         Assert.Null(order.AveragePrice);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
     }
 
     [Fact]
@@ -1040,7 +1028,7 @@ public class ExecutionToolsTests
         Assert.Equal(5m, order.Leverage);
         Assert.Equal("filled", order.Status);
         Assert.True(order.Simulated);
-        Assert.True(order.Success);
+        Assert.True(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Null(order.ProposalId);
         Assert.Null(order.VerdictId);
@@ -1147,7 +1135,7 @@ public class ExecutionToolsTests
         Assert.DoesNotContain("rejected by exchange", result.Error.Message);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("failed", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Null(order.FilledQuantity);
         Assert.Null(order.AveragePrice);
@@ -1170,7 +1158,7 @@ public class ExecutionToolsTests
         Assert.Equal(1, env.Gateway.CloseCalls);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Null(order.FilledQuantity);
         Assert.Null(order.AveragePrice);
@@ -1190,7 +1178,7 @@ public class ExecutionToolsTests
         Assert.False(result.Error.Retryable);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Null(order.FilledQuantity);
         Assert.Null(order.AveragePrice);
@@ -1229,7 +1217,7 @@ public class ExecutionToolsTests
         Assert.Equal(1, env.Gateway.CloseCalls);
         var order = await env.Db.TraderOrders.SingleAsync();
         Assert.Equal("unknown", order.Status);
-        Assert.False(order.Success);
+        Assert.False(IsSubmitted(order));
         Assert.Null(order.ExchangeOrderId);
         Assert.Null(order.FilledQuantity);
         Assert.Equal("平仓结果未知，请人工核对", order.Error);
@@ -1311,7 +1299,7 @@ public class ExecutionToolsTests
         Assert.Equal(0, env.Gateway.CancelCalls);
         var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
         Assert.Equal("cancelled", saved.Status);
-        Assert.False(saved.Success);
+        Assert.False(IsSubmitted(saved));
 
         var invocation = Assert.Single(await env.Db.ToolInvocations.ToListAsync());
         Assert.Equal("cancel_order", invocation.ToolName);
@@ -1371,7 +1359,7 @@ public class ExecutionToolsTests
 
         var saved = await env.Db.TraderOrders.AsNoTracking().SingleAsync();
         Assert.Equal("cancelled", saved.Status);
-        Assert.False(saved.Success);
+        Assert.False(IsSubmitted(saved));
         Assert.Equal("cancelled", result.Data!.Value.GetProperty("status").GetString());
 
         var invocation = Assert.Single(await env.Db.ToolInvocations.ToListAsync());
@@ -1517,9 +1505,11 @@ public class ExecutionToolsTests
         ClientOrderId = "lc-cancel-1",
         ExchangeOrderId = exchangeOrderId,
         Status = status,
-        Simulated = simulated,
-        Success = status is "submitted" or "partial" or "filled"
+        Simulated = simulated
     };
+
+    /// <summary>P7 删除 TraderOrder.Success 后，成功口径统一由 Status 生命周期表达。</summary>
+    private static bool IsSubmitted(TraderOrder order) => order.Status is "submitted" or "partial" or "filled";
 
     private static SharedFuturesSymbol BuildSpec(
         decimal? maxTradeQuantity = 1_000m,

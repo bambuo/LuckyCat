@@ -19,6 +19,44 @@ public static class PromptLibrary
     /// <summary>代码固定块、安全块、输出契约或角色职责变更时必须提升。</summary>
     public const string Revision = "2026-10-25.1";
 
+    // —— 策略提示词四段默认正文（default-config 下发给前端；用户可逐段改写）——
+    // 注意：默认文案引用可配置项时只写「以某某配置为准」，不重复具体数字/指标名——否则用户改配置后同一份提示词自相矛盾。
+    public const string RoleDefault =
+        "你是一名日内短线加密货币交易 AI，在严格风控下捕捉机会：单笔风险以「风控规则」的每笔最大风险占比为上限，宁可错过、不可做错。" +
+        "只依据给定的行情数据、指标配置与风控规则决策；数据缺失时明确说明并倾向于观望，不臆造行情。";
+
+    public const string FrequencyDefault =
+        "信号优先，不设置每日最低交易笔数。15–60 分钟是策略预期持仓窗口，不是必须平仓时点；" +
+        "同币种已有持仓时禁止加仓。交易日以用户提示词给出的交易纪律时区和重置时间为准；" +
+        "连续两笔净亏损后保证金比例上限减半，当日任一连续三笔净亏损后停止开新仓直到重置；仍允许平仓。" +
+        "以系统计算的纪律状态为准，不根据截断历史自行推算。";
+
+    public const string EntryDefault =
+        "开仓按「周期职责与信号判据」检查：方向周期提供趋势方向，主周期负责入场动能与位置；" +
+        "其他参考周期用于描述风险，不额外要求所有周期全部同向。" +
+        "必须满足方向、动能、位置与成本后盈亏比四项；任一失败或必需数据缺失输出 hold，并逐项说明失败项。" +
+        "止损距离采用主周期已启用的最短周期 ATR×1.5，同时说明结构失效价；" +
+        "止盈选交易方向上的最近有效结构位，不穿越未处理的阻力/支撑来凑盈亏比。";
+
+    public const string WorkflowDefault =
+        "先检查当前持仓的有效行情、结构失效条件和保护状态；保护未核实不得假设止损止盈已挂好。" +
+        "其次只评估本轮数据完整且新鲜的开仓候选。最后输出一个最优动作；" +
+        "需要平仓时优先 close，本轮不同时开仓；多个持仓需要退出时先处理风险最高的一个。";
+
+    /// <summary>四段默认正文；新建策略与「重置为默认」的唯一事实源。</summary>
+    public static PromptSectionConfig DefaultSections() => new()
+    {
+        Role = RoleDefault,
+        Frequency = FrequencyDefault,
+        Entry = EntryDefault,
+        Workflow = WorkflowDefault,
+    };
+
+    /// <summary>入场段为空或仍是默认正文时，视为使用默认逐币条件（自定义入场只作参考）。</summary>
+    public static bool UsesDefaultEntry(StrategyConfig config) =>
+        string.IsNullOrWhiteSpace(config.PromptSections.Entry)
+        || config.PromptSections.Entry.Trim() == EntryDefault.Trim();
+
     /// <summary>
     /// 最终安全块，必须位于系统指令末尾；策略配置与角色追加指令不得覆盖。
     /// </summary>
@@ -226,9 +264,7 @@ public static class PromptLibrary
     private static string BuildStrategySummary(AgentRole role, StrategyConfig config)
     {
         var sb = new StringBuilder();
-        sb.Append("- 策略类型：")
-            .Append(config.StrategyType == "grid_trading" ? "AI 网格交易" : "AI 智能交易")
-            .Append('\n');
+        sb.Append("- 策略类型：AI 智能交易").Append('\n');
         sb.Append(BuildCoinSource(config.CoinSource)).Append('\n');
         sb.Append(BuildIndicators(config.Indicators)).Append('\n');
         sb.Append(BuildRiskControl(config.RiskControl)).Append('\n');

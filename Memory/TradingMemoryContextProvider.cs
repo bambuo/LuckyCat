@@ -313,7 +313,7 @@ public sealed class TradingMemoryContextProvider : AIContextProvider
     /// <summary>「模拟成交」来自 <see cref="TraderOrder.Simulated"/>；Status 只表达生命周期。</summary>
     private static string ExecutionLabel(TraderOrder order)
     {
-        var lifecycle = (order.Status ?? (order.Success ? "unknown" : "failed")).ToLowerInvariant() switch
+        var lifecycle = (order.Status ?? "unknown").ToLowerInvariant() switch
         {
             "filled" => "成交",
             "partial" => "部分成交",
@@ -402,13 +402,7 @@ public sealed class TradingMemoryContextProvider : AIContextProvider
             if (baseAsset.Length > 0) lexicon.Add(baseAsset);
         }
 
-        if (config.GridConfig is { } grid && !string.IsNullOrWhiteSpace(grid.Symbol))
-        {
-            var gridBase = grid.Symbol.Trim().Split('/')[0].Trim();
-            if (gridBase.Length > 0) lexicon.Add(gridBase);
-        }
-
-        lexicon.Add(config.StrategyType == "grid_trading" ? "网格" : "智能交易");
+        lexicon.Add("智能交易");
         foreach (var indicator in PromptIndicatorTokens(config.Indicators)) lexicon.Add(indicator);
         if (!string.IsNullOrWhiteSpace(config.Indicators.Klines.PrimaryTimeframe))
         {

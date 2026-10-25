@@ -287,7 +287,8 @@ public sealed class ExecutionTools(
         //    同标的 10 秒内/本周期同标的最多 1 笔；同一提案最多 2 次提交尝试（仅限明确未创建）。
         var existing = await _db.TraderOrders.AsNoTracking()
             .Where(o => o.CycleId == _ctx.CycleId && o.ProposalId == request.ProposalId
-                && (o.Action == "open" || o.Action == "buy" || o.Action == "sell") && o.Success)
+                && (o.Action == "open" || o.Action == "buy" || o.Action == "sell")
+                && (o.Status == "submitted" || o.Status == "partial" || o.Status == "filled"))
             .OrderByDescending(o => o.Id)
             .FirstOrDefaultAsync(ct);
         if (existing is not null) return ExistingOrder(existing);
@@ -527,7 +528,6 @@ public sealed class ExecutionTools(
             // 成交字段只允许来自模拟成交或交易所确认回报；提交数量/参考价不是成交。
             FilledQuantity = null,
             AveragePrice = null,
-            Success = false,
             Note = Truncate(request.Reason, 500),
             Error = simulated ? null : CloseUnknownMessage,
             At = DateTime.UtcNow
@@ -542,7 +542,6 @@ public sealed class ExecutionTools(
                 request.OrderType == "limit" ? request.Price : null);
             row.FilledQuantity = qty;
             row.AveragePrice = simulatedFill;
-            row.Success = true;
             row.Error = null;
             var (inserted, raced) = await TryInsertOrderAsync(row);
             if (!inserted)
@@ -588,7 +587,6 @@ public sealed class ExecutionTools(
                 // 未知 = 订单可能已创建/成交：保持 unknown，禁止重试或补单。
                 LogGatewayError("close_position", closed.Error);
                 row.Status = "unknown";
-                row.Success = false;
                 row.FilledQuantity = null;
                 row.AveragePrice = null;
                 row.Error = CloseUnknownMessage;
@@ -601,7 +599,6 @@ public sealed class ExecutionTools(
                 // 交易所明确拒绝：确定未创建，可安全记为 failed。
                 LogGatewayError("close_position", closed.Error);
                 row.Status = "failed";
-                row.Success = false;
                 row.FilledQuantity = null;
                 row.AveragePrice = null;
                 row.ExchangeOrderId = null;
@@ -614,7 +611,6 @@ public sealed class ExecutionTools(
 
         // 交易所已受理：成交未经回报确认，一律记为 submitted；成交字段保持 null。
         row.Status = "submitted";
-        row.Success = true;
         row.FilledQuantity = null;
         row.AveragePrice = null;
         row.ExchangeOrderId = closed.ExchangeOrderId;
@@ -624,7 +620,6 @@ public sealed class ExecutionTools(
         if (request.OrderType == "limit" && closed.ExchangeOrderId is null)
         {
             row.Status = "unknown";
-            row.Success = false;
             row.Error = "限价平仓已受理但未返回交易所订单号，无法撤单";
             if (!await TryPersistOrderAsync(row))
                 return Fail(ToolErrors.ExchangeUnknown, "已提交交易所，但本地订单状态写入失败，请人工核对");
@@ -715,7 +710,7 @@ public sealed class ExecutionTools(
         }
 
         order.Status = "cancelled";
-        order.Success = false;
+        order.Error = null;
         if (!await TryPersistOrderAsync(order))
             return Fail(ToolErrors.ExchangeUnknown, "撤单结果无法落库，请人工核对");
         _hub.Publish(_ctx.SseChannel, new SseEvent("order", order));
@@ -768,7 +763,6 @@ public sealed class ExecutionTools(
         row.FilledQuantity = placed.FilledQuantity;
         row.AveragePrice = placed.AveragePrice;
         row.ExchangeOrderId = placed.ExchangeOrderId;
-        row.Success = row.Status is "submitted" or "filled" or "partial";
         row.Error = placed.Outcome switch
         {
             PlaceOutcome.NotCreated => ExchangeRejectedMessage,
@@ -799,7 +793,6 @@ public sealed class ExecutionTools(
         Leverage = leverage,
         Status = status,
         Simulated = simulated,
-        Success = status is "submitted" or "filled" or "partial",
         Note = Truncate(reason, 500),
         Error = status == "unknown" ? "提交已发起，结果待确认" : null,
         At = DateTime.UtcNow
@@ -890,8 +883,8 @@ public sealed class ExecutionTools(
         }, ApiJson.Options);
 
     private static bool IsEffectiveOpen(TraderOrder order) =>
-        order.Action is "open" or "buy" or "sell" && (order.Success
-            || order.Status is "submitted" or "partial" or "filled");
+        order.Action is "open" or "buy" or "sell"
+        && (order.Status is "submitted" or "partial" or "filled");
 
     private static bool SameBaseAsset(string? left, string right) =>
         left is not null

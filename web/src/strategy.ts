@@ -2,26 +2,7 @@ import type {
   CoinSourceExchange,
   CoinSourceType,
   ExternalDataSource,
-  GridDistribution,
-  StrategyType,
-  StrategyVariant,
 } from './types'
-
-export const STRATEGY_TYPE_CARDS: { key: StrategyType; label: string; desc: string }[] = [
-  { key: 'ai_trading', label: 'AI 智能交易', desc: 'AI 分析市场并自主决策买卖' },
-  { key: 'grid_trading', label: 'AI 网格交易', desc: 'AI 控制网格策略，在震荡市场获利' },
-]
-
-export const VARIANTS: { key: StrategyVariant; label: string }[] = [
-  { key: 'balanced', label: '平衡' },
-  { key: 'aggressive', label: '激进' },
-  { key: 'conservative', label: '保守' },
-  { key: 'scalping', label: '短线' },
-]
-
-export function variantLabel(key: StrategyVariant): string {
-  return VARIANTS.find((v) => v.key === key)?.label ?? key
-}
 
 // 周期分类（对齐设计稿：超短/日内/波段/趋势；3D 无 CryptoClients 对应粒度，不提供）
 export const TIMEFRAME_GROUPS: { key: string; label: string; color: string; options: string[] }[] = [
@@ -29,14 +10,6 @@ export const TIMEFRAME_GROUPS: { key: string; label: string; color: string; opti
   { key: 'intraday', label: '日内', color: 'rgb(var(--primary-6))', options: ['15m', '30m', '1h'] },
   { key: 'swing', label: '波段', color: 'rgb(var(--success-6))', options: ['2h', '4h', '6h', '8h', '12h'] },
   { key: 'trend', label: '趋势', color: '#f0b90b', options: ['1D', '1W'] },
-]
-
-export const GRID_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT']
-
-export const GRID_DISTRIBUTIONS: { key: GridDistribution; label: string }[] = [
-  { key: 'uniform', label: '均匀分配' },
-  { key: 'gaussian', label: '高斯分配（推荐）' },
-  { key: 'pyramid', label: '金字塔分配' },
 ]
 
 export const COIN_SOURCE_CATALOG: { key: CoinSourceType; label: string; desc: string }[] = [

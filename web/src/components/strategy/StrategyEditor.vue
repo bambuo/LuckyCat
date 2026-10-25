@@ -62,7 +62,7 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <!-- 策略类型：LC-STD-03 §2.2 已下线网格类型，只保留 AI 智能交易（gridConfig 原值仍随配置回传） -->
+    <!-- 策略类型：LC-STD-03 §2.2 已下线网格类型，只保留 AI 智能交易 -->
     <div class="type-block">
       <div class="type-block-title">
         <IconThunderbolt class="block-icon" />

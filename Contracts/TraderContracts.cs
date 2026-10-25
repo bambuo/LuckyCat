@@ -56,7 +56,6 @@ public record DashboardTraderInfo(
     string ExchangeLabel,
     string AccountName,
     string StrategyName,
-    string StrategyType,
     bool IsRunning,
     string ExecutionMode,
     bool IsCrossMargin,
@@ -90,32 +89,6 @@ public record DashboardPosition(
     string? UnrealizedPnl,
     string? LiquidationPrice,
     string? Leverage);
-
-public record DashboardDecision(
-    int Id,
-    DateTime At,
-    string? Action,
-    string? Symbol,
-    string? Confidence,
-    string? EntryPrice,
-    string? StopLossPct,
-    string? TakeProfitPct,
-    string? PositionPct,
-    string? Leverage,
-    string? Reason,
-    string? Reasoning,
-    int? InputTokens,
-    int? OutputTokens,
-    long? ElapsedMs,
-    int? TraderId,
-    string? SystemPrompt,
-    string? UserPrompt,
-    string Status = "ok",
-    string? FailureStage = null,
-    string? Error = null,
-    string? RawOutput = null,
-    string? PromptRevision = null,
-    bool? RequestSent = null);
 
 public record DashboardMetrics(
     int TotalTrades,
@@ -158,7 +131,6 @@ public record TraderDashboardDto(
     DashboardAccount? Account,
     IReadOnlyList<DashboardSample> Samples,
     IReadOnlyList<DashboardPosition> Positions,
-    IReadOnlyList<DashboardDecision> Decisions,
     DashboardHistory History,
     IReadOnlyList<TraderOrderDto> RecentOrders,
     // 新链路最新周期块（Task 14 B：周期/阶段/提案/裁决/订单；无周期时为 null）。

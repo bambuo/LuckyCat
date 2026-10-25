@@ -86,7 +86,7 @@ const TOOL_LIMIT_FIELDS: BudgetField[] = [
   { key: 'cycleToolLimit', label: '单周期工具总上限' },
 ]
 
-// 深度比对：名称/简介/任何 config 改动（含 variant）都会置脏（修正设计稿缺陷 b）
+// 深度比对：名称/简介/任何 config 改动都会置脏（修正设计稿缺陷 b）
 const isDirty = computed(() => {
   if (!saved.value || !draft.value) return false
   return (
@@ -105,7 +105,7 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-/** 补齐新增配置块（老配置/导入文件缺失时回退后端默认），并固定策略类型为智能交易。 */
+/** 补齐新增配置块（老配置/导入文件缺失时回退后端默认）。 */
 function normalizeDraftConfig(source: StrategyConfig): StrategyConfig {
   const config = clone(source)
   const base = defaults.value?.config
@@ -114,8 +114,6 @@ function normalizeDraftConfig(source: StrategyConfig): StrategyConfig {
     config.agentBudget = { ...base.agentBudget, ...config.agentBudget }
     config.review = { ...base.review, ...config.review }
   }
-  // 网格类型已从 UI 下线：一律按智能交易保存；gridConfig 原值保留，随载荷原样回传（P7 才移除）
-  config.strategyType = 'ai_trading'
   return config
 }
 
@@ -218,14 +216,13 @@ function validateDraft(): string | null {
   return null
 }
 
-/** 保存前收敛：角色指令去首尾空白，策略类型固定为智能交易。 */
+/** 保存前收敛：角色指令去首尾空白。 */
 function applyDraftNormalization() {
   const config = draft.value
   if (!config) return
   for (const key of ROLE_KEYS) {
     config.roleInstructions[key] = (config.roleInstructions[key] ?? '').trim()
   }
-  config.strategyType = 'ai_trading'
 }
 
 async function save() {
@@ -386,21 +383,13 @@ function importStrategy() {
   input.click()
 }
 
-// 与当前默认配置合并，保证完整形状（手工改过或缺字段的导入文件也能用）
+// 与当前默认配置合并，保证完整形状（手工改过或缺字段/含旧字段的导入文件也能用）。
+// 显式逐项组装：旧文件的 strategyType/gridConfig/variant 等已删除字段不得进入请求体
+// （ApiJson 对未映射字段 Disallow，会 400 validation_failed）。
 function normalizeImportedConfig(raw: Partial<StrategyConfig>): StrategyConfig {
   const base = clone(defaults.value?.config as StrategyConfig)
   return {
-    ...base,
-    ...raw,
-    // 网格类型已下线：导入的网格配置保留在 gridConfig，但类型按智能交易提交
-    strategyType: 'ai_trading',
     coinSource: { ...base.coinSource, ...raw.coinSource },
-    gridConfig:
-      raw.gridConfig === undefined
-        ? base.gridConfig
-        : raw.gridConfig === null
-          ? null
-          : { ...(base.gridConfig as StrategyConfig['gridConfig']), ...raw.gridConfig },
     indicators: {
       ...base.indicators,
       ...raw.indicators,
@@ -409,6 +398,9 @@ function normalizeImportedConfig(raw: Partial<StrategyConfig>): StrategyConfig {
     },
     riskControl: { ...base.riskControl, ...raw.riskControl },
     promptSections: { ...base.promptSections, ...raw.promptSections },
+    customPrompt: raw.customPrompt ?? base.customPrompt,
+    decisionMemoryEnabled: raw.decisionMemoryEnabled ?? base.decisionMemoryEnabled,
+    newsEnabled: raw.newsEnabled ?? base.newsEnabled,
     roleInstructions: { ...base.roleInstructions, ...raw.roleInstructions },
     agentBudget: { ...base.agentBudget, ...raw.agentBudget },
     review: { ...base.review, ...raw.review },

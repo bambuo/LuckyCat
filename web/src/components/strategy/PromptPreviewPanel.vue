@@ -3,7 +3,6 @@ import { computed, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconRefresh } from '@arco-design/web-vue/es/icon'
 import { previewStrategyPrompts } from '../../api'
-import { VARIANTS } from '../../strategy'
 import type { PromptPreviewResult, StageRole, StrategyConfig } from '../../types'
 import CodeBlock from './CodeBlock.vue'
 
@@ -55,11 +54,6 @@ async function generate() {
 <template>
   <div class="preview-panel">
     <div class="toolbar">
-      <a-select v-model="config.variant" size="small" :style="{ width: '104px', flexShrink: 0 }">
-        <a-option v-for="variant in VARIANTS" :key="variant.key" :value="variant.key">
-          {{ variant.label }}
-        </a-option>
-      </a-select>
       <a-button
         type="primary"
         size="small"

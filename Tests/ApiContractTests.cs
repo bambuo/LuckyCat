@@ -23,7 +23,7 @@ namespace LuckyCat.Tests;
 /// Task 14 A 组 HTTP 契约测试：统一包裹、/api/health、请求绑定（ApiJson 约定）、
 /// provider 工具能力回写与连接字段编辑重置（API-01/02/07/09）。
 /// 测试宿主按 RoundHttpTests 模式手工装配：只映射端点、不注册任何 hosted service
-/// （CycleStartupRecovery / ReviewScheduler / PositionHistorySyncService / TraderRunnerService
+/// （CycleStartupRecovery / ReviewScheduler / PositionHistorySyncService
 /// 启动即做真实恢复/复盘/交易所调用，会让 HTTP 测试失真）；行情/账户/执行边界接口注册为
 /// “解析即抛”守卫——A 组端点必须一个都不触达；模型调用只走脚本化假 IChatClient，零真实网络。
 /// </summary>
@@ -404,8 +404,8 @@ public class ApiContractTests
         Assert.Single(CountOccurrences(program, "AddHostedService<CycleStartupRecovery>"));
         Assert.Contains("AddSingleton<TradingCycleRunner>", program, StringComparison.Ordinal);
         Assert.Contains("MapCycles", program, StringComparison.Ordinal);
-        // 旧类仍要能编译（Task 18 才删除）。
-        Assert.True(File.Exists(Path.Combine(FindRepoRoot(), "Services", "TraderRunnerService.cs")));
+        // P7 已删除旧执行器（Task 18）：文件不得复活。
+        Assert.False(File.Exists(Path.Combine(FindRepoRoot(), "Services", "TraderRunnerService.cs")));
     }
 
     private static IEnumerable<string> CountOccurrences(string text, string needle)
@@ -469,8 +469,6 @@ public class ApiContractTests
             builder.Services.AddScoped<MarketSnapshotService>();
             builder.Services.AddScoped<MarketSentimentService>();
             builder.Services.AddScoped<ExternalDataSourceService>();
-            builder.Services.AddScoped<StrategyTestRunner>();
-            builder.Services.AddScoped<DecisionMemoryService>();
             builder.Services.AddScoped<ExchangeTradingService>();
             builder.Services.AddScoped<ExchangeVerificationRunner>();
             builder.Services.AddSingleton<SseEventHub>();

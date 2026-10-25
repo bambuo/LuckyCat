@@ -15,7 +15,7 @@ public class TraderOrder
     public decimal? StopLossPrice { get; set; }
     /// <summary>开仓时附带的止盈价（同上；可空）</summary>
     public decimal? TakeProfitPrice { get; set; }
-    /// <summary>订单生命周期状态：submitted | filled | partial | failed | unknown | cancelled（P7 删除 Success 后以此为准）</summary>
+    /// <summary>订单生命周期状态：submitted | filled | partial | failed | unknown | cancelled（唯一成功口径）</summary>
     public string? Status { get; set; }
     /// <summary>关联周期；过渡期旧代码可写 null</summary>
     public string? CycleId { get; set; }
@@ -34,7 +34,6 @@ public class TraderOrder
     /// <summary>是否演练（演练成交为 filled + simulated=true）</summary>
     public bool Simulated { get; set; }
     public string? ExchangeOrderId { get; set; }
-    public bool Success { get; set; }
     public string? Note { get; set; }
     public string? Error { get; set; }
 }

@@ -487,7 +487,7 @@ public class CycleHttpTests
         var frame = TradersEndpoints.ToEventFrame(new SseEvent("order", new TraderOrder
         {
             Id = 9, TraderId = 1, At = DateTime.UtcNow, Action = "open", Symbol = "BTC/USDT",
-            Quantity = 0.01m, Price = 100m, Status = "filled", Success = true,
+            Quantity = 0.01m, Price = 100m, Status = "filled",
         }));
         Assert.NotNull(frame);
         using var doc = JsonDocument.Parse(frame!.Value.Json);
@@ -839,8 +839,6 @@ public class CycleHttpTests
             builder.Services.AddScoped<MarketSnapshotService>();
             builder.Services.AddScoped<MarketSentimentService>();
             builder.Services.AddScoped<ExternalDataSourceService>();
-            builder.Services.AddScoped<StrategyTestRunner>();
-            builder.Services.AddScoped<DecisionMemoryService>();
             // 真实 AccountStreamService：stream 测试的交易员绑定缺失账户，绝不会触达 Acquire（零网络）。
             builder.Services.AddSingleton<AccountStreamService>(sp =>
                 new AccountStreamService(sp.GetRequiredService<IServiceScopeFactory>(), hub));
@@ -1021,7 +1019,7 @@ public class CycleHttpTests
         await db.SaveChangesAsync();
     }
 
-    /// <summary>看板「最近订单」投影：模型里 Success 仍存在，但 DTO 不再输出（§2.2）。</summary>
+    /// <summary>看板「最近订单」投影：金额字符串化，订单只保留 Status 生命周期口径（§2.2）。</summary>
     private static async Task SeedRecentOrderAsync(TestApp host, int traderId)
     {
         await using var scope = host.App.Services.CreateAsyncScope();
@@ -1029,7 +1027,7 @@ public class CycleHttpTests
         db.TraderOrders.Add(new TraderOrder
         {
             TraderId = traderId, At = DateTime.UtcNow, Action = "close", Symbol = "BTC/USDT",
-            Quantity = 0.05m, Price = 101.5m, Status = "filled", Simulated = true, Success = true,
+            Quantity = 0.05m, Price = 101.5m, Status = "filled", Simulated = true,
             Note = "看板订单投影",
         });
         await db.SaveChangesAsync();
@@ -1131,7 +1129,7 @@ public class CycleHttpTests
             TraderId = traderId, At = now, CycleId = "01HTTPTESTCYCLE000000001", ExchangeAccountId = 1,
             ProposalId = "01HTTPTESTPROPOSAL00000001", Action = "open", Side = "long", Symbol = "BTC/USDT",
             Quantity = 0.0180m, FilledQuantity = 0.0180m, Price = 100m, AveragePrice = 100m,
-            Status = "filled", Simulated = true, Success = true, Note = "演练成交",
+            Status = "filled", Simulated = true, Note = "演练成交",
         });
         await db.SaveChangesAsync();
     }

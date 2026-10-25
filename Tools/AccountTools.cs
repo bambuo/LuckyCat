@@ -152,7 +152,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
             return ToolEnvelope.Success("（无订单记录）", DateTimeOffset.UtcNow, "live");
         }
 
-        var warnings = orders.Any(order => order.Status is "failed" or "unknown" || (!order.Success && order.Status is null))
+        var warnings = orders.Any(order => order.Status is "failed" or "unknown" or null)
             ? new[] { "存在失败或未确认的订单，执行结果以 status 为准" }
             : null;
         return ToolEnvelope.SuccessLines(orders.Select(RenderOrder).ToList(), DateTimeOffset.UtcNow, "live", warnings);
@@ -282,7 +282,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
 
     private static string RenderOrder(TraderOrder order)
     {
-        var status = order.Status ?? (order.Success ? "unknown" : "failed");
+        var status = order.Status ?? "unknown";
         var note = string.IsNullOrWhiteSpace(order.Note) ? "" : $" | {Escape(SingleLine(order.Note, 120))}";
         var proposal = string.IsNullOrWhiteSpace(order.ProposalId) ? "" : $" | 提案 {order.ProposalId}";
         return $"{Time(order.At)} | #{order.Id} {order.Action} {order.Symbol ?? "n/a"} {order.Side ?? ""}"
@@ -321,7 +321,7 @@ public sealed class AccountTools(IAccountReader accounts, ToolAuditor? audit = n
         }
 
         var items = executions.Select(order =>
-            $"{Untrusted(order.Status ?? (order.Success ? "unknown" : "failed"))}{(order.Simulated ? "（演练）" : "")}"
+            $"{Untrusted(order.Status ?? "unknown")}{(order.Simulated ? "（演练）" : "")}"
             + $": {Untrusted(order.Action)} {Num(order.FilledQuantity ?? order.Quantity)} @ {Num(order.AveragePrice ?? order.Price)}");
         return $"执行 {string.Join("；", items)}";
     }

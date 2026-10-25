@@ -96,11 +96,8 @@ export interface OutboundIp {
 
 // —— 策略工作室 ——
 
-export type StrategyType = 'ai_trading' | 'grid_trading'
-export type StrategyVariant = 'balanced' | 'aggressive' | 'conservative' | 'scalping'
 export type CoinSourceType = 'static' | 'score' | 'oi_top' | 'oi_low' | 'mixed'
 export type CoinSourceExchange = 'binance' | 'gate'
-export type GridDistribution = 'uniform' | 'gaussian' | 'pyramid'
 export type HttpMethod = 'GET' | 'POST'
 
 export interface CoinSourceConfig {
@@ -114,24 +111,6 @@ export interface CoinSourceConfig {
   oiTopLimit: number
   useOiLow: boolean
   oiLowLimit: number
-}
-
-export interface GridConfig {
-  symbol: string
-  gridCount: number
-  totalInvestment: number
-  leverage: number
-  upperPrice: number
-  lowerPrice: number
-  useAtrBounds: boolean
-  atrMultiplier: number
-  distribution: GridDistribution
-  maxDrawdownPct: number
-  stopLossPct: number
-  dailyLossLimitPct: number
-  useMakerOnly: boolean
-  enableDirectionAdjust: boolean
-  directionBiasRatio: number
 }
 
 export interface KlineConfig {
@@ -235,17 +214,13 @@ export interface ReviewConfig {
 }
 
 export interface StrategyConfig {
-  strategyType: StrategyType
   coinSource: CoinSourceConfig
-  /** 切出网格类型时置 null（对齐设计稿「切出网格 → 清除 grid_config」）；切入时若为 null 填默认值 */
-  gridConfig: GridConfig | null
   indicators: IndicatorSettings
   riskControl: RiskControlConfig
   promptSections: PromptSectionConfig
   customPrompt: string
   decisionMemoryEnabled: boolean
   newsEnabled: boolean
-  variant: StrategyVariant
   roleInstructions: RoleInstructions
   agentBudget: AgentBudgetConfig
   review: ReviewConfig
@@ -271,33 +246,6 @@ export interface StrategyDefaults {
   config: StrategyConfig
   /** 4 段默认正文（用于「已修改」比对与「重置为默认」） */
   promptSections: PromptSectionConfig
-}
-
-export interface PromptSummaryItem {
-  label: string
-  value: string
-}
-
-export interface PromptPreview {
-  systemPrompt: string
-  summary: PromptSummaryItem[]
-}
-
-export interface StrategyTestResult {
-  elapsedMs: number
-  userPrompt: string
-  rawOutput: string
-  reasoning: string | null
-  decision: Record<string, unknown> | null
-  dataSource: 'live' | 'incomplete'
-  /** 提示词（系统+用户）tokens 粗估 */
-  estimatedTokens: number
-  /** 上下文超限提示/自动裁剪说明；未超限为 null */
-  contextWarning: string | null
-  error: string | null
-  /** 真实 token 用量（提供商返回时） */
-  inputTokens: number | null
-  outputTokens: number | null
 }
 
 // —— AI 交易员 ——
@@ -360,7 +308,6 @@ export interface DashboardTraderInfo {
   exchangeLabel: string
   accountName: string
   strategyName: string
-  strategyType: string
   isRunning: boolean
   executionMode: TraderExecutionMode
   isCrossMargin: boolean
@@ -400,35 +347,6 @@ export interface DashboardPosition {
   unrealizedPnl: number | null
   liquidationPrice: number | null
   leverage: number | null
-}
-
-export interface DashboardDecision {
-  id: number
-  at: string
-  action: string | null
-  symbol: string | null
-  confidence: number | null
-  entryPrice: number | null
-  stopLossPct: number | null
-  takeProfitPct: number | null
-  positionPct: number | null
-  leverage: number | null
-  reason: string | null
-  reasoning: string | null
-  inputTokens: number | null
-  outputTokens: number | null
-  elapsedMs: number | null
-  traderId: number | null
-  /** 本轮系统提示词原文（历史记录可为 null） */
-  systemPrompt: string | null
-  /** 本轮用户提示词原文 */
-  userPrompt: string | null
-  status: string
-  failureStage: string | null
-  error: string | null
-  rawOutput: string | null
-  promptRevision: string | null
-  requestSent: boolean | null
 }
 
 export interface DashboardMetrics {
@@ -488,7 +406,6 @@ export interface TraderDashboard {
   account: DashboardAccount | null
   samples: DashboardSample[]
   positions: DashboardPosition[]
-  decisions: DashboardDecision[]
   history: DashboardHistory
   recentOrders: TraderOrder[]
 }
@@ -845,7 +762,6 @@ export interface DashboardTraderInfoDto {
   exchangeLabel: string
   accountName: string
   strategyName: string
-  strategyType: string
   isRunning: boolean
   executionMode: ExecutionMode
   isCrossMargin: boolean
@@ -887,34 +803,6 @@ export interface DashboardPositionDto {
   unrealizedPnl: string | null
   liquidationPrice: string | null
   leverage: string | null
-}
-
-/** Contracts/TraderContracts.cs DashboardDecision：旧 DecisionRecord 链路（P7 移除），数值字符串。 */
-export interface DashboardDecisionDto {
-  id: number
-  at: string
-  action: string | null
-  symbol: string | null
-  confidence: string | null
-  entryPrice: string | null
-  stopLossPct: string | null
-  takeProfitPct: string | null
-  positionPct: string | null
-  leverage: string | null
-  reason: string | null
-  reasoning: string | null
-  inputTokens: number | null
-  outputTokens: number | null
-  elapsedMs: number | null
-  traderId: number | null
-  systemPrompt: string | null
-  userPrompt: string | null
-  status: string
-  failureStage: string | null
-  error: string | null
-  rawOutput: string | null
-  promptRevision: string | null
-  requestSent: boolean | null
 }
 
 /** Contracts/TraderContracts.cs DashboardMetrics：统计指标（除 totalTrades 外均为字符串）。 */
@@ -981,7 +869,6 @@ export interface TraderDashboardDto {
   account: DashboardAccountDto | null
   samples: DashboardSampleDto[]
   positions: DashboardPositionDto[]
-  decisions: DashboardDecisionDto[]
   history: DashboardHistoryDto
   recentOrders: RecentOrderDto[]
   latestCycle: CycleDetailDto | null
