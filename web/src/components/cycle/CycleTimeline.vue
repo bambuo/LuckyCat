@@ -123,7 +123,10 @@ function fmtTime(iso: string | null): string {
       <span v-if="cycle.error">{{ cycle.error }}</span>
     </a-alert>
 
-    <a-timeline class="cycle-timeline-list">
+    <div v-if="cycle.trigger === 'manual'" class="cycle-manual-note">
+      手动平仓只调用执行工具，不经过分析师 / 交易员 / 风控阶段。
+    </div>
+    <a-timeline v-else class="cycle-timeline-list">
       <a-timeline-item v-for="node in nodes" :key="node.role" :dot-color="dotColor(node)">
         <StageCard v-if="node.stage" :stage="node.stage!" />
         <a-card v-else size="small" class="stage-placeholder">
@@ -163,6 +166,11 @@ function fmtTime(iso: string | null): string {
 
 .cycle-timeline-list {
   padding-top: 2px;
+}
+
+.cycle-manual-note {
+  font-size: 12px;
+  color: var(--color-text-3);
 }
 
 .cycle-timeline-list :deep(.arco-timeline-item) {

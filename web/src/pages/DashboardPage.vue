@@ -834,6 +834,21 @@ function fmtClock(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? '--:--:--' : d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+const EXCHANGE_LABELS: Record<string, string> = {
+  binance: 'BINANCE',
+  bybit: 'BYBIT',
+  okx: 'OKX',
+  bitget: 'BITGET',
+  gateio: 'GATE',
+  kucoin: 'KUCOIN',
+}
+
+// 后端 exchangeLabel 取枚举名（GateIo）；直接大写会得到 GATEIO，这里按交易所惯用简称展示
+const exchangeLabel = computed(() => {
+  const raw = dashboard.value?.trader.exchangeLabel ?? ''
+  return EXCHANGE_LABELS[raw.toLowerCase()] ?? raw.toUpperCase()
+})
+
 const runtimeText = computed(() => {
   const info = dashboard.value?.trader
   if (!info?.isRunning || !info.startedAt) return info?.isRunning ? '运行中' : '已停止'
@@ -1050,7 +1065,7 @@ function shortCycleId(id: string): string {
           {{ dashboard.trader.providerName }}
         </a-tag>
         <span class="meta-label">交易所:</span>
-        <span>{{ dashboard.trader.exchangeLabel.toUpperCase() }} - {{ dashboard.trader.accountName }}</span>
+        <span>{{ exchangeLabel }} - {{ dashboard.trader.accountName }}</span>
         <span class="meta-label">策略:</span>
         <span class="meta-strategy">{{ dashboard.trader.strategyName }}</span>
         <span class="meta-label">运行时间:</span>
@@ -1242,8 +1257,8 @@ function shortCycleId(id: string): string {
           </a-card>
         </div>
 
-        <!-- 最近决策 -->
-        <a-card class="decisions-card">
+        <!-- 最近决策（旧决策表；新链路不再写入，空列表时整块隐藏，避免一个永远为空的死面板） -->
+        <a-card v-if="visibleDecisions.length > 0" class="decisions-card">
           <template #title>最近决策</template>
           <template #extra>
             <span class="decisions-limit">
