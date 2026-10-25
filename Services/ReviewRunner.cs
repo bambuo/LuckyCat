@@ -110,11 +110,11 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
     private const int MaxRuleCount = 10;
     private const int MaxRuleChars = 200;
 
-    // strengths / mistakes / evidence 标准未规定条数，取有界值防正文膨胀（单条 ≤500 字，
-    // 证据项是订单/周期 ID，≤64 字）；与经验注入的字级预算同口径。
+    // strengths / mistakes / rules / evidence 的条数上限：标准只规定了 rules（≤10 条、每条 ≤200 字）
+    // 与 summary（≤2,000 字），其余取有界值防正文膨胀（单条 ≤500 字，与经验注入的字级预算同口径；
+    // evidence 按输出契约是「订单/周期 ID 与关键数据」，不得裁到只剩半个 ID 前缀那么短）。
     private const int MaxListItemCount = 20;
     private const int MaxListItemChars = 500;
-    private const int MaxEvidenceChars = 64;
 
     // 取数探针上限与只读工具一致（AccountTools 的 ClosedTradeLimit / CycleLimit）。
     private const int ClosedTradeProbeLimit = 50;
@@ -255,7 +255,7 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
                 "复盘结构化输出缺少摘要，本轮未产出经验", started, stats);
         }
 
-        return await CompleteAsync(db, trader, stageRunId, config, provider, instructions, report, stats,
+        return await CompleteAsync(db, trader, stageRunId, provider, instructions, report, stats,
             periodStart, periodEnd, started);
     }
 
@@ -287,14 +287,14 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
     /// <c>SaveChanges</c> 里写入（短事务，§9 末行）；正文逐列裁剪到 LC-STD-03 §2.1 上限。
     /// </summary>
     private async Task<ReviewRunResult> CompleteAsync(AppDbContext db, Trader trader, string stageRunId,
-        StrategyConfig config, Provider provider, string instructions, ReviewReport report, StageRunStats stats,
+        Provider provider, string instructions, ReviewReport report, StageRunStats stats,
         DateTime periodStart, DateTime periodEnd, Stopwatch started)
     {
         var summary = Clamp(OneLine(report.Summary), MaxSummaryChars);
         var strengths = ClampItems(report.Strengths, MaxListItemChars);
         var mistakes = ClampItems(report.Mistakes, MaxListItemChars);
         var rules = ClampItems(report.Rules, MaxRuleChars, MaxRuleCount);
-        var evidence = ClampItems(report.Evidence, MaxEvidenceChars);
+        var evidence = ClampItems(report.Evidence, MaxListItemChars);
         var persisted = new ReviewReport(summary, strengths, mistakes, rules, evidence);
         var elapsed = started.ElapsedMilliseconds;
         var toolCalls = await CountToolCallsAsync(db, stageRunId);
@@ -432,15 +432,16 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
     /// <summary>
     /// 幂等写阶段行：成功路径的 <c>SaveChanges</c> 若在插入阶段行之后抛错（数据库不可用等），
     /// 紧随其后的失败补写会在<b>同一个 ChangeTracker</b> 里看到这个 <c>Id</c> 已被跟踪；
-    /// 此时改写已跟踪实体的当前值，而不是再 <c>Add</c> 一份——否则 EF 直接抛 identity conflict，
-    /// 把「记录失败」这件事本身也弄丢（§9 失败行要求失败必须留痕）。
+    /// 此时只改写<b>尚未提交</b>的那份（<see cref="EntityState.Added"/>），而不是再 <c>Add</c> 一份——
+    /// 否则 EF 直接抛 identity conflict，把「记录失败」这件事本身也弄丢（§9 失败行要求失败必须留痕）。
+    /// 已经提交成功的终态行一律不重写：复盘的经验与阶段行是既成事实，不能被随后的宿主异常改成 failed。
     /// </summary>
     private static void AddStageRun(AppDbContext db, AgentStageRun row)
     {
         foreach (var entry in db.ChangeTracker.Entries<AgentStageRun>())
         {
             if (entry.Entity.Id != row.Id) continue;
-            entry.CurrentValues.SetValues(row);
+            if (entry.State == EntityState.Added) entry.CurrentValues.SetValues(row);
             return;
         }
 
