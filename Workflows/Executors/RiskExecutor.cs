@@ -43,8 +43,9 @@ public sealed class RiskExecutor(TradingCycleContext ctx, TradingAgentFactory fa
         // 阶段超时（LC-STD-01 §6、FLOW-08）：风控超时按 fail-closed 处理——阶段失败、不写裁决、不下单。
         using var stageTimeout = ctx.StageTimeout(ct, Stage);
         var started = Stopwatch.StartNew();
-        var (verdict, response) = await runner.RunAsync<AgentRiskVerdict>(agent, prompt, stageTimeout.Token);
-        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
+        var result = await runner.RunAsync<AgentRiskVerdict>(agent, prompt, stageTimeout.Token);
+        var verdict = result.Output;
+        var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
         // 契约校验（LC-STD-01 §4.1 第 3 步）：同 TraderExecutor，越界 RiskDecision 匹配不到
         // approved/rejected 任一出边会死路；Rejected=0 是有意的安全零值，fail-closed 归一化为 Rejected。

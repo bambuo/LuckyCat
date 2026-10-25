@@ -45,18 +45,28 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
         // 阶段超时（LC-STD-01 §6）：超时按 CancellationToken 传播到模型与工具循环，阶段按失败处理。
         using var stageTimeout = ctx.StageTimeout(ct, Stage);
         var started = Stopwatch.StartNew();
-        var (proposal, response) = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
-        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
+        var attempt = 1;
+        AgentRunResult<AgentTradeProposal> result;
+        try
+        {
+            result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
+        }
+        catch (AgentOutputFormatException)
+        {
+            // 输出不是合法 JSON 契约：与越界动作同属契约失败，走 FLOW-07 的同一次重试
+            result = null!;
+        }
 
         // FLOW-07（LC-STD-05）：交易员契约失败先重试 1 次——同一提示词、同一阶段超时窗口内再跑一轮
         // （不新起阶段，模型调用消耗仍归本阶段预算）；重试得到合法动作则照常继续。
-        var attempt = 1;
-        if (!Enum.IsDefined(proposal.Action))
+        if (result is null || !Enum.IsDefined(result.Output.Action))
         {
             attempt = 2;
-            (proposal, response) = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
-            stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
+            result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
         }
+
+        var proposal = result.Output;
+        var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
         // 契约校验（LC-STD-01 §4.1 第 3 步）：System.Text.Json 会原样接受越界枚举值，
         // 未定义动作匹配不到任何出边会让周期中途死路；重试后仍越界才 fail-closed，

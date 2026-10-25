@@ -41,8 +41,9 @@ public sealed class AnalystExecutor(TradingCycleContext ctx, TradingAgentFactory
         // 阶段超时（LC-STD-01 §6）：超时按 CancellationToken 传播到模型与工具循环，阶段按失败处理。
         using var stageTimeout = ctx.StageTimeout(ct, Stage);
         var started = Stopwatch.StartNew();
-        var (brief, response) = await runner.RunAsync<Contracts.ResearchBrief>(agent, prompt, stageTimeout.Token);
-        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
+        var result = await runner.RunAsync<Contracts.ResearchBrief>(agent, prompt, stageTimeout.Token);
+        var brief = result.Output;
+        var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
         ctx.Observe(brief);
         await ctx.Recorder.RecordStageAsync(Stage, StageRunId, brief,

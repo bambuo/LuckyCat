@@ -22,11 +22,41 @@ public class AgentRunnerTests
         });
         var runner = new AgentRunner();
 
-        var (output, response) = await runner.RunAsync<PingAnswer>(agent, "go", default);
+        var result = await runner.RunAsync<PingAnswer>(agent, "go", default);
 
-        Assert.Equal("hello", output.Answer);
-        Assert.Equal("hello", response.Result.Answer);
+        Assert.Equal("hello", result.Output.Answer);
         Assert.Contains("go", Assert.Single(client.Requests)[^1].Text);
+    }
+
+    [Fact]
+    public async Task Runner_extracts_json_from_fenced_and_chatty_replies()
+    {
+        // 模型常在 JSON 前后加说明或 ```json 围栏（不走框架 json_schema 后必须自己兜住）
+        var client = new CapturingClient("好的，结果如下：\n```json\n{\"answer\":\"wrapped\"}\n```\n以上。");
+        var agent = new ChatClientAgent(client, new ChatClientAgentOptions { Name = "test" });
+        var runner = new AgentRunner();
+
+        var result = await runner.RunAsync<PingAnswer>(agent, "go", default);
+
+        Assert.Equal("wrapped", result.Output.Answer);
+    }
+
+    [Fact]
+    public async Task Runner_rejects_reply_without_a_json_contract()
+    {
+        var client = new CapturingClient("抱歉，我无法完成。");
+        var agent = new ChatClientAgent(client, new ChatClientAgentOptions { Name = "test" });
+        var runner = new AgentRunner();
+
+        await Assert.ThrowsAsync<AgentOutputFormatException>(() => runner.RunAsync<PingAnswer>(agent, "go", default));
+    }
+
+    [Fact]
+    public void Json_payload_extraction_ignores_braces_inside_strings()
+    {
+        const string text = "prefix {\"answer\":\"a } b { c\",\"nested\":{\"x\":1}} suffix";
+
+        Assert.Equal("{\"answer\":\"a } b { c\",\"nested\":{\"x\":1}}", JsonPayload.Extract(text));
     }
 
     [Fact]

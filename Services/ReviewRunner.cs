@@ -237,8 +237,9 @@ public class ReviewRunner(IServiceScopeFactory scopeFactory, SseEventHub hub)
         var prompt = ReviewerAgent.BuildUserPrompt(new ReviewWindow(trader.Id, trader.Name, periodStart, periodEnd,
             trades.Count, cycles.Count, lessonCount));
 
-        var (report, response) = await new AgentRunner().RunAsync<ReviewReport>(agent, prompt, runToken);
-        var stats = StageRunStats.From(response.Messages, response.Usage, started.ElapsedMilliseconds);
+        var result = await new AgentRunner().RunAsync<ReviewReport>(agent, prompt, runToken);
+        var report = result.Output;
+        var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
         // 工具上限耗尽是<b>失败</b>而不是「拿一个 tool_budget_exceeded 信封继续拼经验」（R-13-6）：
         // CycleBudget.ToolRefusals 记录被拒次数，这里据此判失败，先于契约校验（预算耗尽时输出必然不完整）。
