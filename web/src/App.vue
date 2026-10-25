@@ -28,6 +28,8 @@ function onMenuClick(key: string) {
       >
         <a-menu-item key="/traders">AI 交易员</a-menu-item>
         <a-menu-item key="/strategy">策略工作室</a-menu-item>
+        <a-menu-item key="/cycles">周期历史</a-menu-item>
+        <a-menu-item key="/reviews">复盘经验</a-menu-item>
       </a-menu>
     </a-layout-header>
     <a-layout-content>
