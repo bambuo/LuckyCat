@@ -74,18 +74,36 @@ const nodes = computed<TimelineNode[]>(() => {
   return PIPELINE.map((role, index) => {
     const stage = byRole.get(role) ?? null
     if (stage) return { role, stage, reason: null }
-    if (props.cycle.status === 'running' && index > lastPresent) {
-      return { role, stage: null, reason: 'running' }
-    }
+    // 平仓/观望路径不经过风控：运行中也必须显示「本路径不经过风控」，而不是「进行中」
     if (role === 'risk' && (props.proposal?.action === 'close' || props.proposal?.action === 'hold')) {
       return { role, stage: null, reason: 'noRisk' }
+    }
+    if (props.cycle.status === 'running' && index > lastPresent) {
+      return { role, stage: null, reason: 'running' }
     }
     return { role, stage: null, reason: 'skipped' }
   })
 })
 
+// 枚举数据来自 API：意外字符串也要有兜底，渲染不能因缺 key 抛错
+function triggerMeta(value: TriggerType): { label: string; color: string } {
+  return TRIGGER_META[value] ?? { label: value, color: 'gray' }
+}
+
+function modeLabel(value: ExecutionMode): string {
+  return MODE_LABELS[value] ?? value
+}
+
+function statusMeta(value: CycleStatus): { label: string; color: string } {
+  return STATUS_META[value] ?? { label: value, color: 'gray' }
+}
+
+function roleLabel(role: StageRole): string {
+  return ROLE_LABELS[role] ?? role
+}
+
 function placeholderMeta(reason: PlaceholderReason | null): { label: string; color: string } {
-  return PLACEHOLDER_META[reason ?? 'skipped']
+  return PLACEHOLDER_META[reason ?? 'skipped'] ?? { label: reason ?? '—', color: 'gray' }
 }
 
 function dotColor(node: TimelineNode): string {
@@ -109,9 +127,9 @@ function fmtTime(iso: string | null): string {
     <template #title>
       <a-space :size="8">
         <span class="cycle-title">交易周期</span>
-        <a-tag size="small" :color="TRIGGER_META[cycle.trigger].color">{{ TRIGGER_META[cycle.trigger].label }}</a-tag>
-        <a-tag size="small" :color="cycle.mode === 'live' ? 'red' : 'arcoblue'">{{ MODE_LABELS[cycle.mode] }}</a-tag>
-        <a-tag size="small" :color="STATUS_META[cycle.status].color">{{ STATUS_META[cycle.status].label }}</a-tag>
+        <a-tag size="small" :color="triggerMeta(cycle.trigger).color">{{ triggerMeta(cycle.trigger).label }}</a-tag>
+        <a-tag size="small" :color="cycle.mode === 'live' ? 'red' : 'arcoblue'">{{ modeLabel(cycle.mode) }}</a-tag>
+        <a-tag size="small" :color="statusMeta(cycle.status).color">{{ statusMeta(cycle.status).label }}</a-tag>
       </a-space>
     </template>
     <template #extra>
@@ -131,7 +149,7 @@ function fmtTime(iso: string | null): string {
         <StageCard v-if="node.stage" :stage="node.stage!" />
         <a-card v-else size="small" class="stage-placeholder">
           <a-space :size="8">
-            <span class="placeholder-role">{{ ROLE_LABELS[node.role] }}</span>
+            <span class="placeholder-role">{{ roleLabel(node.role) }}</span>
             <a-tag size="small" :color="placeholderMeta(node.reason).color">{{ placeholderMeta(node.reason).label }}</a-tag>
             <span v-if="node.reason === 'running'" class="placeholder-hint">等待该阶段执行…</span>
           </a-space>

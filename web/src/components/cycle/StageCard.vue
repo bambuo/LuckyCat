@@ -20,6 +20,15 @@ const STATUS_META: Record<StageStatus, { label: string; color: string }> = {
 
 const expanded = ref(true)
 
+// API 传回的枚举可能超出前端联合类型：缺 key 时用原值兜底，绝不在渲染期抛错
+function roleLabel(role: StageRole): string {
+  return ROLE_LABELS[role] ?? role
+}
+
+function statusMeta(status: StageStatus): { label: string; color: string } {
+  return STATUS_META[status] ?? { label: status, color: 'gray' }
+}
+
 function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
@@ -33,8 +42,8 @@ function formatTokens(value: number | null): string {
   <a-card size="small" class="stage-card">
     <template #title>
       <a-space :size="8">
-        <span class="stage-role">{{ ROLE_LABELS[stage.role] }}</span>
-        <a-tag size="small" :color="STATUS_META[stage.status].color">{{ STATUS_META[stage.status].label }}</a-tag>
+        <span class="stage-role">{{ roleLabel(stage.role) }}</span>
+        <a-tag size="small" :color="statusMeta(stage.status).color">{{ statusMeta(stage.status).label }}</a-tag>
         <span class="stage-elapsed">{{ formatElapsed(stage.elapsedMs) }}</span>
       </a-space>
     </template>
@@ -45,7 +54,6 @@ function formatTokens(value: number | null): string {
     <div v-if="!expanded" class="stage-collapsed">{{ stage.summary || '—' }}</div>
     <template v-else>
       <a-descriptions :column="3" size="small" class="stage-metrics">
-        <a-descriptions-item label="耗时">{{ formatElapsed(stage.elapsedMs) }}</a-descriptions-item>
         <a-descriptions-item label="输入 token">{{ formatTokens(stage.inputTokens) }}</a-descriptions-item>
         <a-descriptions-item label="输出 token">{{ formatTokens(stage.outputTokens) }}</a-descriptions-item>
         <a-descriptions-item label="工具调用">{{ stage.toolCalls }} 次</a-descriptions-item>

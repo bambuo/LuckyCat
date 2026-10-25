@@ -89,14 +89,21 @@ interface ToolChip {
 }
 
 const stageTools = ref<Record<string, ToolChip[]>>({})
+const malformedFrameCount = ref(0)
+const streamStale = ref(false)
 let disposeStream: (() => void) | null = null
 let streamTraderId: number | null = null
-let streamOpenedOnce = false
+let streamHasOpened = false
 let needsResync = false
 let resyncInFlight = false
-let lastResyncAt = 0
+let lastFrameAt = 0
 let lastPositionHistoryRefreshAt = 0
-const pendingEvents: CycleEvent[] = []
+let closedRebuildUsed = false
+let closedRebuildTimer: number | undefined
+let livenessTimer: number | undefined
+let dashboardGeneration = 0
+// 重连重同步期间到达的帧按「代次」缓冲：交易员切换后旧代次的帧不得落到新看板
+const pendingEvents: Array<{ generation: number; event: CycleEvent }> = []
 
 // —— 数值展示（后端金额/百分比/数量一律字符串：只解析做格式化，不做业务计算）——
 
@@ -182,71 +189,106 @@ const ORDER_STATUSES: readonly OrderStatus[] = ['submitted', 'filled', 'partial'
 
 // —— SSE：连接生命周期 ——
 
-function connectStream(traderId: number) {
-  disconnectStream()
+function applyEventSafely(event: CycleEvent) {
+  try {
+    applyEvent(event)
+  } catch {
+    // 防御：单帧结构异常不拖垮页面（api 层已拦截非法 JSON）
+  }
+}
+
+function disposeCurrentStream() {
+  disposeStream?.()
+  disposeStream = null
+  streamTraderId = null
+}
+
+function connectStream(traderId: number, resume = false) {
+  disposeCurrentStream()
   streamTraderId = traderId
+  // resume=重建：已有首屏快照，重建后的 open 走一次补拉
+  streamHasOpened = resume
   streamStatus.value = 'connecting'
+  lastFrameAt = Date.now()
+  streamStale.value = false
+  const generation = dashboardGeneration
   disposeStream = openTraderStream(
     traderId,
     (event) => {
-      if (streamTraderId !== traderId) return
+      if (streamTraderId !== traderId || generation !== dashboardGeneration) return
+      // 任何帧（含 ping）都算存活
+      lastFrameAt = Date.now()
+      streamStale.value = false
       // 交易员切换瞬间旧看板仍在内存：不把新流事件落到旧交易员的快照上
       if (dashboard.value && dashboard.value.trader.id !== traderId) return
       if (resyncInFlight) {
-        pendingEvents.push(event)
+        pendingEvents.push({ generation, event })
         return
       }
-      try {
-        applyEvent(event)
-      } catch {
-        // 防御：单帧结构异常不拖垮页面（api 层已拦截非法 JSON）
-      }
+      applyEventSafely(event)
     },
     {
       onStatus: (state) => {
-        if (streamTraderId === traderId) onStreamStatus(state)
+        if (streamTraderId === traderId && generation === dashboardGeneration) onStreamStatus(state)
       },
       onError: () => {
-        // 坏帧已由 api 层跳过且流继续；这里不打断页面、不弹 toast
+        // 坏帧已由 api 层跳过且流继续；计数后统一显示一条轻提示，不弹 toast
+        malformedFrameCount.value += 1
       },
     },
   )
 }
 
 function disconnectStream() {
-  disposeStream?.()
-  disposeStream = null
-  streamTraderId = null
-  streamOpenedOnce = false
+  disposeCurrentStream()
+  streamHasOpened = false
   needsResync = false
+  closedRebuildUsed = false
+  if (closedRebuildTimer !== undefined) {
+    window.clearTimeout(closedRebuildTimer)
+    closedRebuildTimer = undefined
+  }
   pendingEvents.length = 0
   stageTools.value = {}
+  streamStale.value = false
+  lastFrameAt = 0
 }
 
 function onStreamStatus(state: ConnectionState) {
   streamStatus.value = state
-  if (state === 'reconnecting' || state === 'closed' || state === 'error') {
-    needsResync = true
-    // 自动重连期间先试一次；失败不阻塞，open 时还会再补一次
-    if (state === 'reconnecting') void resyncStream(true)
+  if (state === 'open') {
+    lastFrameAt = Date.now()
+    streamStale.value = false
+    // 首屏快照在 connect 之前已完成；只有断线后的 open 才补拉，避免同一快照拉两次。
+    const shouldResync = streamHasOpened && needsResync
+    streamHasOpened = true
+    if (shouldResync) void resyncStream()
     return
   }
-  if (state === 'open') {
-    // 首次 open 由首屏加载负责；断线后的 open 重同步一次
-    if (streamOpenedOnce && needsResync) void resyncStream()
-    streamOpenedOnce = true
+  if (state === 'reconnecting' || state === 'error' || state === 'closed') {
+    needsResync = true
+    if (state === 'closed') scheduleStreamRebuild()
   }
 }
 
-// 重连重同步：dashboard + 最新周期详情各拉一次；重拉期间到达的帧缓冲，快照落地后幂等合并。
-async function resyncStream(throttle = false) {
+// EventSource 已放弃（readyState=CLOSED）时重建一次；同一交易员只自动重建一次，避免失败循环。
+function scheduleStreamRebuild() {
   const traderId = streamTraderId
+  if (traderId === null || closedRebuildUsed) return
+  closedRebuildUsed = true
+  closedRebuildTimer = window.setTimeout(() => {
+    closedRebuildTimer = undefined
+    if (selectedId.value !== traderId || streamTraderId !== traderId) return
+    connectStream(traderId, true)
+  }, 2000)
+}
+
+// 重连重同步：回到 open 后才执行（dashboard + 最新周期详情各拉一次）；
+// 重拉期间到达的帧缓冲，快照落地后幂等合并。
+async function resyncStream() {
+  const traderId = streamTraderId
+  const generation = dashboardGeneration
   if (traderId === null || selectedId.value !== traderId || resyncInFlight) return
-  if (throttle && Date.now() - lastResyncAt < 2000) {
-    needsResync = true
-    return
-  }
-  lastResyncAt = Date.now()
   resyncInFlight = true
   try {
     const ok = await loadDashboard(true)
@@ -254,19 +296,18 @@ async function resyncStream(throttle = false) {
       needsResync = true
       return
     }
+    if (generation !== dashboardGeneration || selectedId.value !== traderId) return
     const cycleId = latestCycle.value?.cycle.id
     if (cycleId) await loadCycleDetail(cycleId, true)
-    needsResync = false
+    if (generation === dashboardGeneration && selectedId.value === traderId) needsResync = false
   } finally {
     resyncInFlight = false
     const buffered = pendingEvents.splice(0)
-    if (selectedId.value !== traderId) return
-    for (const event of buffered) {
-      try {
-        applyEvent(event)
-      } catch {
-        // 缓冲帧同样防御性处理
-      }
+    for (const entry of buffered) {
+      // 旧代次的帧丢弃；当前代次的帧必须补上（交易员切换发生在旧重同步期间时不能丢新流事件）
+      if (entry.generation !== dashboardGeneration) continue
+      if (selectedId.value !== streamTraderId) continue
+      applyEventSafely(entry.event)
     }
   }
 }
@@ -486,9 +527,21 @@ function applyTool(event: Extract<CycleEvent, { type: 'tool' }>) {
 function applyEquity(event: Extract<CycleEvent, { type: 'equity' }>) {
   if (!dashboard.value?.account) return
   if (typeof event.equity !== 'string' || event.equity === '') return
-  dashboard.value.account.equity = event.equity
+  const account = dashboard.value.account
+  account.equity = event.equity
+  // 总盈亏/收益率是从净值推导的展示值：净值更新后同步重算，避免统计卡互相打架
+  const equity = toNumber(event.equity)
+  const initial = toNumber(dashboard.value.trader.initialBalance)
+  if (equity !== null && initial !== null && initial > 0) {
+    const pnl = equity - initial
+    account.totalPnl = pnl.toFixed(2)
+    account.pnlPct = ((pnl / initial) * 100).toFixed(2)
+  } else {
+    account.totalPnl = null
+    account.pnlPct = null
+  }
   if (typeof event.at === 'string' && event.at) {
-    dashboard.value.account.at = event.at
+    account.at = event.at
     appendSample(event.at, event.equity)
   }
 }
@@ -521,6 +574,8 @@ function appendSample(at: string, equity: string) {
 // recentOrders 是旧链路 TraderOrderDto：只有 id/quantity/price/note/error，没有 status/simulated/success。
 function upsertRecentOrder(order: CycleOrderDto) {
   if (!dashboard.value || typeof order.orderId !== 'number') return
+  // SSE order 载荷没有 error 字段：已有同 id 行时保留其错误文案，避免更新时被清空
+  const existing = dashboard.value.recentOrders.find((o) => o.id === order.orderId)
   const row: RecentOrderDto = {
     id: order.orderId,
     at: order.at,
@@ -529,7 +584,7 @@ function upsertRecentOrder(order: CycleOrderDto) {
     quantity: order.quantity,
     price: order.price,
     note: order.note,
-    error: null,
+    error: existing?.error ?? null,
   }
   const rest = dashboard.value.recentOrders.filter((o) => o.id !== row.id)
   dashboard.value.recentOrders = [row, ...rest].sort((a, b) => b.id - a.id).slice(0, 20)
@@ -668,26 +723,48 @@ function mergeCycleDetail(base: CycleDetailDto, live: CycleDetailDto | null): Cy
   }
 }
 
+function cycleStartedMs(cycle: CycleDto): number {
+  const ms = new Date(cycle.startedAt).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
+
+/** 快照与实时周期择新：同 id 合并；快照缺失或更旧时保留实时周期（SSE 已看到的新周期不能被旧快照回退）。 */
+function pickSnapshotCycle(snapshot: CycleDetailDto | null, live: CycleDetailDto | null): CycleDetailDto | null {
+  if (!snapshot) return live
+  if (!live) return snapshot
+  if (snapshot.cycle.id === live.cycle.id) return mergeCycleDetail(snapshot, live)
+  return cycleStartedMs(live.cycle) > cycleStartedMs(snapshot.cycle) ? live : snapshot
+}
+
 async function loadDashboard(silent = false): Promise<boolean> {
   const id = selectedId.value
+  const generation = dashboardGeneration
   if (id === null) return false
   if (!silent) loading.value = true
   try {
     const fetched = await fetchTraderDashboard(id)
-    if (selectedId.value !== id) return false
+    if (selectedId.value !== id || generation !== dashboardGeneration) return false
     const liveCycle = latestCycle.value
-    const nextCycleId = fetched.latestCycle?.cycle.id ?? null
+    const nextCycle = pickSnapshotCycle(fetched.latestCycle, liveCycle)
+    const nextCycleId = nextCycle?.cycle.id ?? null
     if ((liveCycle?.cycle.id ?? null) !== nextCycleId) stageTools.value = {}
+    // SSE 净值帧可能比在途快照新：按采样时间保留较新的账户块
+    const liveAccount = dashboard.value?.account
+    if (fetched.account && liveAccount && liveAccount.at > fetched.account.at) {
+      fetched.account = liveAccount
+    }
     dashboard.value = fetched
-    latestCycle.value = fetched.latestCycle ? mergeCycleDetail(fetched.latestCycle, liveCycle) : null
+    latestCycle.value = nextCycle
     cycleErrorText.value = null
     errorText.value = null
     return true
   } catch (err) {
-    if (!silent) errorText.value = err instanceof Error ? err.message : '加载失败'
+    if (!silent && generation === dashboardGeneration && selectedId.value === id) {
+      errorText.value = err instanceof Error ? err.message : '加载失败'
+    }
     return false
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && selectedId.value === id) loading.value = false
   }
 }
 
@@ -695,17 +772,22 @@ async function loadDashboard(silent = false): Promise<boolean> {
 let cycleRequestSeq = 0
 async function loadCycleDetail(cycleId: string, force = false) {
   if (!force && latestCycle.value?.cycle.id === cycleId) return
+  const traderId = selectedId.value
+  const generation = dashboardGeneration
   const seq = ++cycleRequestSeq
   cycleLoading.value = true
   try {
     const detail = await getCycle(cycleId)
     if (seq !== cycleRequestSeq) return
+    // 请求发出后切换了交易员：旧交易员的详情不得填充新看板
+    if (generation !== dashboardGeneration || selectedId.value !== traderId) return
+    if (traderId !== null && detail.cycle.traderId !== null && detail.cycle.traderId !== traderId) return
     const live = latestCycle.value
     if (live && live.cycle.id !== cycleId) return
     latestCycle.value = mergeCycleDetail(detail, live)
     cycleErrorText.value = null
   } catch (err) {
-    if (seq === cycleRequestSeq) {
+    if (seq === cycleRequestSeq && generation === dashboardGeneration && selectedId.value === traderId) {
       cycleErrorText.value = err instanceof Error ? err.message : '周期详情加载失败'
     }
   } finally {
@@ -719,6 +801,15 @@ let retryTimer: number | undefined
 async function bootstrap() {
   try {
     await loadTraders()
+    // 零交易员：页面展示空态即可，不进入 5 秒重试循环
+    if (traders.value.length === 0) {
+      errorText.value = null
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer)
+        retryTimer = undefined
+      }
+      return
+    }
     const ok = await loadDashboard()
     if (!ok) throw new Error(errorText.value ?? '加载失败')
     if (selectedId.value !== null) connectStream(selectedId.value)
@@ -738,23 +829,46 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     clock.value = Date.now()
   }, 30000)
+  // 存活看门狗：服务端每 15 秒发 ping，45 秒无任何帧才提示；不主动重启连接
+  livenessTimer = window.setInterval(() => {
+    const active = streamStatus.value === 'open' || streamStatus.value === 'reconnecting'
+    streamStale.value = active && lastFrameAt > 0 && Date.now() - lastFrameAt > 45000
+  }, 10000)
 })
 
 onUnmounted(() => {
   if (retryTimer !== undefined) window.clearTimeout(retryTimer)
   if (clockTimer !== undefined) window.clearInterval(clockTimer)
+  if (livenessTimer !== undefined) window.clearInterval(livenessTimer)
   disconnectStream()
 })
 
-watch(selectedId, () => {
+watch(selectedId, async (id) => {
+  dashboardGeneration += 1
+  const generation = dashboardGeneration
   historyPage.value = 1
   symbolPage.value = 1
   latestCycle.value = null
   cycleErrorText.value = null
   stageTools.value = {}
-  void loadDashboard()
-  if (selectedId.value !== null) connectStream(selectedId.value)
-  else disconnectStream()
+  malformedFrameCount.value = 0
+  streamStatus.value = 'closed'
+  disposeCurrentStream()
+  streamHasOpened = false
+  needsResync = false
+  closedRebuildUsed = false
+  if (closedRebuildTimer !== undefined) {
+    window.clearTimeout(closedRebuildTimer)
+    closedRebuildTimer = undefined
+  }
+  pendingEvents.length = 0
+  if (id === null) {
+    disconnectStream()
+    return
+  }
+  await loadDashboard()
+  if (generation !== dashboardGeneration || selectedId.value !== id) return
+  connectStream(id)
 })
 
 // 数据刷新后页码越界自动回收（行数变少时）
@@ -892,20 +1006,60 @@ async function onStopTrader() {
   }
 }
 
-// 手动平仓（新链路）：quantity/price 为字符串金额；order=null 表示什么都没发生——只警告，绝不报成功。
+const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  submitted: '已提交',
+  filled: '已成交',
+  partial: '部分成交',
+  failed: '失败',
+  unknown: '结果未知',
+  cancelled: '已撤销',
+}
+
+function orderStatusLabel(status: OrderStatus | null): string {
+  return status ? (ORDER_STATUS_LABELS[status] ?? status) : '状态未知'
+}
+
+/** 平仓订单未成交时补齐周期级 errorCode/error（手动平仓响应只在 order=null 时带回它们）。 */
+async function loadCloseFailure(cycleId: string): Promise<{ code: string | null; error: string | null }> {
+  try {
+    const detail = await getCycle(cycleId)
+    return { code: detail.cycle.errorCode, error: detail.cycle.error }
+  } catch {
+    return { code: null, error: null }
+  }
+}
+
+// 手动平仓（新链路）：quantity/price 为字符串金额；只有 order.status=filled 才算平仓成功。
 async function closePosition(symbol: string) {
   const id = selectedId.value
   if (id === null || closingSymbol.value) return
   closingSymbol.value = symbol
   try {
     const result = await apiClosePosition(id, { symbol, orderType: 'market', reason: '手动平仓' })
-    if (!result.order) {
+    const order = result.order
+    if (!order) {
       Message.warning(result.error ?? result.errorCode ?? '平仓未执行（后端未返回订单）')
       // 平仓未执行但周期已留痕：静默刷新让最新周期块如实展示失败原因（不报成功）
       await loadDashboard(true)
       return
     }
-    Message.success(`已平仓 ${symbol}（订单 #${result.order.orderId}）`)
+    if (order.status === 'filled') {
+      Message.success(`已平仓 ${symbol}（订单 #${order.orderId}）`)
+    } else if (order.status === 'submitted' || order.status === 'partial') {
+      Message.info(`已提交，等待成交（订单 #${order.orderId}）`)
+    } else {
+      let code = result.errorCode
+      let error = result.error
+      if (!code && !error) {
+        const cycleFailure = await loadCloseFailure(result.cycleId)
+        code = cycleFailure.code
+        error = cycleFailure.error
+      }
+      const detail = [code, error, order.note].filter((part): part is string => typeof part === 'string' && part.trim() !== '')
+      Message.warning(
+        `平仓未完成（${orderStatusLabel(order.status)}）${detail.length > 0 ? `：${detail.join('；')}` : ''}`,
+      )
+    }
     await loadDashboard(true)
   } catch (err) {
     showActionError(err, '平仓失败')
@@ -1024,6 +1178,13 @@ function shortCycleId(id: string): string {
           </template>
         </span>
       </div>
+
+      <a-alert v-if="streamStale" type="warning" class="page-alert">
+        连接可能已断开：超过 45 秒未收到任何推送帧，正在等待自动重连…
+      </a-alert>
+      <a-alert v-if="malformedFrameCount > 0" type="warning" class="page-alert">
+        已跳过 {{ malformedFrameCount }} 个无法解析的推送帧（不影响后续事件）。
+      </a-alert>
 
       <a-alert v-if="dashboard.account && !dashboard.account.success" type="warning" class="page-alert">
         账户数据读取失败：{{ dashboard.account.error }}（请检查 API Key 权限/IP 白名单；下方账户指标暂不可用）

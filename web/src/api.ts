@@ -395,7 +395,8 @@ function dispatchCycleFrame(
 /**
  * 交易员实时流（EventSource，GET SSE）：订阅 §4.2 全部事件名。
  * 返回 disposer：移除全部监听并关闭连接（组件卸载时调用，无监听泄漏）。
- * EventSource 自动重连；重连成功后服务端会补发 state 种子帧，消费者应在 open 时重拉 dashboard。
+ * EventSource 自动重连；每次回到 open 后消费者应重拉 dashboard（重连期间的事件可能缺失）。
+ * readyState=CLOSED 时上报 closed（源不会自行恢复），由消费者决定是否重建一次。
  */
 export function openTraderStream(
   traderId: number,
@@ -416,8 +417,10 @@ export function openTraderStream(
 
   source.onopen = () => options.onStatus?.('open')
   source.onerror = () => {
-    // CONNECTING = 浏览器正在自动重连；CLOSED = 已放弃（如服务端持续 404）。
-    options.onStatus?.(source.readyState === EventSource.CONNECTING ? 'reconnecting' : 'error')
+    // CONNECTING = 浏览器正在自动重连；CLOSED = 已放弃（如服务端持续 404），由消费者决定是否重建。
+    if (source.readyState === EventSource.CLOSED) options.onStatus?.('closed')
+    else if (source.readyState === EventSource.CONNECTING) options.onStatus?.('reconnecting')
+    else options.onStatus?.('error')
   }
 
   return () => {
