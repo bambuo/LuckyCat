@@ -162,6 +162,45 @@ public class CycleHttpTests
     }
 
     [Fact]
+    public async Task Close_position_limit_without_price_returns_400_before_any_row()
+    {
+        // §3.4「price 仅限价单必填」：缺 price 的限价单在创建任何周期/订单行之前拒绝。
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+
+        var response = await host.Client.PostAsJsonAsync("/api/traders/1/close-position",
+            new { symbol = "BTC/USDT", orderType = "limit", reason = "手动减仓" }, ApiJson.Options);
+        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "validation_failed", "price");
+        Assert.Equal(0, await host.CountCyclesAsync());
+    }
+
+    [Fact]
+    public async Task Close_position_rejection_returns_200_with_cycle_error_and_no_order()
+    {
+        // 写工具拒绝（无该标的持仓）时周期是合法 completed + execution_errors（§6），
+        // 响应必须带出错误码与可展示文案，且 order 为 null——绝不能暗示成交。
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+
+        var response = await host.Client.PostAsJsonAsync("/api/traders/1/close-position",
+            new { symbol = "ETH/USDT", orderType = "market", reason = "手动减仓" }, ApiJson.Options);
+        var body = await ReadJsonAsync(response);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(body.GetProperty("success").GetBoolean());
+        var data = body.GetProperty("data");
+        Assert.Equal(JsonValueKind.Null, data.GetProperty("order").ValueKind);
+        Assert.Equal("execution_errors", data.GetProperty("errorCode").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(data.GetProperty("error").GetString()));
+
+        using var scope = host.App.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal(0, await db.TraderOrders.CountAsync());
+        var cycle = await db.TradingCycles.AsNoTracking().SingleAsync();
+        Assert.Equal("completed", cycle.Status);
+        Assert.Equal("execution_errors", cycle.ErrorCode);
+    }
+
+    [Fact]
     public async Task Close_position_while_a_cycle_runs_returns_409_without_a_new_row()
     {
         // R-14-7：CycleInProgressException → 409 契约形状，不创建周期行。
@@ -318,6 +357,7 @@ public class CycleHttpTests
         await using var host = await TestApp.StartAsync();
         await SeedAsync(host, danglingAccount: true);
         await SeedOpenCycleAsync(host, traderId: 2);
+        await SeedRecentOrderAsync(host, traderId: 2);
 
         var body = await ReadJsonAsync(await host.Client.GetAsync("/api/traders/2/dashboard"));
         var latest = body.GetProperty("data").GetProperty("latestCycle");
@@ -325,6 +365,18 @@ public class CycleHttpTests
         Assert.Equal("approved", latest.GetProperty("verdict").GetProperty("decision").GetString());
         Assert.Equal(JsonValueKind.String,
             latest.GetProperty("orders")[0].GetProperty("quantity").ValueKind);
+
+        // 看板自身的金额/数量/百分比同样是字符串（§1.3），订单不再携带已删除的 success（§2.2）。
+        var data = body.GetProperty("data");
+        Assert.Equal(JsonValueKind.String,
+            data.GetProperty("trader").GetProperty("initialBalance").ValueKind);
+        var metrics = data.GetProperty("history").GetProperty("metrics");
+        Assert.Equal(JsonValueKind.String, metrics.GetProperty("totalPnl").ValueKind);
+        Assert.Equal(JsonValueKind.String, metrics.GetProperty("winRate").ValueKind);
+        var recent = data.GetProperty("recentOrders")[0];
+        Assert.Equal(JsonValueKind.String, recent.GetProperty("quantity").ValueKind);
+        Assert.Equal(JsonValueKind.String, recent.GetProperty("price").ValueKind);
+        Assert.False(recent.TryGetProperty("success", out _));
 
         // GET 无副作用：dashboard 两次读取不新建周期、不改状态。
         Assert.Equal(1, await host.CountCyclesAsync());
@@ -822,7 +874,7 @@ public class CycleHttpTests
             db.Traders.Add(new Trader
             {
                 Id = 2, Name = "无账户交易员", ProviderId = 1, ExchangeAccountId = 999, StrategyId = 1,
-                ExecutionMode = "dry", ScanIntervalMinutes = 3,
+                ExecutionMode = "dry", ScanIntervalMinutes = 3, InitialBalance = 5_000m,
             });
         }
 
@@ -891,6 +943,20 @@ public class CycleHttpTests
             TraderId = 1, StageRunId = "01HTTPTESTSTAGE0000000009", PeriodStart = now.AddDays(-1), PeriodEnd = now,
             Summary = "复盘结论：守住止损就是纪律", StrengthsJson = "[]", MistakesJson = "[]",
             RulesJson = """["规则一","规则二"]""", EvidenceJson = "[]", CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>看板「最近订单」投影：模型里 Success 仍存在，但 DTO 不再输出（§2.2）。</summary>
+    private static async Task SeedRecentOrderAsync(TestApp host, int traderId)
+    {
+        await using var scope = host.App.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.TraderOrders.Add(new TraderOrder
+        {
+            TraderId = traderId, At = DateTime.UtcNow, Action = "close", Symbol = "BTC/USDT",
+            Quantity = 0.05m, Price = 101.5m, Status = "filled", Simulated = true, Success = true,
+            Note = "看板订单投影",
         });
         await db.SaveChangesAsync();
     }

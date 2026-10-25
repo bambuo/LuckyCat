@@ -230,7 +230,15 @@ public static class TradersEndpoints
                     .Where(o => o.CycleId == cycleId)
                     .OrderByDescending(o => o.Id)
                     .FirstOrDefaultAsync(ct);
-                return ApiResults.Ok(new ManualCloseResultDto(cycleId, order is null ? null : CycleDtoMapper.ToOrder(order)));
+                // 写工具被拒时周期是合法 completed + execution_errors（§6）：HTTP 仍是 200（周期确实跑了），
+                // 但 order=null 必须带出周期错误码与可展示文案，UI 才能区分「已平仓」与「什么都没发生」。
+                if (order is not null)
+                {
+                    return ApiResults.Ok(new ManualCloseResultDto(cycleId, CycleDtoMapper.ToOrder(order), null, null));
+                }
+
+                var cycle = await db.TradingCycles.AsNoTracking().FirstOrDefaultAsync(c => c.Id == cycleId, ct);
+                return ApiResults.Ok(new ManualCloseResultDto(cycleId, null, cycle?.ErrorCode, cycle?.Error));
             });
 
             // 看板快照（§3.4 + 简报「最新周期/阶段/提案/裁决/订单/权益」）。
@@ -285,7 +293,7 @@ public static class TradersEndpoints
                     trader.ExecutionMode,
                     trader.IsCrossMargin,
                     trader.ScanIntervalMinutes,
-                    trader.InitialBalance,
+                    CycleDtoMapper.Num(trader.InitialBalance),
                     trader.StartedAt,
                     trader.LastCycleAt,
                     trader.LastCycleStatus,
@@ -301,7 +309,10 @@ public static class TradersEndpoints
                     var snapshot = await trading.GetAccountAsync(account, ct);
                     var livePositions = await trading.GetPositionsAsync(account, ct);
                     positions = livePositions
-                        .Select(p => new DashboardPosition(p.Symbol, p.Side.ToString(), p.Quantity, p.AverageOpenPrice, p.UnrealizedPnl, p.LiquidationPrice, p.Leverage))
+                        .Select(p => new DashboardPosition(p.Symbol, p.Side.ToString(),
+                            CycleDtoMapper.Num(p.Quantity), CycleDtoMapper.Num(p.AverageOpenPrice),
+                            CycleDtoMapper.Num(p.UnrealizedPnl), CycleDtoMapper.Num(p.LiquidationPrice),
+                            CycleDtoMapper.Num(p.Leverage)))
                         .ToList();
 
                     decimal? pnl = null;
@@ -312,11 +323,11 @@ public static class TradersEndpoints
                         pnlPct = Math.Round((double)((snapshot.UsdtEquity - initial) / initial * 100m), 2);
                     }
 
-                    // 保证金占用 = Σ(数量 × 均价 / 杠杆) / 净值
+                    // 保证金占用 = Σ(数量 × 均价 / 杠杆) / 净值（用交易所口径的原始持仓，不解析字符串 DTO）
                     decimal? marginPct = null;
                     if (snapshot.Success && snapshot.UsdtEquity > 0)
                     {
-                        var used = positions
+                        var used = livePositions
                             .Where(p => p.Leverage is > 0)
                             .Sum(p => p.Quantity * p.AverageOpenPrice / p.Leverage!.Value);
                         marginPct = Math.Round(used / snapshot.UsdtEquity * 100m, 2);
@@ -324,11 +335,11 @@ public static class TradersEndpoints
 
                     accountDto = new DashboardAccount(
                         snapshot.Success, snapshot.Error,
-                        snapshot.Success ? snapshot.UsdtEquity : null,
-                        snapshot.Success ? snapshot.UsdtAvailable : null,
-                        pnl, pnlPct,
+                        snapshot.Success ? CycleDtoMapper.Num(snapshot.UsdtEquity) : null,
+                        snapshot.Success ? CycleDtoMapper.Num(snapshot.UsdtAvailable) : null,
+                        CycleDtoMapper.Num(pnl), CycleDtoMapper.Num(pnlPct),
                         positions.Count,
-                        marginPct,
+                        CycleDtoMapper.Num(marginPct),
                         DateTime.UtcNow);
                 }
 
@@ -341,7 +352,7 @@ public static class TradersEndpoints
                             .Take(200)
                             .ToListAsync(ct))
                         .OrderBy(s => s.At)
-                        .Select(s => new DashboardSample(s.At, s.Equity))
+                        .Select(s => new DashboardSample(s.At, CycleDtoMapper.Num(s.Equity)))
                         .ToList();
 
                 // 最近决策（旧 DecisionRecord 链路，P7 随旧宿主一并移除；新链数据在 latestCycle）
@@ -370,7 +381,7 @@ public static class TradersEndpoints
                             {
                                 if (r.Leverage is not null || !bySymbol.TryGetValue(r.Symbol, out var list)) return r;
                                 var hit = list.FirstOrDefault(s => s.At <= r.CloseTime && (r.Side is null || s.Side is null || s.Side == r.Side));
-                                return hit is null ? r : r with { Leverage = hit.Leverage };
+                                return hit is null ? r : r with { Leverage = CycleDtoMapper.Num(hit.Leverage) };
                             })
                             .ToList();
                         var leverageNote = "杠杆取自持仓期间采样（每轮运行采样）";
@@ -638,6 +649,9 @@ public static class TradersEndpoints
     {
         if (string.IsNullOrWhiteSpace(request.Symbol)) return "symbol 不能为空";
         if (request.OrderType is not ("market" or "limit")) return "orderType 仅支持 market / limit";
+        // §3.4「price 仅限价单必填」：限价单缺价格在创建任何行之前拒绝（R-14-1 同一形状）。
+        if (request.OrderType == "limit" && string.IsNullOrWhiteSpace(request.Price))
+            return "price 是限价单必填字段";
         if (string.IsNullOrWhiteSpace(request.Reason)) return "reason 不能为空";
         if (request.Reason.Length > 300) return "reason 不得超过 300 字";
         return null;
@@ -719,14 +733,17 @@ public static class TradersEndpoints
         }
 
         var round = DecisionRoundMetadata.Read(r);
-        return new DashboardDecision(r.Id, r.CreatedAt, r.Action, r.Symbol, r.Confidence,
-            entry, sl, tp, posPct, lev, reason, r.Reasoning, r.InputTokens, r.OutputTokens, r.ElapsedMs, r.TraderId,
+        return new DashboardDecision(r.Id, r.CreatedAt, r.Action, r.Symbol, CycleDtoMapper.Num(r.Confidence),
+            CycleDtoMapper.Num(entry), CycleDtoMapper.Num(sl), CycleDtoMapper.Num(tp),
+            CycleDtoMapper.Num(posPct), CycleDtoMapper.Num(lev), reason, r.Reasoning,
+            r.InputTokens, r.OutputTokens, r.ElapsedMs, r.TraderId,
             r.SystemPrompt, r.UserPrompt, round?.Status ?? (r.Action == "error" ? "error" : "ok"),
             round?.FailureStage, round?.Error, round?.RawOutput, round?.PromptRevision, round?.RequestSent);
     }
 
     private static TraderOrderDto ToOrderDto(TraderOrder o) =>
-        new(o.Id, o.At, o.Symbol, o.Action, o.Quantity, o.Price, o.Success, o.Note, o.Error);
+        new(o.Id, o.At, o.Symbol, o.Action, CycleDtoMapper.Num(o.Quantity), CycleDtoMapper.Num(o.Price),
+            o.Note, o.Error);
 
     // 历史仓位（自维护库读取：PositionHistories 由同步宿主从交易所成交明细重建/共享接口增量落库）
     private static async Task<DashboardHistory> BuildHistoryAsync(AppDbContext db, ExchangeAccount account, decimal? initialBalance, string? syncError, CancellationToken ct)
@@ -744,21 +761,8 @@ public static class TradersEndpoints
             return EmptyHistory(null, emptyNote);
         }
 
-        var mapped = records
-            .Select(p => new DashboardHistoryRow(
-                p.Symbol,
-                p.Side,
-                p.EntryPrice,
-                p.ExitPrice,
-                p.Quantity,
-                p.Leverage,
-                p.RealizedPnl,
-                p.Fee,
-                p.CloseTime))
-            .ToList();
-
-        // 时间升序供回撤/夏普计算
-        var asc = mapped.OrderBy(r => r.CloseTime).ToList();
+        // 时间升序供回撤/夏普计算（直接基于落库实体，DTO 出参统一转字符串）
+        var asc = records.OrderBy(r => r.CloseTime).ToList();
         var wins = asc.Where(r => r.RealizedPnl > 0).ToList();
         var losses = asc.Where(r => r.RealizedPnl < 0).ToList();
         var totalPnl = asc.Sum(r => r.RealizedPnl);
@@ -768,24 +772,24 @@ public static class TradersEndpoints
 
         var metrics = new DashboardMetrics(
             asc.Count,
-            asc.Count > 0 ? Math.Round((double)wins.Count / asc.Count * 100, 2) : 0,
-            Math.Round(totalPnl, 4),
-            Math.Round(totalFee, 4),
-            Math.Round(totalPnl - totalFee, 4),
-            lossSum > 0 ? Math.Round(winSum / lossSum, 2) : (winSum > 0 ? 999m : 0m),
-            wins.Count > 0 ? Math.Round(winSum / wins.Count, 4) : 0m,
-            losses.Count > 0 ? Math.Round(losses.Sum(r => r.RealizedPnl) / losses.Count, 4) : 0m,
-            ComputeMaxDrawdownPct(asc, initialBalance),
-            ComputeSharpe(asc));
+            CycleDtoMapper.Num(asc.Count > 0 ? Math.Round((double)wins.Count / asc.Count * 100, 2) : 0),
+            CycleDtoMapper.Num(Math.Round(totalPnl, 4)),
+            CycleDtoMapper.Num(Math.Round(totalFee, 4)),
+            CycleDtoMapper.Num(Math.Round(totalPnl - totalFee, 4)),
+            CycleDtoMapper.Num(lossSum > 0 ? Math.Round(winSum / lossSum, 2) : (winSum > 0 ? 999m : 0m)),
+            CycleDtoMapper.Num(wins.Count > 0 ? Math.Round(winSum / wins.Count, 4) : 0m),
+            CycleDtoMapper.Num(losses.Count > 0 ? Math.Round(losses.Sum(r => r.RealizedPnl) / losses.Count, 4) : 0m),
+            CycleDtoMapper.Num(ComputeMaxDrawdownPct(asc, initialBalance)),
+            CycleDtoMapper.Num(ComputeSharpe(asc)));
 
         var directions = asc
             .GroupBy(r => r.Side ?? "", StringComparer.Ordinal)
             .Select(g => new DashboardDirectionStat(
                 g.Key,
                 g.Count(),
-                Math.Round((double)g.Count(r => r.RealizedPnl > 0) / g.Count() * 100, 2),
-                Math.Round(g.Sum(r => r.RealizedPnl), 4),
-                Math.Round(g.Average(r => r.RealizedPnl), 4)))
+                CycleDtoMapper.Num(Math.Round((double)g.Count(r => r.RealizedPnl > 0) / g.Count() * 100, 2)),
+                CycleDtoMapper.Num(Math.Round(g.Sum(r => r.RealizedPnl), 4)),
+                CycleDtoMapper.Num(Math.Round(g.Average(r => r.RealizedPnl), 4))))
             .ToList();
 
         var symbols = asc
@@ -793,8 +797,8 @@ public static class TradersEndpoints
             .Select(g => new DashboardSymbolStat(
                 g.Key,
                 g.Count(),
-                Math.Round((double)g.Count(r => r.RealizedPnl > 0) / g.Count() * 100, 2),
-                Math.Round(g.Sum(r => r.RealizedPnl), 4)))
+                CycleDtoMapper.Num(Math.Round((double)g.Count(r => r.RealizedPnl > 0) / g.Count() * 100, 2)),
+                CycleDtoMapper.Num(Math.Round(g.Sum(r => r.RealizedPnl), 4))))
             .OrderByDescending(s => s.Count)
             .ToList();
 
@@ -804,19 +808,30 @@ public static class TradersEndpoints
             ? "数据来源：本系统维护的仓位历史（同步自交易所成交明细 FIFO 重建；未平仓位不计入；非 USDT 计价手续费未计入）"
             : "数据来源：本系统维护的仓位历史（同步自交易所共享接口持仓历史）";
 
-        // 展示按时间倒序
-        mapped = asc.OrderByDescending(r => r.CloseTime).ToList();
-        return new DashboardHistory(true, null, metrics, directions, symbols, mapped, note);
+        // 展示按时间倒序；金额/数量一律字符串（§1.3）
+        var rows = asc.OrderByDescending(r => r.CloseTime)
+            .Select(p => new DashboardHistoryRow(
+                p.Symbol,
+                p.Side,
+                CycleDtoMapper.Num(p.EntryPrice),
+                CycleDtoMapper.Num(p.ExitPrice),
+                CycleDtoMapper.Num(p.Quantity),
+                CycleDtoMapper.Num(p.Leverage),
+                CycleDtoMapper.Num(p.RealizedPnl),
+                CycleDtoMapper.Num(p.Fee),
+                p.CloseTime))
+            .ToList();
+        return new DashboardHistory(true, null, metrics, directions, symbols, rows, note);
     }
 
     private static DashboardHistory EmptyHistory(string? error, string? note = null) =>
         new(false, error,
-            new DashboardMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            new DashboardMetrics(0, "0", "0", "0", "0", "0", "0", "0", "0", "0"),
             [], [], [], note);
 
     // 回撤：已实现盈亏累计曲线的峰值回撤；百分比相对初始余额（缺失时回退为峰值绝对值）——
     // 直接以峰值为分母在峰值很小时会得出无意义的百分比
-    private static double ComputeMaxDrawdownPct(IReadOnlyList<DashboardHistoryRow> asc, decimal? initialBalance)
+    private static double ComputeMaxDrawdownPct(IReadOnlyList<PositionHistory> asc, decimal? initialBalance)
     {
         var cum = 0m;
         var peak = 0m;
@@ -836,7 +851,7 @@ public static class TradersEndpoints
     }
 
     // 夏普（近似口径：按笔已实现盈亏的均值/标准差 × √笔数；样本不足或零方差时为 0）
-    private static double ComputeSharpe(IReadOnlyList<DashboardHistoryRow> asc)
+    private static double ComputeSharpe(IReadOnlyList<PositionHistory> asc)
     {
         if (asc.Count < 2) return 0;
         var values = asc.Select(r => (double)r.RealizedPnl).ToList();

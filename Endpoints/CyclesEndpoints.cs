@@ -156,6 +156,14 @@ internal static class CycleDtoMapper
 
     public static string? Num(decimal? value) => value?.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>非空口径：调用点已确定有值（如实体必填列），避免为纯格式调用补 null 断言。</summary>
+    public static string Num(decimal value) => value.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>double 口径（胜率/回撤/夏普/信心度）复用同一十进制格式；只接受有限值。</summary>
+    public static string? Num(double? value) => value is { } v ? Num((decimal)v) : null;
+
+    public static string Num(double value) => Num((decimal)value);
+
     /// <summary>SQLite 回读的 DateTime 丢失 Kind：出参前一律显式标 UTC（§1.1「时间统一 UTC」）。</summary>
     public static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 

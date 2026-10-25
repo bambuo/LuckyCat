@@ -30,6 +30,113 @@ public class ContractSerializationTests
     }
 
     [Fact]
+    public void Dashboard_dto_accepts_and_emits_all_amounts_as_strings_without_order_success()
+    {
+        // 看板响应的金额/数量/百分比一律字符串（LC-STD-03 §1.3），订单不再携带 success（§2.2）。
+        // 用契约形状的 JSON 反序列化再序列化：DTO 一旦回退为 decimal/double，这里先失败。
+        const string json = """
+        {
+          "trader": {
+            "id": 1, "name": "t", "providerName": "p", "model": "m", "exchangeLabel": "GateIo",
+            "accountName": "a", "strategyName": "s", "strategyType": "ai_trading", "isRunning": true,
+            "executionMode": "dry", "isCrossMargin": false, "scanIntervalMinutes": 3,
+            "initialBalance": "1000", "startedAt": null, "lastCycleAt": null, "lastCycleStatus": null,
+            "capabilityCanTrade": true, "capabilityNotes": [], "positionMode": null
+          },
+          "account": {
+            "success": true, "error": null, "equity": "1000.5", "available": "900",
+            "totalPnl": "10.5", "pnlPct": "1.05", "positionCount": 1, "marginUsedPct": "5",
+            "at": "2026-01-01T00:00:00Z"
+          },
+          "samples": [{ "at": "2026-01-01T00:00:00Z", "equity": "1000" }],
+          "positions": [{
+            "symbol": "BTC/USDT", "side": "long", "quantity": "0.1", "averageOpenPrice": "100",
+            "unrealizedPnl": "1", "liquidationPrice": "80", "leverage": "5"
+          }],
+          "decisions": [{
+            "id": 1, "at": "2026-01-01T00:00:00Z", "action": "open", "symbol": "BTC/USDT",
+            "confidence": "0.8", "entryPrice": "100", "stopLossPct": "5", "takeProfitPct": "10",
+            "positionPct": "1", "leverage": "5", "reason": "r", "reasoning": "rr", "inputTokens": 1,
+            "outputTokens": 2, "elapsedMs": 3, "traderId": 1, "systemPrompt": null, "userPrompt": null,
+            "status": "ok", "failureStage": null, "error": null, "rawOutput": null,
+            "promptRevision": null, "requestSent": null
+          }],
+          "history": {
+            "success": true, "error": null,
+            "metrics": {
+              "totalTrades": 1, "winRate": "100", "totalPnl": "5", "totalFee": "0.1",
+              "netPnl": "4.9", "profitFactor": "2", "avgWin": "5", "avgLoss": "-1",
+              "maxDrawdownPct": "0", "sharpe": "1.5"
+            },
+            "directions": [{ "side": "long", "count": 1, "winRate": "100", "totalPnl": "5", "avgPnl": "5" }],
+            "symbols": [{ "symbol": "BTC/USDT", "count": 1, "winRate": "100", "totalPnl": "5" }],
+            "rows": [{
+              "symbol": "BTC/USDT", "side": "long", "entryPrice": "100", "exitPrice": "110",
+              "quantity": "0.1", "leverage": "5", "realizedPnl": "5", "fee": "0.1",
+              "closeTime": "2026-01-01T00:00:00Z"
+            }],
+            "note": null
+          },
+          "recentOrders": [{
+            "id": 1, "at": "2026-01-01T00:00:00Z", "symbol": "BTC/USDT", "action": "open",
+            "quantity": "0.1", "price": "100", "note": null, "error": null
+          }]
+        }
+        """;
+
+        var dto = JsonSerializer.Deserialize<TraderDashboardDto>(json, ApiJson.Options)!;
+        var root = JsonSerializer.SerializeToElement(dto, ApiJson.Options);
+
+        AssertString(root.GetProperty("trader").GetProperty("initialBalance"));
+        var account = root.GetProperty("account");
+        foreach (var field in new[] { "equity", "available", "totalPnl", "pnlPct", "marginUsedPct" })
+        {
+            AssertString(account.GetProperty(field));
+        }
+
+        AssertString(root.GetProperty("samples")[0].GetProperty("equity"));
+        var position = root.GetProperty("positions")[0];
+        foreach (var field in new[] { "quantity", "averageOpenPrice", "unrealizedPnl", "liquidationPrice", "leverage" })
+        {
+            AssertString(position.GetProperty(field));
+        }
+
+        var decision = root.GetProperty("decisions")[0];
+        foreach (var field in new[] { "confidence", "entryPrice", "stopLossPct", "takeProfitPct", "positionPct", "leverage" })
+        {
+            AssertString(decision.GetProperty(field));
+        }
+
+        var metrics = root.GetProperty("history").GetProperty("metrics");
+        foreach (var field in new[] { "winRate", "totalPnl", "totalFee", "netPnl", "profitFactor",
+                     "avgWin", "avgLoss", "maxDrawdownPct", "sharpe" })
+        {
+            AssertString(metrics.GetProperty(field));
+        }
+
+        var direction = root.GetProperty("history").GetProperty("directions")[0];
+        AssertString(direction.GetProperty("winRate"));
+        AssertString(direction.GetProperty("totalPnl"));
+        AssertString(direction.GetProperty("avgPnl"));
+        var symbolStat = root.GetProperty("history").GetProperty("symbols")[0];
+        AssertString(symbolStat.GetProperty("winRate"));
+        AssertString(symbolStat.GetProperty("totalPnl"));
+
+        var row = root.GetProperty("history").GetProperty("rows")[0];
+        foreach (var field in new[] { "entryPrice", "exitPrice", "quantity", "leverage", "realizedPnl", "fee" })
+        {
+            AssertString(row.GetProperty(field));
+        }
+
+        var order = root.GetProperty("recentOrders")[0];
+        AssertString(order.GetProperty("quantity"));
+        AssertString(order.GetProperty("price"));
+        Assert.False(order.TryGetProperty("success", out _));
+    }
+
+    private static void AssertString(JsonElement value) => Assert.Equal(JsonValueKind.String, value.ValueKind);
+
+    [Fact]
     public void Error_envelope_has_code_and_message()
     {
         var json = JsonSerializer.Serialize(ApiResponse<object>.Fail("provider_capability_missing", "未验证"), ApiJson.Options);

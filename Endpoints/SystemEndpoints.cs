@@ -70,7 +70,11 @@ public static class SystemEndpoints
                         return;
                     }
 
-                    logger?.LogError(ex, "未预期异常: {Detail}", LogRedaction.Scrub(ex.ToString()));
+                    // 不把异常对象交给日志管线：参数里的 scrubbed 文本只是 Detail，异常对象本身仍会被
+                    // 控制台/OTLP 导出器渲染成未脱敏的 Message/StackTrace（可能含带密钥的 URL）。
+                    // 类型名不含敏感信息，保留用于分诊；原文统一走 LogRedaction（与 TradingCycleRunner 同口径）。
+                    logger?.LogError("未预期异常（{ExceptionType}）: {Detail}",
+                        ex.GetType().Name, LogRedaction.Scrub(ex.ToString()));
                     if (context.Response.HasStarted) throw;
                     await WriteJsonAsync(context, ApiResponse<object>.Fail(
                         "internal_error", "服务内部错误，请稍后重试"), 500);

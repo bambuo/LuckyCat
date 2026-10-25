@@ -127,8 +127,11 @@ public sealed record StageDetailDto(
     DateTime CreatedAt,
     IReadOnlyList<StageToolCallDto> ToolCalls);
 
-/// <summary>POST /traders/{id}/close-position 的 data（§3.4：{ cycleId, order }；写工具被拒时 order 为 null）。</summary>
-public sealed record ManualCloseResultDto(string CycleId, CycleOrderDto? Order);
+/// <summary>
+/// POST /traders/{id}/close-position 的 data（§3.4：{ cycleId, order }；写工具被拒时 order 为 null，
+/// 并带出周期的 errorCode/error 供 UI 解释「为什么什么都没发生」）。
+/// </summary>
+public sealed record ManualCloseResultDto(string CycleId, CycleOrderDto? Order, string? ErrorCode, string? Error);
 
 /// <summary>POST /traders/{id}/reviews/run 的 data：复盘结果原样上报（触发成功≠复盘成功，status 区分）。</summary>
 public sealed record ReviewRunDto(
