@@ -522,6 +522,91 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Terminal_write_fault_is_retried_by_the_guard_without_duplicate_cycle_events()
+    {
+        // 修复轮 2-A1：Finalizer 的终态落库因瞬时 DB 故障抛错时幂等位不得提前置位——宿主的 finally
+        // 守卫按 IsTerminal==false 重试终态写入：周期绝不留下 running，且终态 cycle 事件只发一次（LC-STD-01 §11.2）。
+        await using var env = await RunnerEnv.CreateAsync(terminalFaultOnce: true);
+        var stream = env.Subscribe(env.Trader.Id);
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        Assert.Equal(1, env.Faulty!.FaultCount);
+        var cycle = await env.Db.TradingCycles.AsNoTracking().SingleAsync();
+        Assert.NotEqual("running", cycle.Status);
+        Assert.NotNull(cycle.CompletedAt);
+        var received = stream.Drain();
+        // 终态事件恰好一条（开始 + 终态 = 2）：重试路径没有为已落库的终态补发第二个 cycle 事件。
+        Assert.Equal(2, received.Count(e => e.Name == "cycle"));
+        Assert.Equal(cycle.Status, Json(received[^1]).GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Manual_close_while_a_cycle_runs_is_rejected_without_a_cycle_row()
+    {
+        // 修复轮 2-A2（LC-STD-01 §8.1）：手动平仓与定时周期共用同一交易员周期闸；闸忙不排队，
+        // 直接按既有契约码 cycle_in_progress 拒绝且不创建周期行；闸释放后照常执行。
+        await using var env = await RunnerEnv.CreateAsync(analystBehavior: "hang");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var running = env.Runner.RunAsync(env.Trader, cts.Token);
+        await WaitUntilAsync(() =>
+            env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+
+        var rejected = await Assert.ThrowsAsync<CycleInProgressException>(() => env.Runner.CloseManuallyAsync(
+            env.Trader, new ManualCloseRequest("BTC/USDT", null, "market", null, "手动减仓"), default));
+        Assert.Equal("cycle_in_progress", rejected.Code);
+        // 被拒的平仓没有落任何数据：只剩那一条在跑的定时周期行。
+        Assert.Equal(1, await env.Db.TradingCycles.CountAsync());
+
+        cts.Cancel();
+        await running;
+
+        var cycleId = await env.Runner.CloseManuallyAsync(env.Trader,
+            new ManualCloseRequest("BTC/USDT", null, "market", null, "手动减仓"), default);
+        var manual = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == cycleId);
+        Assert.Equal("manual", manual.Trigger);
+        Assert.Equal("completed", manual.Status);
+        Assert.Equal(2, await env.Db.TradingCycles.CountAsync());
+    }
+
+    [Fact]
+    public async Task Restart_replaces_the_loop_entry_so_the_new_loop_is_still_stoppable()
+    {
+        // 修复轮 2-A3：Stop+Start（Restart）时濒死循环只允许移除自己的 CTS 条目（身份感知移除）。
+        // 若它误摘新加的条目：新循环失控、随后 Stop 变成空操作（CTS 泄漏 + 双循环）——
+        // 下面的「第二次 Stop 后不得留下 running」正是该回归的证明。
+        await using var env = await RunnerEnv.CreateAsync(analystBehavior: "hang");
+        env.Trader.IsRunning = true;
+        await env.Db.SaveChangesAsync();
+
+        try
+        {
+            env.Runner.Start(env.Trader.Id);
+            await WaitUntilAsync(() =>
+                env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+
+            env.Runner.Stop(env.Trader.Id);
+            env.Runner.Start(env.Trader.Id);
+
+            // 交易员被恰好跟踪一次：新循环在跑，且真的开了第二个周期。
+            Assert.True(env.Runner.IsRunning(env.Trader.Id));
+            await WaitUntilAsync(async () =>
+                await env.Db.TradingCycles.AsNoTracking().CountAsync() == 2 &&
+                await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+
+            env.Runner.Stop(env.Trader.Id);
+            Assert.False(env.Runner.IsRunning(env.Trader.Id));
+            // 第二次 Stop 必须真正取消在跑的新周期（带 bug 时字典条目已被误摘，Stop 空转）。
+            await WaitUntilAsync(async () =>
+                !await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Status == "running"));
+        }
+        finally
+        {
+            env.Runner.Stop(env.Trader.Id);
+        }
+    }
+
+    [Fact]
     public async Task Test_run_streams_events_uses_synthetic_equity_and_never_trades()
     {
         await using var env = await RunnerEnv.CreateAsync();
@@ -667,6 +752,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         public required ScriptedMarketReader MarketReader { get; init; }
         public required RecordingGateway Gateway { get; init; }
         public required ScriptedChatClient Clients { get; init; }
+        public FaultOnceDbContext? Faulty { get; init; }
         public required string CycleId { get; init; }
         public required string StageRunId { get; init; }
 
@@ -674,7 +760,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             string analystBehavior = "brief", string riskBehavior = "approve",
             string executorBehavior = "clean", string clientFactoryBehavior = "normal",
             int cycleTimeoutSeconds = 300, int riskTimeoutSeconds = 45, List<SymbolPosition>? positions = null,
-            bool hangPositions = false)
+            bool hangPositions = false, bool terminalFaultOnce = false)
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
@@ -722,7 +808,11 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 clientFactoryBehavior == "throw");
 
             var services = new ServiceCollection();
-            services.AddScoped(_ => new AppDbContext(options));
+            // terminalFaultOnce：注入「终态落库失败一次」的瞬时 DB 故障（A1）；scope 解析返回同一实例，
+            // 保证宿主的守卫重试与首次写入共用同一个故障上下文。
+            FaultOnceDbContext? faulty = terminalFaultOnce ? new FaultOnceDbContext(options) : null;
+            if (faulty is not null) services.AddScoped<AppDbContext>(_ => faulty);
+            else services.AddScoped(_ => new AppDbContext(options));
             services.AddSingleton(hub);
             services.AddScoped<CycleRecorder>();
             services.AddScoped<ChatClientFactory>(_ => clients);
@@ -741,6 +831,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 MarketReader = marketReader,
                 Gateway = gateway,
                 Clients = clients,
+                Faulty = faulty,
                 CycleId = Ids.NewUlid(),
                 StageRunId = Ids.NewUlid(),
                 Connection = connection,
@@ -768,6 +859,26 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// 瞬时 DB 故障注入（修复轮 2-A1）：只在「写终态」那次保存（跟踪项里有非 running 的已修改
+    /// TradingCycle）命中时抛一次，之后一律放行——证明宿主的 finally 守卫会重试终态写入。
+    /// </summary>
+    private sealed class FaultOnceDbContext(DbContextOptions<AppDbContext> options) : AppDbContext(options)
+    {
+        public int FaultCount { get; private set; }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            if (FaultCount == 0 && ChangeTracker.Entries<TradingCycle>().Any(entry =>
+                    entry.State == EntityState.Modified && entry.Entity.Status != "running"))
+            {
+                FaultCount++;
+                throw new InvalidOperationException("injected-terminal-write-fault");
+            }
+            return base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
     /// <summary>宿主与测试之间的边界缝：账户读、行情读、交易所写网关一律假实现。</summary>
     private sealed class TestRunner(IServiceScopeFactory scopeFactory, SseEventHub hub,
         IAccountReader accounts, IMarketDataReader market, IExecutionGateway gateway)
@@ -791,6 +902,9 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             throwOnCreate ? throw new InvalidOperationException("boom-of-upstream 上游炸了") : this;
 
         public string PromptFor(string role) => _prompts.TryGetValue(role, out var prompt) ? prompt : "";
+
+        /// <summary>该角色真实的模型调用次数（预算闸/契约重试测试据此断言「超限不再发起调用」）。</summary>
+        public int CallsFor(string role) => _callsByRole.GetValueOrDefault(role);
 
         public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
             ChatOptions? options = null, CancellationToken cancellationToken = default)

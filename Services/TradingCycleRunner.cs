@@ -23,6 +23,17 @@ namespace LuckyCat.Services;
 public sealed record CycleDataSources(IAccountReader Accounts, IMarketDataReader MarketReader, IExecutionGateway Gateway);
 
 /// <summary>
+/// 周期闸冲突（LC-STD-03:505/§交易员错误码表：<c>cycle_in_progress</c>，409「已有周期」）：
+/// 同一交易员已有周期在运行时手动平仓被拒绝，<b>不创建任何周期行</b>。
+/// 端点层（Task 14）按本类型映射 409 + 契约错误码。
+/// </summary>
+public sealed class CycleInProgressException(string message) : Exception(message)
+{
+    /// <summary>契约错误码（既有约定，LC-STD-03）。</summary>
+    public string Code => "cycle_in_progress";
+}
+
+/// <summary>
 /// 周期宿主（LC-STD-01 §4/§6/§8）：每个交易员一个独立调度循环，一个周期 = 一条 <c>running</c>
 /// <see cref="TradingCycle"/> + 一次 <see cref="TradingCycleWorkflow"/> 图执行 + 一个终态。
 /// <para>
@@ -84,8 +95,9 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         var cts = new CancellationTokenSource();
         if (_loops.TryAdd(traderId, cts))
         {
-            _abortReasons.TryRemove(traderId, out _);
-            _ = Task.Run(() => RunLoopAsync(traderId, cts.Token), cts.Token);
+            // 不在这里清 _abortReasons：Start 紧随 Stop 时（Restart），濒死周期可能还没读完归因码，
+            // 提前清除会让它误归为默认码。中止码由 Stop 写入、由拥有该条循环条目的路径清理（见 RunLoopAsync）。
+            _ = Task.Run(() => RunLoopAsync(traderId, cts), cts.Token);
         }
         else
         {
@@ -171,6 +183,8 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     /// 手动平仓（EXEC-07）：创建 <c>trigger=manual</c> 周期，复用 <see cref="ExecutionTools.ClosePositionAsync"/>
     /// 的完整写工具硬闸与审计，随后完成周期并返回周期 ID。
     /// 数量/价格按契约以字符串传入，非法值在创建周期之前抛 <see cref="FormatException"/>（不落任何数据）。
+    /// 与定时周期共用同一交易员周期闸（LC-STD-01 §8.1「任一周期同时最多一个」）：闸忙时不排队，
+    /// 直接抛 <see cref="CycleInProgressException"/>（<c>cycle_in_progress</c>，409 语义），不创建周期行。
     /// </summary>
     public async Task<string> CloseManuallyAsync(Trader trader, ManualCloseRequest request, CancellationToken ct)
     {
@@ -179,39 +193,54 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         var quantity = ParseOptionalDecimal(request.Quantity, nameof(request.Quantity));
         var price = ParseOptionalDecimal(request.Price, nameof(request.Price));
 
-        using var scope = scopeFactory.CreateScope();
-        var cycle = await PrepareCycleAsync(scope, trader, "manual", ct);
+        // 周期闸（与 RunAsync 同一把）：WaitAsync(0) 不排队；任何路径退出都必须释放。
+        var gate = _cycleGates.GetOrAdd(trader.Id, _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, CancellationToken.None))
+        {
+            Console.WriteLine($"[Cycle] 交易员 #{trader.Id} 已有周期在跑，手动平仓被拒绝（cycle_in_progress）");
+            throw new CycleInProgressException($"交易员 #{trader.Id} 已有周期在运行，手动平仓被拒绝");
+        }
 
-        // 手动平仓没有 AI 阶段：直接装配执行员写工具（与 ToolRegistry 同一件装配口径）。
-        var stageRunId = Ids.NewUlid();
-        var audit = new ToolAuditor(cycle.Db, hub, cycle.Context.Budget, cycle.Context.CycleId, stageRunId,
-            cycle.Context.SseChannel);
-        var tools = new ExecutionTools(cycle.Db, cycle.Context.ForStage(stageRunId), cycle.Sources.Accounts,
-            cycle.Sources.Gateway, cycle.Market, hub, audit);
         try
         {
-            var result = await tools.ClosePositionAsync(null, request.Symbol, quantity, request.OrderType,
-                price, request.Reason, ct);
-            await cycle.Recorder.CompleteCycleAsync(cycle.Context, "completed",
-                result.Ok ? null : ExecutionErrorsCode,
-                result.Ok ? null : result.Error?.Message, CancellationToken.None);
+            using var scope = scopeFactory.CreateScope();
+            var cycle = await PrepareCycleAsync(scope, trader, "manual", ct);
+
+            // 手动平仓没有 AI 阶段：直接装配执行员写工具（与 ToolRegistry 同一件装配口径）。
+            var stageRunId = Ids.NewUlid();
+            var audit = new ToolAuditor(cycle.Db, hub, cycle.Context.Budget, cycle.Context.CycleId, stageRunId,
+                cycle.Context.SseChannel);
+            var tools = new ExecutionTools(cycle.Db, cycle.Context.ForStage(stageRunId), cycle.Sources.Accounts,
+                cycle.Sources.Gateway, cycle.Market, hub, audit);
+            try
+            {
+                var result = await tools.ClosePositionAsync(null, request.Symbol, quantity, request.OrderType,
+                    price, request.Reason, ct);
+                await cycle.Recorder.CompleteCycleAsync(cycle.Context, "completed",
+                    result.Ok ? null : ExecutionErrorsCode,
+                    result.Ok ? null : result.Error?.Message, CancellationToken.None);
+            }
+            finally
+            {
+                // 终态守卫（与定时周期同一口径，LC-STD-01 §11.2）：写工具取消或抛错都不允许把周期留在
+                // running；CompleteCycleAsync 幂等，正常完成路径这里是空操作。
+                if (!cycle.Recorder.IsTerminal)
+                {
+                    var aborted = ct.IsCancellationRequested;
+                    await cycle.Recorder.CompleteCycleAsync(cycle.Context,
+                        aborted ? "aborted" : "failed",
+                        aborted ? CancelledByUserCode : InternalErrorCode,
+                        aborted ? "用户停止，手动平仓已中止" : "手动平仓异常，本周期已按失败安全终止",
+                        CancellationToken.None);
+                }
+            }
+
+            return cycle.Context.CycleId;
         }
         finally
         {
-            // 终态守卫（与定时周期同一口径，LC-STD-01 §11.2）：写工具取消或抛错都不允许把周期留在
-            // running；CompleteCycleAsync 幂等，正常完成路径这里是空操作。
-            if (!cycle.Recorder.IsTerminal)
-            {
-                var aborted = ct.IsCancellationRequested;
-                await cycle.Recorder.CompleteCycleAsync(cycle.Context,
-                    aborted ? "aborted" : "failed",
-                    aborted ? CancelledByUserCode : InternalErrorCode,
-                    aborted ? "用户停止，手动平仓已中止" : "手动平仓异常，本周期已按失败安全终止",
-                    CancellationToken.None);
-            }
+            gate.Release();
         }
-
-        return cycle.Context.CycleId;
     }
 
     /// <summary>
@@ -270,8 +299,9 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
             new ExecutionGateway(account, trading, trader.IsCrossMargin));
     }
 
-    private async Task RunLoopAsync(int traderId, CancellationToken ct)
+    private async Task RunLoopAsync(int traderId, CancellationTokenSource cts)
     {
+        var ct = cts.Token;
         while (!ct.IsCancellationRequested)
         {
             var intervalMinutes = MinIntervalMinutes;
@@ -313,7 +343,14 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
             }
         }
 
-        _loops.TryRemove(traderId, out _);
+        // 身份感知移除：只摘除本循环自己的 (traderId, cts) 条目。Stop+Start（Restart）后字典里
+        // 可能已换成新循环的 CTS——无条件 TryRemove 会误摘新条目，让新循环失控且其 CTS 无人释放。
+        // CTS 的释放归「移除并持有它」的路径（Stop 移除即取消并释放）；这里只清归属该循环的中止码。
+        if (((ICollection<KeyValuePair<int, CancellationTokenSource>>)_loops)
+                .Remove(new KeyValuePair<int, CancellationTokenSource>(traderId, cts)))
+        {
+            _abortReasons.TryRemove(traderId, out _);
+        }
     }
 
     private async Task<string> RunScheduledCycleAsync(Trader trader, CancellationToken ct)

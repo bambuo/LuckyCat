@@ -20,8 +20,8 @@ namespace LuckyCat.Services;
 /// <para>
 /// 三条硬约束：
 /// ① 阶段行的 Id 复用执行器的 <c>StageRunId</c>，与 ToolAuditor 落的 ToolInvocation.stageRunId 同源；
-/// ② 终态写入是幂等的——第一个终态（正常周期由 Finalizer 写入）之后任何再次调用都是空操作，
-///    因此宿主的 <c>finally</c> 守卫既能兜底「绝不留下 running」，又不会覆盖或重复计数终态；
+/// ② 终态写入是幂等的——幂等位只在终态落库成功后置位，置位后任何再次调用都是空操作，
+///    因此宿主的 <c>finally</c> 守卫既能兜底「绝不留下 running」（落库抛错时可重试），又不会覆盖或重复计数终态；
 /// ③ 落库与推送一律使用 <see cref="CancellationToken.None"/>：取消/超时到达时审计必须仍然写完
 ///    （与写工具订单落库同一口径），且只写稳定错误码 + 中文摘要，绝不写上游原始异常文本。
 /// </para>
@@ -44,6 +44,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
     private string? _channelKey;
     private string? _proposalId;
     private bool _terminal;
+    private bool _terminalEventPublished;
     private int _inputTokens;
     private int _outputTokens;
     private long _startedTimestamp;
@@ -197,15 +198,16 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
     }
 
     /// <summary>
-    /// 写入周期终态（幂等）。已写入过终态时直接返回，因此 Finalizer 的结果不会被宿主的
-    /// <c>finally</c> 守卫覆盖，也不会重复推送 cycle 事件（LC-STD-01 §11.2）。
+    /// 写入周期终态（幂等）。幂等位只在终态<strong>落库成功</strong>后置位：瞬时 DB 故障让本次写入抛错时
+    /// <see cref="IsTerminal"/> 仍为 false，宿主的 <c>finally</c> 守卫得以重试终态写入（LC-STD-01 §11.2
+    /// 「不会留下 running」）。重复 <c>cycle</c> SSE 由独立发布位防重：落库已成功、只是发布前中断的
+    /// 重试路径不会为同一终态补发第二个 cycle 事件；终态行是原地更新，重试也不会重复插行。
     /// </summary>
     public async Task CompleteCycleAsync(TradingCycleContext ctx, string status, string? errorCode, string? error,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(ctx);
         if (_cycle is null || _terminal) return;
-        _terminal = true;
 
         _cycle.Status = status;
         _cycle.ErrorCode = Truncate(errorCode, 64);
@@ -215,8 +217,11 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
         _cycle.InputTokens = _inputTokens;
         _cycle.OutputTokens = _outputTokens;
         await db.SaveChangesAsync(CancellationToken.None);
+        _terminal = true;
 
         if (ctx.Trigger != "test") await TouchTraderAsync(ctx.Trader.Id, status);
+        if (_terminalEventPublished) return;
+        _terminalEventPublished = true;
         hub.Publish(_channelKey!, new SseEvent("cycle", CompletedPayload()));
     }
 
