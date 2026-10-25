@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using LuckyCat.Agents;
 using LuckyCat.Contracts;
+using LuckyCat.Memory;
 using LuckyCat.Services;
 using LuckyCat.Tools;
 using Microsoft.Agents.AI;
@@ -36,8 +37,10 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
                 null, null, null, null, "输入 token 预算已达上限，本周期观望", null, null));
         }
 
+        // 记忆与经验只注入交易员（LC-STD-04 §2 块 6）：读取器取本周期装配位的 ctx.Accounts，
+        // 试运行的 includeMemory 门禁已在该装配位短路；开关关闭时提供器不读库也不注入。
         var agent = factory.Create(client, AgentRole.Trader, ctx.Config,
-            tools.For(AgentRole.Trader, StageRunId), null);
+            tools.For(AgentRole.Trader, StageRunId), [new TradingMemoryContextProvider(ctx.Accounts, ctx.Config)]);
         var prompt = await PromptLibrary.BuildTraderUserPrompt(ctx, input.Brief, ct);
         // 阶段超时（LC-STD-01 §6）：超时按 CancellationToken 传播到模型与工具循环，阶段按失败处理。
         using var stageTimeout = ctx.StageTimeout(ct, Stage);
