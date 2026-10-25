@@ -481,6 +481,7 @@ public static class PromptLibrary
             close：symbol 必填，开仓数值字段为 null；只处理现有持仓，不得反手。
             hold：价格/仓位/杠杆为 null，invalidation 写完整可验证的触发条件。
             数值必须为 JSON number；pct 字段 1 表示 1%，不是 0.01。
+            confidence 是 0–1 的小数（0.76 表示 76%），不要写 0–100；hold 时也按 0–1 给出当前判断把握。
             """,
         AgentRole.Risk => """
             只输出一个 JSON 对象（camelCase），不要输出 JSON 以外的任何内容：

@@ -143,6 +143,23 @@ public class TradingWorkflowTests
     // —— 越界枚举契约校验（fail-closed，LC-STD-01 §4.1 第 3 步）——
 
     [Fact]
+    public async Task Out_of_range_confidence_fails_closed_after_one_retry()
+    {
+        // 实测模型会把 confidence 写成 0–100（如 76.0），契约是 0–1；下游按 ×100 使用，
+        // 越界必须在交易员阶段拦下：FLOW-07 重试一次后仍非法 → fail-closed，不进入风控。
+        var run = await RunAsync(BriefWithCandidates, OpenProposal with { Confidence = 76m });
+
+        Assert.Equal("failed", run.Ctx.Outcome!.Status);
+        Assert.Equal("stage_contract_violation", run.Ctx.Outcome!.ErrorCode);
+        Assert.DoesNotContain("risk", run.Recorder.Stages);
+        Assert.Equal(2, run.Recorder.StageAttempts[^1]);
+        var proposalRecord = run.Recorder.StageRecords.Single(r => r.Role == "trader");
+        var safe = Assert.IsType<ProposalMessage>(proposalRecord.Output).Proposal;
+        Assert.Equal(ProposalAction.Hold, safe.Action);
+        Assert.Null(safe.Confidence);
+    }
+
+    [Fact]
     public async Task Out_of_range_proposal_action_fails_closed_via_finalizer()
     {
         // 越界动作被 JsonStringEnumConverter 原样反序列化；risk/executor 装 ForbiddenClient，
@@ -398,6 +415,7 @@ public class TradingWorkflowTests
     {
         public List<string> Stages { get; } = [];
         public List<(string Role, object Output, string Instructions)> StageRecords { get; } = [];
+        public List<int> StageAttempts { get; } = [];
         public List<(string Status, string? ErrorCode, string? Error)> Completions { get; } = [];
 
         public Task RecordStageAsync(string role, string stageRunId, object output, string instructions,
@@ -405,6 +423,7 @@ public class TradingWorkflowTests
         {
             Stages.Add(role);
             StageRecords.Add((role, output, instructions));
+            StageAttempts.Add(attempt);
             return Task.CompletedTask;
         }
 

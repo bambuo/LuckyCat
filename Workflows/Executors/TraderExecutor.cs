@@ -58,8 +58,8 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
         }
 
         // FLOW-07（LC-STD-05）：交易员契约失败先重试 1 次——同一提示词、同一阶段超时窗口内再跑一轮
-        // （不新起阶段，模型调用消耗仍归本阶段预算）；重试得到合法动作则照常继续。
-        if (result is null || !Enum.IsDefined(result.Output.Action))
+        // （不新起阶段，模型调用消耗仍归本阶段预算）；重试得到合法输出则照常继续。
+        if (result is null || !IsContractValid(result.Output))
         {
             attempt = 2;
             result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
@@ -69,13 +69,14 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
         var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
         // 契约校验（LC-STD-01 §4.1 第 3 步）：System.Text.Json 会原样接受越界枚举值，
-        // 未定义动作匹配不到任何出边会让周期中途死路；重试后仍越界才 fail-closed，
+        // 未定义动作匹配不到任何出边会让周期中途死路；重试后仍非法才 fail-closed，
         // 归一化为 Hold 走收尾边，绝不放行未路由的越界提案（Hold=0 是有意的安全零值，属合法动作，只有越界值非法）。
-        if (!Enum.IsDefined(proposal.Action))
+        // confidence 同样校契约：约定 0–1，模型写成 0–100（如 76.0）会让下游 ×100 后变成 7600。
+        if (!IsContractValid(proposal))
         {
             ctx.SetOutcome(new CycleOutcome("failed", "stage_contract_violation",
-                "交易员提案动作越界（重试 1 次仍失败），本周期已按失败安全终止"));
-            var safe = proposal with { Action = ProposalAction.Hold };
+                "交易员提案字段越界（动作未定义或 confidence 不在 0–1，重试 1 次仍失败），本周期已按失败安全终止"));
+            var safe = proposal with { Action = ProposalAction.Hold, Confidence = null };
             ctx.Observe(safe);
             await ctx.Recorder.RecordStageAsync(Stage, StageRunId, new ProposalMessage(safe),
                 PromptLibrary.Build(AgentRole.Trader, ctx.Config), stats, attempt, ct);
@@ -93,4 +94,12 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
 
         return new ProposalMessage(proposal);
     }
+
+    /// <summary>
+    /// 交易员输出的契约判据：动作必须是已定义枚举，confidence 为空或落在 0–1 区间。
+    /// （0–100 口径实测出现过；下游按 ×100 使用，越界值必须在这里拦下。）
+    /// </summary>
+    private static bool IsContractValid(AgentTradeProposal proposal) =>
+        Enum.IsDefined(proposal.Action)
+        && proposal.Confidence is null or >= 0m and <= 1m;
 }
