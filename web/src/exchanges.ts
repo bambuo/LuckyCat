@@ -12,12 +12,12 @@ export interface ExchangePreset {
 }
 
 export const EXCHANGE_PRESETS: ExchangePreset[] = [
-  { key: 'Binance', label: 'Binance', needsPassphrase: false, needsUserId: false, icon: '/icons/binance.svg', inviteUrl: 'https://www.bsmkweb.cc/register?ref=1185731486' },
-  { key: 'Bybit', label: 'Bybit', needsPassphrase: false, needsUserId: false, icon: '/icons/bybit.ico', inviteUrl: 'https://www.bybit.com/invite?ref=8PRZONB&medium=referral&utm_campaign=evergreen&share_to=link' },
-  { key: 'OKX', label: 'OKX', needsPassphrase: true, needsUserId: false, icon: '/icons/okx.svg', inviteUrl: 'https://www.mitnpkwxvfr.com/join/M66WIHRC' },
-  { key: 'Bitget', label: 'Bitget', needsPassphrase: true, needsUserId: false, icon: '/icons/bitget.ico', inviteUrl: 'https://share.glassgs.com/u/259SF9AM?clacCode=D9PR4GVV' },
-  { key: 'GateIo', label: 'Gate.io', needsPassphrase: false, needsUserId: true, icon: '/icons/gateio.ico', inviteUrl: 'https://www.gate.com/zh/referral/earn-together/invite/VFZHBGPEAQ?ref=VFZHBGPEAQ&ref_type=103&utm_cmp=rXJBDjtJ&activity_id=1790170412453' },
-  { key: 'Kucoin', label: 'KuCoin', needsPassphrase: true, needsUserId: false, icon: '/icons/kucoin.svg', inviteUrl: 'https://www.kucoin.com/r/rf/CXEJ81WK' },
+  { key: 'binance', label: 'Binance', needsPassphrase: false, needsUserId: false, icon: '/icons/binance.svg', inviteUrl: 'https://www.bsmkweb.cc/register?ref=1185731486' },
+  { key: 'bybit', label: 'Bybit', needsPassphrase: false, needsUserId: false, icon: '/icons/bybit.ico', inviteUrl: 'https://www.bybit.com/invite?ref=8PRZONB&medium=referral&utm_campaign=evergreen&share_to=link' },
+  { key: 'okx', label: 'OKX', needsPassphrase: true, needsUserId: false, icon: '/icons/okx.svg', inviteUrl: 'https://www.mitnpkwxvfr.com/join/M66WIHRC' },
+  { key: 'bitget', label: 'Bitget', needsPassphrase: true, needsUserId: false, icon: '/icons/bitget.ico', inviteUrl: 'https://share.glassgs.com/u/259SF9AM?clacCode=D9PR4GVV' },
+  { key: 'gateIo', label: 'Gate.io', needsPassphrase: false, needsUserId: true, icon: '/icons/gateio.ico', inviteUrl: 'https://www.gate.com/zh/referral/earn-together/invite/VFZHBGPEAQ?ref=VFZHBGPEAQ&ref_type=103&utm_cmp=rXJBDjtJ&activity_id=1790170412453' },
+  { key: 'kucoin', label: 'KuCoin', needsPassphrase: true, needsUserId: false, icon: '/icons/kucoin.svg', inviteUrl: 'https://www.kucoin.com/r/rf/CXEJ81WK' },
 ]
 
 export function getExchangePreset(key: ExchangeType): ExchangePreset | undefined {

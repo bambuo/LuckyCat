@@ -1,4 +1,5 @@
-export type ProviderType = 'OpenAICompatible' | 'AzureOpenAI' | 'Ollama'
+// 后端以 camelCase 枚举字符串序列化（Contracts/ApiJson.cs：JsonStringEnumConverter(CamelCase)）。
+export type ProviderType = 'openAICompatible' | 'azureOpenAI' | 'ollama'
 
 export type ThinkingMode = 'default' | 'on' | 'off'
 
@@ -49,12 +50,12 @@ export interface VerifyEvent {
 }
 
 export const PROVIDER_TYPE_LABELS: Record<ProviderType, string> = {
-  OpenAICompatible: 'OpenAI 兼容',
-  AzureOpenAI: 'Azure OpenAI',
-  Ollama: 'Ollama',
+  openAICompatible: 'OpenAI 兼容',
+  azureOpenAI: 'Azure OpenAI',
+  ollama: 'Ollama',
 }
 
-export type ExchangeType = 'Binance' | 'Bybit' | 'OKX' | 'Bitget' | 'GateIo' | 'Kucoin'
+export type ExchangeType = 'binance' | 'bybit' | 'okx' | 'bitget' | 'gateIo' | 'kucoin'
 
 export interface ExchangeAccount {
   id: number
