@@ -924,6 +924,32 @@ public class ExchangeTradingService
         }
     }
 
+    /// <summary>撤单（共享能力 ICancelFuturesOrder）：只撤指定标的的指定订单；能力不可用时如实返回失败。</summary>
+    public static async Task<(bool Ok, string? Error)> CancelOrderAsync(
+        ExchangeAccount account, SharedSymbol symbol, string orderId, CancellationToken ct)
+    {
+        try
+        {
+            var client = ExchangeClientFactory.Get(account);
+            var capability = client.GetCapability<ICancelFuturesOrder>(
+                ExchangeClientFactory.Name(account.ExchangeType), TradingMode.PerpetualLinear);
+            if (capability?.Capability is null) return (false, "交易所不支持撤单");
+
+            var result = await capability.Capability
+                .CancelFuturesOrderAsync(new CancelOrderRequest(symbol, orderId, ExchangeClientFactory.Parameters(account)), ct)
+                .ConfigureAwait(false);
+            return result.Success ? (true, null) : (false, result.Error?.Message ?? "撤单失败");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return (false, "撤单超时");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
     // —— USDT 永续目录（下单定量与原生名反解用；10 分钟缓存）——
 
     private static readonly ConcurrentDictionary<string, (DateTime At, IReadOnlyList<SharedFuturesSymbol> Value)> CatalogCache = new();
