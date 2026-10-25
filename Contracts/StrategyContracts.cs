@@ -48,6 +48,18 @@ public record StrategyTestRequest(
     int ProviderId,
     int? StrategyId = null);
 
+/// <summary>
+/// 新版 test-run 请求（LC-STD-03 §3.3）：SSE 演练完整工作流。
+/// testEquity 省略时默认 "10000"（字符串金额，§1.1）；includeMemory 默认 true；
+/// accountId 为契约预留字段——B 组实现只支持合成账户演练，非 null 一律 400 拒绝（见 task-14 报告）。
+/// </summary>
+public record StrategyRunTestRequest(
+    int StrategyId,
+    int ProviderId,
+    int? AccountId = null,
+    string? TestEquity = null,
+    bool IncludeMemory = true);
+
 public record StrategyTestResultDto(
     long ElapsedMs,
     string UserPrompt,

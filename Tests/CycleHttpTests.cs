@@ -523,6 +523,114 @@ public class CycleHttpTests
             HttpStatusCode.NotFound, "not_found");
     }
 
+    // —— 新版 test-run（R-14-8 / API-06 / API-09）——
+
+    [Fact]
+    public async Task Test_run_returns_422_when_provider_capability_missing()
+    {
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host, providerVerified: false);
+
+        var response = await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 1 }, ApiJson.Options);
+        await AssertErrorAsync(response, HttpStatusCode.UnprocessableEntity, "provider_capability_missing");
+        Assert.Equal(0, await host.CountCyclesAsync());
+    }
+
+    [Fact]
+    public async Task Test_run_streams_the_contracted_events_never_trades_and_persists_a_test_cycle()
+    {
+        await using var host = await TestApp.StartAsync(executorBehavior: "order");
+        await SeedAsync(host);
+
+        var response = await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 1, includeMemory = false }, ApiJson.Options);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        var sse = await response.Content.ReadAsStringAsync();
+
+        var frames = ParseSse(sse);
+        var names = frames.Select(f => f.Name).ToList();
+        Assert.Equal("state", names[0]); // 连接建立即发 state（§4.2 触发列）
+        Assert.Equal(2, names.Count(n => n == "cycle")); // 开始 + 终态
+        Assert.Contains("stage", names);
+        Assert.Contains("proposal", names);
+        Assert.Contains("verdict", names);
+        // R-14-3：tool 在透传集内；order 因归属硬闸 fail-closed 永不出现（API-06），拒绝必须可读。
+        var tool = frames.First(f => f.Name == "tool");
+        Assert.False(tool.Data.GetProperty("success").GetBoolean());
+        Assert.Equal("proposal_not_found", tool.Data.GetProperty("errorCode").GetString());
+        Assert.Contains("周期归属不匹配", tool.Data.GetProperty("error").GetString());
+        Assert.DoesNotContain("event: order", sse);
+
+        // 合成账户：includeMemory=false 时记忆完全不读库；写网关零调用；权益为默认 10000。
+        Assert.Equal(0, host.AccountReader.DecisionMemoryCalls);
+        Assert.Equal(0, host.Gateway.PlaceCallCount);
+        Assert.Equal(0, host.Gateway.CloseCallCount);
+        Assert.Contains("权益 10000 USDT", host.Chat.PromptFor("trader"));
+
+        using var scope = host.App.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var cycle = await db.TradingCycles.AsNoTracking().SingleAsync();
+        Assert.Equal("test", cycle.Trigger);
+        Assert.Equal("dry", cycle.Mode);
+        Assert.Null(cycle.TraderId);
+        Assert.Null(cycle.ExchangeAccountId);
+        Assert.Equal(1, cycle.ProviderId);
+        Assert.Equal("completed", cycle.Status);
+
+        // 周期事件 traderId 一律 null（§3.3）。
+        var cycleFrame = frames.First(f => f.Name == "cycle");
+        Assert.Equal(JsonValueKind.Null, cycleFrame.Data.GetProperty("traderId").ValueKind);
+    }
+
+    [Fact]
+    public async Task Test_run_rejects_bad_equity_string_real_account_and_legacy_shape_with_400()
+    {
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 1, testEquity = "abc" }, ApiJson.Options),
+            HttpStatusCode.BadRequest, "validation_failed");
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 1, testEquity = "-5" }, ApiJson.Options),
+            HttpStatusCode.BadRequest, "validation_failed");
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 1, accountId = 1 }, ApiJson.Options),
+            HttpStatusCode.BadRequest, "validation_failed");
+        // 旧形状（config 内联 + 无 strategyId 必填语义）在新契约下被绑定/字段校验拒绝。
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { config = new StrategyConfig(), providerId = 1, strategyId = 1 }, ApiJson.Options),
+            HttpStatusCode.BadRequest, "validation_failed");
+        Assert.Equal(0, await host.CountCyclesAsync());
+    }
+
+    [Fact]
+    public async Task Test_run_unknown_resources_return_wrapped_404()
+    {
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 99, providerId = 1 }, ApiJson.Options), HttpStatusCode.NotFound, "not_found");
+        await AssertErrorAsync(await host.Client.PostAsJsonAsync("/api/strategies/test-run",
+            new { strategyId = 1, providerId = 99 }, ApiJson.Options), HttpStatusCode.NotFound, "not_found");
+    }
+
+    [Fact]
+    public async Task Legacy_preview_prompt_is_deleted()
+    {
+        await using var host = await TestApp.StartAsync();
+        // 旧单数 /preview-prompt 已被 /preview-prompts 取代（R-14-8）：端点不再存在——
+        // 必须既非 2xx、也不再返回旧 PromptPreviewDto（systemPrompt 裸对象）。
+        var response = await host.Client.PostAsJsonAsync("/api/strategies/preview-prompt",
+            new { config = new StrategyConfig() }, ApiJson.Options);
+        Assert.False(response.IsSuccessStatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("systemPrompt", body, StringComparison.Ordinal);
+    }
+
     // —— 宿主与辅助 ——
 
     private sealed record SseFrame(string Name, JsonElement Data);

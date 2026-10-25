@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using LuckyCat.Agents;
@@ -140,59 +141,111 @@ public static class StrategiesEndpoints
                 : ApiResults.Ok(new StrategyValidationDto(true, []));
         });
 
-        // —— 以下为旧前端端点（P7 前保留原形状）：/preview-prompt 与 /test-run（旧 JSON 演练，
-        // 走 StrategyTestRunner 单模型调用，不创建 TradingCycle、无 SSE、无能力校验）。
-        // Task 14 B 组将以 PromptLibrary 版 test-run（SSE + 周期落库 + provider 能力闸）替换 /test-run。——
-        group.MapPost("/preview-prompt", async (
-            PromptPreviewRequest request,
-            CoinRankingService ranking,
-            CancellationToken ct) =>
-        {
-            var error = ValidateConfig(request.Config);
-            if (error is not null) return Results.BadRequest(new { message = error });
-
-            // 币种来源（评分榜 / OI 榜 / 混合）真实解析后进入提示词；拉取失败回退为通用描述
-            var coinSources = await ranking.ResolveAsync(request.Config!, ct);
-            return Results.Ok(PromptComposer.Compose(request.Config!, coinSources is null
-                ? null
-                : new CoinSourceTexts(coinSources.ScoreDisplay, coinSources.OiTopDisplay, coinSources.OiLowDisplay, coinSources.MergedDisplay)));
-        });
-
+        // 试运行（LC-STD-03 §3.3，R-14-8 替换旧单发演练）：真实图、SSE 事件集、trigger=test、
+        // mode=dry、合成账户（SyntheticAccountReader：委托风控策略/纪律，不伪造数值），
+        // 周期 traderId/exchangeAccountId 落 null。能力闸 422（API-09）；order 事件因写工具
+        // 周期归属硬闸 fail-closed 永不出现（API-06），tool 帧带 errorCode + 中文摘要供 UI 呈现拒绝。
+        // 旧 /preview-prompt（单数）与旧 JSON 演练 /test-run 已删除——前端同步迁移（Task 15-17，
+        // 计划内中间断裂，见 task-14 报告）。
         group.MapPost("/test-run", async (
-            StrategyTestRequest request,
+            StrategyRunTestRequest request,
             AppDbContext db,
-            StrategyTestRunner runner,
-            DecisionMemoryService memory,
+            TradingCycleRunner runner,
+            HttpContext http,
             CancellationToken ct) =>
         {
-            var error = ValidateConfig(request.Config);
-            if (error is not null) return Results.BadRequest(new { message = error });
-
+            var strategy = await db.Strategies.FindAsync(new object[] { request.StrategyId }, ct);
+            if (strategy is null) return ApiResults.Fail("not_found", "策略不存在", 404);
             var provider = await db.Providers.FindAsync(new object[] { request.ProviderId }, ct);
-            if (provider is null) return Results.NotFound();
+            if (provider is null) return ApiResults.Fail("not_found", "提供商不存在", 404);
 
-            // 未知策略不读不记（避免产生孤立记录）
-            int? strategyId = request.StrategyId;
-            if (strategyId is int sid && !await db.Strategies.AnyAsync(s => s.Id == sid, ct))
+            // API-09：未通过工具调用验证（或被编辑重置）的提供商不得试运行。
+            if (provider.ToolCallingSupported != true || provider.ToolCallingVerifiedAt is null)
             {
-                strategyId = null;
+                return ApiResults.Fail("provider_capability_missing",
+                    "该提供商未通过工具调用验证，请先完成验证再试运行", 422);
             }
 
-            // 历史决策记忆：加载该策略最近记录（是否注入由策略开关决定，见 StrategyTestRunner）
-            var history = strategyId is int loadId ? await memory.LoadRecentAsync(loadId, ct, fingerprint: PromptComposer.MemoryFingerprint(request.Config!)) : [];
-
-            var result = await runner.RunAsync(provider, request.Config!, history, ct);
-
-            // 记录落库：每轮都保存提示词、原始响应与失败阶段（「历史决策记忆」开关仅控制注入，关闭时仍持续积累）
-            if (strategyId is int recordId)
+            // accountId 为契约预留：B 组实现只支持合成账户演练（R-14-8，见 task-14 报告）。
+            if (request.AccountId is not null)
             {
-                await memory.RecordRoundAsync(recordId, null, provider, result, PromptComposer.MemoryFingerprint(request.Config!), ct);
+                return ApiResults.Fail("validation_failed",
+                    "试运行仅支持合成账户（accountId 必须为空）", 400);
             }
 
-            return Results.Ok(result);
+            var equityText = string.IsNullOrWhiteSpace(request.TestEquity) ? "10000" : request.TestEquity;
+            if (!decimal.TryParse(equityText, NumberStyles.Number, CultureInfo.InvariantCulture, out var testEquity)
+                || testEquity <= 0)
+            {
+                return ApiResults.Fail("validation_failed", "testEquity 必须是大于 0 的数字字符串", 400);
+            }
+
+            http.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>()?.DisableBuffering();
+            http.Response.Headers.ContentType = "text/event-stream";
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers["X-Accel-Buffering"] = "no";
+
+            // state 种子帧（§4.2 触发列「连接建立」；试运行的 isRunning 指本次演练）。
+            var writeLock = new SemaphoreSlim(1, 1);
+            await WriteTestFrameAsync(http, writeLock, "state",
+                new TraderStateEvent(true, null, null), ct);
+
+            // 心跳：静默期每 15 秒一帧（§4.1），与事件写共用串行闸。
+            using var pingTimer = new System.Timers.Timer(15_000);
+            pingTimer.AutoReset = true;
+            pingTimer.Elapsed += async (_, _) =>
+            {
+                try
+                {
+                    await WriteTestFrameAsync(http, writeLock, "ping", new { at = DateTime.UtcNow },
+                        CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Api] test-run 心跳写入失败（连接可能已断开）：{ex.GetType().Name}");
+                }
+            };
+            pingTimer.Start();
+
+            await runner.RunTestAsync(provider, strategy, testEquity, request.IncludeMemory,
+                async evt =>
+                {
+                    await writeLock.WaitAsync(CancellationToken.None);
+                    try
+                    {
+                        await http.Response.WriteAsync($"event: {evt.Name}\ndata: " +
+                            $"{JsonSerializer.Serialize(evt.Payload, FrameJson)}\n\n", ct);
+                        await http.Response.Body.FlushAsync(ct);
+                    }
+                    finally
+                    {
+                        writeLock.Release();
+                    }
+                }, ct);
+            pingTimer.Stop();
+
+            return Results.Empty;
         });
 
         return group;
+    }
+
+    private static readonly JsonSerializerOptions FrameJson = new(JsonSerializerDefaults.Web);
+
+    private static async Task WriteTestFrameAsync(HttpContext http, SemaphoreSlim writeLock,
+        string name, object payload, CancellationToken ct)
+    {
+        await writeLock.WaitAsync(ct);
+        try
+        {
+            await http.Response.WriteAsync($"event: {name}\ndata: " +
+                $"{JsonSerializer.Serialize(payload, FrameJson)}\n\n", ct);
+            await http.Response.Body.FlushAsync(ct);
+        }
+        finally
+        {
+            writeLock.Release();
+        }
     }
 
     private static string? Validate(StrategyUpsertRequest request) =>
