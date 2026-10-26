@@ -40,23 +40,23 @@
 
   <text x="64" y="326" font-size="12" font-weight="700" fill="#7c3aed">后台服务</text>
   <rect x="64" y="334" width="208" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
-  <text x="168" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">TraderRunnerService · 决策循环</text>
+  <text x="168" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">TradingCycleRunner · 周期调度</text>
   <rect x="282" y="334" width="232" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
-  <text x="398" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">PositionHistorySyncService · 仓位同步</text>
+  <text x="398" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">ReviewScheduler · 复盘调度</text>
   <rect x="524" y="334" width="228" height="30" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
-  <text x="638" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">AccountStreamService · 账户实时流</text>
+  <text x="638" y="353" font-size="11.5" fill="#6d28d9" text-anchor="middle">持仓同步 · 账户实时流 · 明细清理</text>
 
   <text x="64" y="400" font-size="12" font-weight="700" fill="#7c3aed">决策与交易能力</text>
   <rect x="64" y="408" width="146" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
   <text x="137" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">行情快照 · 指标计算</text>
   <rect x="220" y="408" width="94" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-  <text x="267" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">提示词组装</text>
+  <text x="267" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">多智能体工作流</text>
   <rect x="324" y="408" width="80" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-  <text x="364" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">决策记忆</text>
+  <text x="364" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">记忆与经验</text>
   <rect x="414" y="408" width="80" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
   <text x="454" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">风控政策</text>
   <rect x="504" y="408" width="126" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-  <text x="567" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">交易执行 · 保护单</text>
+  <text x="567" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">写工具硬闸</text>
   <rect x="640" y="408" width="112" height="28" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
   <text x="696" y="426" font-size="11.5" fill="#4338ca" text-anchor="middle">净值与账户</text>
 
@@ -70,15 +70,16 @@
   <text x="856" y="243" font-size="11.5" fill="#b45309">luckycat.db · 首次运行自动建库</text>
   <text x="856" y="267" font-size="11.5" fill="#b45309">Providers · ExchangeAccounts</text>
   <text x="856" y="291" font-size="11.5" fill="#b45309">Strategies · Traders</text>
-  <text x="856" y="315" font-size="11.5" fill="#b45309">DecisionRecords · TraderOrders</text>
-  <text x="856" y="339" font-size="11.5" fill="#b45309">仓位快照与历史 · 净值采样</text>
+  <text x="856" y="315" font-size="11.5" fill="#b45309">TradingCycles · AgentStageRuns</text>
+  <text x="856" y="339" font-size="11.5" fill="#b45309">ToolInvocations · TradeProposals</text>
+  <text x="856" y="363" font-size="10.5" fill="#b45309">RiskVerdicts · TraderOrders · TraderLessons</text>
 
   <!-- 可观测性 -->
   <rect x="832" y="388" width="308" height="252" rx="12" fill="#f0fdf4" stroke="#86efac"/>
   <text x="856" y="417" font-size="14" font-weight="700" fill="#166534">可观测性 · OpenTelemetry</text>
-  <text x="856" y="443" font-size="11.5" fill="#15803d">Trace：trader.cycle / ai.call /</text>
-  <text x="856" y="460" font-size="11.5" fill="#15803d">exchange.fetch（含 GenAI 语义约定）</text>
-  <text x="856" y="484" font-size="11.5" fill="#15803d">Metrics：决策数 · AI 耗时 · token ·</text>
+  <text x="856" y="443" font-size="11.5" fill="#15803d">Trace：trader.cycle / agent.stage /</text>
+  <text x="856" y="460" font-size="11.5" fill="#15803d">tool.invoke / chat（含 GenAI 语义约定）</text>
+  <text x="856" y="484" font-size="11.5" fill="#15803d">Metrics：周期数 · 阶段耗时 · token ·</text>
   <text x="856" y="501" font-size="11.5" fill="#15803d">行情失败与重试</text>
   <text x="856" y="525" font-size="11.5" fill="#15803d">Logs：EF Core 仅告警及以上导出</text>
   <text x="856" y="549" font-size="11.5" fill="#15803d">导出端按环境变量启用：</text>
@@ -105,8 +106,8 @@
   <text x="325" y="624" font-size="11" fill="#475569">REST 下单 · WS 持仓与行情</text>
 
   <rect x="550" y="536" width="225" height="108" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="568" y="562" font-size="12.5" font-weight="700" fill="#0f172a">公开数据源</text>
-  <text x="568" y="586" font-size="11" fill="#475569">币种排行（成交额/波动评分）</text>
-  <text x="568" y="605" font-size="11" fill="#475569">持仓量 OI 变化榜</text>
-  <text x="568" y="624" font-size="11" fill="#475569">市场情绪与新闻</text>
+  <text x="568" y="562" font-size="12.5" font-weight="700" fill="#0f172a">新闻与公开数据</text>
+  <text x="568" y="586" font-size="11" fill="#475569">11 个内置新闻源（策略不配置自定义源）</text>
+  <text x="568" y="605" font-size="11" fill="#475569">币种排行（成交额/波动评分）</text>
+  <text x="568" y="624" font-size="11" fill="#475569">持仓量 OI 变化榜 · 财经日历</text>
 </svg>
