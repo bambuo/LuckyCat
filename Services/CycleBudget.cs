@@ -29,6 +29,16 @@ public sealed class CycleBudget(AgentBudgetConfig config) : ICycleBudget
 
     public const int ReviewToolLimit = 10;
 
+    /// <summary>按标的放大后的角色上限（绝不回缩：已经发生的调用不能被后续更小的估计卡死）。</summary>
+    private int _analystLimit = config.AnalystToolLimit;
+    private int _traderLimit = config.TraderToolLimit;
+
+    /// <summary>周期总量：取配置值与各阶段实际上限之和的较大者（角色额度才是真正的控制点）。</summary>
+    public int EffectiveCycleToolLimit { get; private set; } = config.CycleToolLimit;
+
+    /// <summary>候选标的数量放大上限：防止异常配置把预算放到失控。</summary>
+    public const int MaxScaledSymbols = 20;
+
     private readonly Dictionary<string, int> _toolsByRole = new(StringComparer.Ordinal);
 
     /// <summary>本周期已消耗的工具调用总数（含被拒绝的调用）。</summary>
@@ -63,13 +73,52 @@ public sealed class CycleBudget(AgentBudgetConfig config) : ICycleBudget
     /// <summary>该角色的工具上限；未列出的角色（除复盘员）只受周期总量约束。</summary>
     public int RoleToolLimit(string role) => role switch
     {
-        "analyst" => config.AnalystToolLimit,
-        "trader" => config.TraderToolLimit,
+        "analyst" => _analystLimit,
+        "trader" => _traderLimit,
         "risk" => config.RiskToolLimit,
         "executor" => config.ExecutorToolLimit,
         "reviewer" => ReviewToolLimit,
         _ => int.MaxValue,
     };
+
+    /// <summary>
+    /// 按标的数量放大分析师/交易员额度（LC-STD-01 §6）：<c>基础值 + 每标的增量 × (N−1)</c>，N 夹在 1..20；
+    /// 额度只增不减；周期总量随实际角色上限之和抬高。幂等，可多次调用（如先用配置估计、再用简报实际候选数修正）。
+    /// </summary>
+    public void ApplySymbolScaling(int symbolCount)
+    {
+        var count = Math.Clamp(symbolCount, 1, MaxScaledSymbols);
+        var extra = count - 1;
+        _analystLimit = Math.Max(_analystLimit, config.AnalystToolLimit + config.AnalystToolsPerSymbol * extra);
+        _traderLimit = Math.Max(_traderLimit, config.TraderToolLimit + config.TraderToolsPerSymbol * extra);
+        EffectiveCycleToolLimit = Math.Max(EffectiveCycleToolLimit,
+            _analystLimit + _traderLimit + config.RiskToolLimit + config.ExecutorToolLimit);
+    }
+
+    /// <summary>
+    /// 周期开始前的标的数量估计（按币源配置，不触网）：静态列表取条目数；评分/OI 榜取对应上限；
+    /// 混合模式取各启用来源的最大值；结果夹在 1..20。用于给分析师阶段一个合理起点。
+    /// </summary>
+    public static int EstimateSymbolCount(StrategyConfig config)
+    {
+        var source = config.CoinSource;
+        var count = source.SourceType switch
+        {
+            "static" => source.StaticCoins.Count,
+            "score" => source.ScoreLimit,
+            "oi_top" => source.OiTopLimit,
+            "oi_low" => source.OiLowLimit,
+            "mixed" => new[]
+            {
+                source.UseScore ? source.ScoreLimit : 0,
+                source.UseOiTop ? source.OiTopLimit : 0,
+                source.UseOiLow ? source.OiLowLimit : 0,
+                source.StaticCoins.Count,
+            }.Max(),
+            _ => 1,
+        };
+        return Math.Clamp(count, 1, MaxScaledSymbols);
+    }
 
     /// <summary>该角色已消耗的工具调用数。</summary>
     public int ToolCalls(string role) => _toolsByRole.GetValueOrDefault(role);
@@ -79,7 +128,7 @@ public sealed class CycleBudget(AgentBudgetConfig config) : ICycleBudget
     /// </summary>
     public bool TryConsumeTool(string role)
     {
-        if (TotalToolCalls >= config.CycleToolLimit || ToolCalls(role) >= RoleToolLimit(role))
+        if (TotalToolCalls >= EffectiveCycleToolLimit || ToolCalls(role) >= RoleToolLimit(role))
         {
             ToolRefusals++;
             return false;

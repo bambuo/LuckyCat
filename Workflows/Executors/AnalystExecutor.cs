@@ -45,6 +45,9 @@ public sealed class AnalystExecutor(TradingCycleContext ctx, TradingAgentFactory
         var brief = result.Output;
         var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 
+        // 分析师已拿到实际候选：按真实标的数抬高交易员/后续阶段额度（纯计数实现为空操作）。
+        ctx.Budget.ApplySymbolScaling(brief.Candidates.Count);
+
         ctx.Observe(brief);
         await ctx.Recorder.RecordStageAsync(Stage, StageRunId, brief,
             PromptLibrary.Build(AgentRole.Analyst, ctx.Config), stats, 1, ct);

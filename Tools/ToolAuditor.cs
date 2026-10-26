@@ -23,6 +23,11 @@ public interface ICycleBudget
     /// 后续阶段不再发起模型调用。默认不超限，保持纯计数实现的既有语义。
     /// </summary>
     bool IsInputTokenBudgetExceeded(Provider provider) => false;
+
+    /// <summary>
+    /// 按本轮标的数量放大各阶段工具额度（LC-STD-01 §6）：纯计数实现可忽略，生产实现按配置增量上调。
+    /// </summary>
+    void ApplySymbolScaling(int symbolCount) { }
 }
 
 /// <summary>

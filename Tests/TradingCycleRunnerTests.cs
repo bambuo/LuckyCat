@@ -149,6 +149,85 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Tool_budget_scales_with_symbol_count_and_never_shrinks()
+    {
+        var config = new AgentBudgetConfig();
+        var budget = new CycleBudget(config);
+        Assert.Equal(config.AnalystToolLimit, budget.RoleToolLimit("analyst"));
+
+        budget.ApplySymbolScaling(3);
+        var analyst = config.AnalystToolLimit + config.AnalystToolsPerSymbol * 2;
+        var trader = config.TraderToolLimit + config.TraderToolsPerSymbol * 2;
+        Assert.Equal(analyst, budget.RoleToolLimit("analyst"));
+        Assert.Equal(trader, budget.RoleToolLimit("trader"));
+        Assert.Equal(Math.Max(config.CycleToolLimit, analyst + trader + config.RiskToolLimit + config.ExecutorToolLimit),
+            budget.EffectiveCycleToolLimit);
+
+        // 更小的估计不得回缩已放大的额度（分析师已按更大额度消耗过调用）
+        budget.ApplySymbolScaling(1);
+        Assert.Equal(analyst, budget.RoleToolLimit("analyst"));
+        Assert.Equal(trader, budget.RoleToolLimit("trader"));
+
+        // 异常大的标的数按 20 封顶
+        budget.ApplySymbolScaling(500);
+        Assert.Equal(config.AnalystToolLimit + config.AnalystToolsPerSymbol * 19, budget.RoleToolLimit("analyst"));
+    }
+
+    [Fact]
+    public void Scaled_trader_limit_is_actually_enforced()
+    {
+        var config = new AgentBudgetConfig();
+        var budget = new CycleBudget(config);
+        budget.ApplySymbolScaling(3);
+        var limit = config.TraderToolLimit + config.TraderToolsPerSymbol * 2;
+
+        for (var i = 0; i < limit; i++) Assert.True(budget.TryConsumeTool("trader"));
+        Assert.False(budget.TryConsumeTool("trader"));
+        Assert.Equal(limit, budget.ToolCalls("trader"));
+    }
+
+    [Theory]
+    [InlineData("static", 3, 3)]
+    [InlineData("score", 25, 20)]
+    [InlineData("oi_top", 5, 5)]
+    [InlineData("oi_low", 2, 2)]
+    public void Symbol_count_estimate_follows_coin_source(string sourceType, int limit, int expected)
+    {
+        var config = new StrategyConfig
+        {
+            CoinSource = new CoinSourceConfig
+            {
+                SourceType = sourceType,
+                StaticCoins = ["BTC", "ETH", "SOL"],
+                ScoreLimit = limit,
+                OiTopLimit = limit,
+                OiLowLimit = limit,
+            },
+        };
+        Assert.Equal(expected, CycleBudget.EstimateSymbolCount(config));
+    }
+
+    [Fact]
+    public void Symbol_count_estimate_for_mixed_uses_the_largest_enabled_source()
+    {
+        var config = new StrategyConfig
+        {
+            CoinSource = new CoinSourceConfig
+            {
+                SourceType = "mixed",
+                StaticCoins = ["BTC", "ETH"],
+                UseScore = true,
+                ScoreLimit = 8,
+                UseOiTop = true,
+                OiTopLimit = 4,
+                UseOiLow = false,
+                OiLowLimit = 12,
+            },
+        };
+        Assert.Equal(8, CycleBudget.EstimateSymbolCount(config));
+    }
+
+    [Fact]
     public async Task Tool_budget_exhaustion_is_audited_and_never_throws()
     {
         await using var env = await RunnerEnv.CreateAsync();

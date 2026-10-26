@@ -130,6 +130,10 @@ public class AgentBudgetConfig
     public int CycleTimeoutSeconds { get; set; } = 300;
     public int AnalystToolLimit { get; set; } = 20;
     public int TraderToolLimit { get; set; } = 14;
+    /// <summary>每多一个候选标的，分析师阶段追加的工具额度（基础额度见 <see cref="AnalystToolLimit"/>）。</summary>
+    public int AnalystToolsPerSymbol { get; set; } = 4;
+    /// <summary>每多一个候选标的，交易员阶段追加的工具额度（基础额度见 <see cref="TraderToolLimit"/>）。</summary>
+    public int TraderToolsPerSymbol { get; set; } = 3;
     public int RiskToolLimit { get; set; } = 4;
     public int ExecutorToolLimit { get; set; } = 6;
     public int CycleToolLimit { get; set; } = 45;

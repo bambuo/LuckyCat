@@ -392,6 +392,10 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
 
         var market = new MarketDataCache(sources.MarketReader);
         var budget = new CycleBudget(config.AgentBudget);
+        // 工具额度随标的数量放大（LC-STD-01 §6）：先用币源配置估计，分析师拿到实际候选后再修正。
+        var estimatedSymbols = CycleBudget.EstimateSymbolCount(config);
+        budget.ApplySymbolScaling(estimatedSymbols);
+        Console.WriteLine($"[Cycle] 工具预算：标的估计 {estimatedSymbols} → 分析师 {budget.RoleToolLimit("analyst")} / 交易员 {budget.RoleToolLimit("trader")} / 周期 {budget.EffectiveCycleToolLimit}");
         var recorder = scope.ServiceProvider.GetRequiredService<CycleRecorder>();
         var context = new TradingCycleContext(
             cycleId: cycleId ?? Ids.NewUlid(),

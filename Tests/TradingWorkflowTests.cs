@@ -140,6 +140,16 @@ public class TradingWorkflowTests
         Assert.Equal(("completed", "execution_errors", run.Ctx.Outcome!.Error), run.Recorder.Completions.Single());
     }
 
+    [Fact]
+    public async Task Analyst_stage_applies_symbol_scaling_from_the_brief()
+    {
+        // 工具额度随候选数放大（LC-STD-01 §6）：分析师拿到实际候选后必须通知预算对象。
+        var run = await RunAsync(BriefWithCandidates, HoldProposal);
+
+        var budget = Assert.IsType<FakeBudget>(run.Ctx.Budget);
+        Assert.Contains(BriefWithCandidates.Candidates.Count, budget.Scalings);
+    }
+
     // —— 越界枚举契约校验（fail-closed，LC-STD-01 §4.1 第 3 步）——
 
     [Fact]
@@ -438,12 +448,15 @@ public class TradingWorkflowTests
     private sealed class FakeBudget : ICycleBudget
     {
         public int Consumed { get; private set; }
+        public List<int> Scalings { get; } = [];
 
         public bool TryConsumeTool(string role)
         {
             Consumed++;
             return true;
         }
+
+        public void ApplySymbolScaling(int symbolCount) => Scalings.Add(symbolCount);
     }
 
     // —— 假模型：固定返回一个结构化 JSON，不做工具调用 ——
