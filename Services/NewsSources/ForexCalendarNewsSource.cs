@@ -150,11 +150,16 @@ public sealed class ForexCalendarNewsSource(IHttpClientFactory httpClientFactory
             }
             if (parsed.Count == 0) return Failure("暂无财经事件");
 
+            // 前向日历：只保留尚未发生（含刚过去 30 分钟内的进行中事件）的 High/Medium 事件，
+            // 否则周五还会看到周一的非农，变成过期噪音。
+            var since = DateTimeOffset.UtcNow.AddMinutes(-30);
             var selected = parsed
+                .Where(entry => entry.At >= since)
                 .OrderBy(entry => entry.At)
                 .Take(maxItems)
                 .Select(entry => entry.Item)
                 .ToList();
+            if (selected.Count == 0) return Failure("本周暂无待发生的高影响事件");
             return new ExternalDataResult(Name, selected, null);
         }
     }

@@ -262,6 +262,7 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     [
       {"title": "Nonfarm Payrolls", "country": "USD", "date": "2026-10-30T08:30:00-04:00", "impact": "High", "forecast": "150K", "previous": "120K"},
       {"title": "CPI", "country": "EUR", "date": "2026-10-28T05:00:00-04:00", "impact": "Medium", "forecast": "", "previous": "2.1%"},
+      {"title": "Past FOMC", "country": "USD", "date": "2026-10-20T14:00:00-04:00", "impact": "High", "forecast": "", "previous": ""},
       {"title": "Low impact event", "country": "JPY", "date": "2026-10-27T20:00:00-04:00", "impact": "Low", "forecast": "", "previous": ""},
       {"title": "Holiday", "country": "NZD", "date": "2026-10-26T00:00:00-04:00", "impact": "Holiday", "forecast": "", "previous": ""}
     ]
@@ -481,6 +482,8 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         Assert.Equal("国家=USD 预期=150K 前值=120K（影响=High）", second.Text);
 
         Assert.DoesNotContain(result.Items, item => item.Title is "Low impact event" or "Holiday");
+        // 前向日历：本周已过去的高影响事件不再列出
+        Assert.DoesNotContain(result.Items, item => item.Title == "Past FOMC");
     }
 
     [Fact]
