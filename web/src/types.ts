@@ -267,7 +267,7 @@ export interface Trader {
   executionMode: TraderExecutionMode
   isCrossMargin: boolean
   scanIntervalMinutes: number
-  initialBalance: number | null
+  initialBalance: string | null
   startedAt: string | null
   lastCycleAt: string | null
   lastCycleStatus: string | null
@@ -282,7 +282,7 @@ export interface TraderUpsertRequest {
   strategyId: number
   isCrossMargin: boolean
   scanIntervalMinutes: number
-  initialBalance: number | null
+  initialBalance: string | null
   executionMode: TraderExecutionMode
 }
 
@@ -312,7 +312,7 @@ export interface DashboardTraderInfo {
   executionMode: TraderExecutionMode
   isCrossMargin: boolean
   scanIntervalMinutes: number
-  initialBalance: number | null
+  initialBalance: string | null
   startedAt: string | null
   lastCycleAt: string | null
   lastCycleStatus: string | null

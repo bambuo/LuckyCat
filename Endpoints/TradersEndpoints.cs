@@ -45,7 +45,7 @@ public static class TradersEndpoints
 
             group.MapPost("/", async (TraderUpsertRequest request, AppDbContext db, CancellationToken ct) =>
             {
-                var error = await ValidateAsync(request, db, ct);
+                var (error, initialBalance) = await ValidateAsync(request, db, ct);
                 if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
 
                 var now = DateTime.UtcNow;
@@ -59,7 +59,7 @@ public static class TradersEndpoints
                     ExecutionMode = NormalizeMode(request.ExecutionMode),
                     IsCrossMargin = request.IsCrossMargin,
                     ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60),
-                    InitialBalance = request.InitialBalance,
+                    InitialBalance = initialBalance,
                     CreatedAt = now,
                     UpdatedAt = now,
                 };
@@ -78,7 +78,7 @@ public static class TradersEndpoints
                 var trader = await db.Traders.FindAsync(new object[] { id }, ct);
                 if (trader is null) return ApiResults.Fail("not_found", "交易员不存在", 404);
 
-                var error = await ValidateAsync(request, db, ct);
+                var (error, initialBalance) = await ValidateAsync(request, db, ct);
                 if (error is not null) return ApiResults.Fail("validation_failed", error, 400);
 
                 trader.Name = request.Name.Trim();
@@ -88,7 +88,7 @@ public static class TradersEndpoints
                 trader.ExecutionMode = NormalizeMode(request.ExecutionMode);
                 trader.IsCrossMargin = request.IsCrossMargin;
                 trader.ScanIntervalMinutes = Math.Clamp(request.ScanIntervalMinutes, 3, 60);
-                trader.InitialBalance = request.InitialBalance;
+                trader.InitialBalance = initialBalance;
                 trader.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
 
@@ -263,6 +263,9 @@ public static class TradersEndpoints
                 var account = await db.ExchangeAccounts.FindAsync(new object[] { trader.ExchangeAccountId }, ct);
                 var strategy = await db.Strategies.FindAsync(new object[] { trader.StrategyId }, ct);
 
+                // 初始余额只取一次：实体列是 decimal?（DB 存储不变），权益基准与历史回撤共用同一值。
+                var initialBalance = trader.InitialBalance;
+
                 var audit = account is null
                     ? new TradingAudit(false, false, false, false, false, false, ["绑定账户缺失"])
                     : ExchangeTradingService.Audit(account);
@@ -312,7 +315,7 @@ public static class TradersEndpoints
 
                     decimal? pnl = null;
                     double? pnlPct = null;
-                    if (snapshot.Success && trader.InitialBalance is { } initial && initial > 0)
+                    if (snapshot.Success && initialBalance is { } initial && initial > 0)
                     {
                         pnl = Math.Round(snapshot.UsdtEquity - initial, 2);
                         pnlPct = Math.Round((double)((snapshot.UsdtEquity - initial) / initial * 100m), 2);
@@ -353,7 +356,7 @@ public static class TradersEndpoints
                 // 历史仓位只读本系统的库；不再在 GET 路径触发的交易所同步（syncError 恒 null 的口径见上）。
                 var history = account is null
                     ? EmptyHistory("绑定账户缺失")
-                    : await BuildHistoryAsync(db, account, trader.InitialBalance, null, ct);
+                    : await BuildHistoryAsync(db, account, initialBalance, null, ct);
 
                 // 历史仓位「杠杆」回填：Binance 等对已平仓位不提供杠杆，用持仓期间采样值补（仅补空值，只读）
                 if (account is not null && history.Rows.Any(r => r.Leverage is null))
@@ -828,15 +831,30 @@ public static class TradersEndpoints
 
     private static string NormalizeMode(string? mode) => mode == "dry" ? "dry" : "live";
 
-    private static async Task<string?> ValidateAsync(TraderUpsertRequest request, AppDbContext db, CancellationToken ct)
+    private static async Task<(string? Error, decimal? InitialBalance)> ValidateAsync(
+        TraderUpsertRequest request, AppDbContext db, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(request.Name)) return "名称不能为空";
-        if (!await db.Providers.AnyAsync(p => p.Id == request.ProviderId, ct)) return "选择的模型提供商不存在";
-        if (!await db.ExchangeAccounts.AnyAsync(a => a.Id == request.ExchangeAccountId, ct)) return "选择的交易所账户不存在";
-        if (!await db.Strategies.AnyAsync(s => s.Id == request.StrategyId, ct)) return "选择的策略不存在";
-        if (request.ScanIntervalMinutes is < 3 or > 60) return "扫描间隔需在 3–60 分钟之间";
-        if (request.InitialBalance is < 0) return "初始余额不能为负";
-        return null;
+        if (string.IsNullOrWhiteSpace(request.Name)) return ("名称不能为空", null);
+        if (!await db.Providers.AnyAsync(p => p.Id == request.ProviderId, ct)) return ("选择的模型提供商不存在", null);
+        if (!await db.ExchangeAccounts.AnyAsync(a => a.Id == request.ExchangeAccountId, ct)) return ("选择的交易所账户不存在", null);
+        if (!await db.Strategies.AnyAsync(s => s.Id == request.StrategyId, ct)) return ("选择的策略不存在", null);
+        if (request.ScanIntervalMinutes is < 3 or > 60) return ("扫描间隔需在 3–60 分钟之间", null);
+
+        // 金额契约（LC-STD-03 §3.4）：字符串金额，InvariantCulture 解析；空串/空白视为未提供（null）。
+        decimal? initialBalance = null;
+        if (!string.IsNullOrWhiteSpace(request.InitialBalance))
+        {
+            if (!decimal.TryParse(request.InitialBalance, NumberStyles.Number, CultureInfo.InvariantCulture,
+                    out var parsed))
+            {
+                return ("initialBalance 必须为数字字符串", null);
+            }
+
+            initialBalance = parsed;
+        }
+
+        if (initialBalance is < 0) return ("初始余额不能为负", null);
+        return (null, initialBalance);
     }
 
     private static TraderDto ToDto(
@@ -853,7 +871,8 @@ public static class TradersEndpoints
             t.ProviderId, provider?.Name ?? "（已删除）", provider?.Model ?? "",
             t.ExchangeAccountId, account?.ExchangeType ?? ExchangeType.Binance, account?.AccountName ?? "（已删除）",
             t.StrategyId, strategy?.Name ?? "（已删除）",
-            t.IsRunning, t.ExecutionMode, t.IsCrossMargin, t.ScanIntervalMinutes, t.InitialBalance,
+            t.IsRunning, t.ExecutionMode, t.IsCrossMargin, t.ScanIntervalMinutes,
+            CycleDtoMapper.Num(t.InitialBalance),
             t.StartedAt, t.LastCycleAt, t.LastCycleStatus, t.CreatedAt, t.UpdatedAt);
     }
 }

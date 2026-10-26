@@ -439,6 +439,57 @@ public class CycleHttpTests
         Assert.Equal("脚本交易员", list.GetProperty("data")[0].GetProperty("name").GetString());
     }
 
+    [Fact]
+    public async Task Trader_initial_balance_is_a_string_on_the_wire_and_parsed_with_invariant_culture()
+    {
+        await using var host = await TestApp.StartAsync();
+        await SeedAsync(host);
+
+        object Body(string? initialBalance) => new
+        {
+            name = "金额交易员", providerId = 1, exchangeAccountId = 1, strategyId = 1,
+            isCrossMargin = true, scanIntervalMinutes = 3, initialBalance,
+        };
+
+        var create = await host.Client.PostAsJsonAsync("/api/traders", Body("10000.00"));
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        var created = (await ReadJsonAsync(create)).GetProperty("data");
+        var id = created.GetProperty("id").GetInt32();
+        Assert.Equal(JsonValueKind.String, created.GetProperty("initialBalance").ValueKind);
+        Assert.Equal("10000.00", created.GetProperty("initialBalance").GetString());
+
+        var update = await host.Client.PutAsJsonAsync($"/api/traders/{id}", Body("250.5"));
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+        var updated = (await ReadJsonAsync(update)).GetProperty("data");
+        Assert.Equal(JsonValueKind.String, updated.GetProperty("initialBalance").ValueKind);
+        Assert.Equal("250.5", updated.GetProperty("initialBalance").GetString());
+
+        // 列表投影同样字符串：有值 → String，未设置 → null。
+        var list = (await ReadJsonAsync(await host.Client.GetAsync("/api/traders"))).GetProperty("data");
+        var seeded = list.EnumerateArray().Single(t => t.GetProperty("name").GetString() == "脚本交易员");
+        Assert.Equal(JsonValueKind.Null, seeded.GetProperty("initialBalance").ValueKind);
+        var projected = list.EnumerateArray().Single(t => t.GetProperty("id").GetInt32() == id);
+        Assert.Equal(JsonValueKind.String, projected.GetProperty("initialBalance").ValueKind);
+        Assert.Equal("250.5", projected.GetProperty("initialBalance").GetString());
+
+        // 非法字符串 → 400 validation_failed 点名字段；负数 → 既有文案。
+        await AssertErrorAsync(await host.Client.PutAsJsonAsync($"/api/traders/{id}", Body("abc")),
+            HttpStatusCode.BadRequest, "validation_failed", "initialBalance");
+        await AssertErrorAsync(await host.Client.PutAsJsonAsync($"/api/traders/{id}", Body("-1")),
+            HttpStatusCode.BadRequest, "validation_failed", "初始余额不能为负");
+
+        // 更新传空串 → 视为清空（null）；创建传空白 → 同样是 null。
+        var cleared = await host.Client.PutAsJsonAsync($"/api/traders/{id}", Body(""));
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+        Assert.Equal(JsonValueKind.Null,
+            (await ReadJsonAsync(cleared)).GetProperty("data").GetProperty("initialBalance").ValueKind);
+
+        var createdEmpty = await host.Client.PostAsJsonAsync("/api/traders", Body("   "));
+        Assert.Equal(HttpStatusCode.Created, createdEmpty.StatusCode);
+        Assert.Equal(JsonValueKind.Null,
+            (await ReadJsonAsync(createdEmpty)).GetProperty("data").GetProperty("initialBalance").ValueKind);
+    }
+
     // —— stream（API-05：事件名/字段/心跳/空行帧；GET 无副作用）——
 
     [Fact]

@@ -17,7 +17,7 @@ public record TraderDto(
     string ExecutionMode,
     bool IsCrossMargin,
     int ScanIntervalMinutes,
-    decimal? InitialBalance,
+    string? InitialBalance,
     DateTime? StartedAt,
     DateTime? LastCycleAt,
     string? LastCycleStatus,
@@ -31,7 +31,7 @@ public record TraderUpsertRequest(
     int StrategyId,
     bool IsCrossMargin,
     int ScanIntervalMinutes,
-    decimal? InitialBalance,
+    string? InitialBalance,
     string? ExecutionMode = null);
 
 public record TraderClosePositionRequest(string Symbol);

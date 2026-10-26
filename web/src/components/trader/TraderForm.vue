@@ -36,6 +36,13 @@ const form = reactive({
 const isEdit = computed(() => props.trader !== null)
 const selectedStrategy = computed(() => props.strategies.find((s) => s.id === form.strategyId) ?? null)
 
+/** 后端金额字符串 → 表单数字模型；空串或非法值为 null。 */
+function toFormNumber(value: string | null): number | null {
+  if (value === null || value.trim() === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 const strategyDetail = computed(() => {
   const s = selectedStrategy.value
   if (!s) return null
@@ -70,7 +77,8 @@ watch(
       form.strategyId = t.strategyId
       form.isCrossMargin = t.isCrossMargin
       form.scanIntervalMinutes = t.scanIntervalMinutes
-      form.initialBalance = t.initialBalance
+      // 后端金额为字符串（LC-STD-03 §3.4）：表单内部用数字模型给 a-input-number，提交时再转字符串。
+      form.initialBalance = toFormNumber(t.initialBalance)
       form.executionMode = t.executionMode
     } else {
       const active = props.strategies.find((s) => s.isActive)
@@ -111,7 +119,7 @@ async function submit() {
     strategyId: form.strategyId!,
     isCrossMargin: form.isCrossMargin,
     scanIntervalMinutes: form.scanIntervalMinutes,
-    initialBalance: form.initialBalance,
+    initialBalance: form.initialBalance === null ? null : String(form.initialBalance),
     executionMode: form.executionMode,
   }
   try {
