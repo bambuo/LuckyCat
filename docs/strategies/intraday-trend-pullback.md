@@ -65,7 +65,7 @@
 
 ## 截图说明
 
-`intraday-trend-pullback.png` 是重构前的旧界面截图，早于多智能体工作流，已不代表当前策略工作室。本文件不引用该图；文件保留仅作历史参考，界面行为以当前工作室为准。
+界面行为以当前策略工作室为准；重构前的旧界面截图已移除，避免与多智能体工作流混淆。
 
 来源：
 - [Gate交易费计算](https://miniapp.gate.com/help/futures/futures-logic/22079/futures-trading-fee-calculation)

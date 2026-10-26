@@ -117,7 +117,8 @@ LuckyCat/
 ## 测试
 
 ```bash
-dotnet test Tests/LuckyCat.Tests.csproj   # 454 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
+dotnet test Tests/LuckyCat.Tests.csproj   # 460 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
+cd web && bun test                        # 前端纯函数单测（SSE 帧解析等）
 cd web && bun run build                   # 前端类型检查与构建
 ```
 
