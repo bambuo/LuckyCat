@@ -78,6 +78,9 @@ builder.Services.AddSingleton<ReviewRunner>();
 builder.Services.AddHostedService<ReviewScheduler>();
 builder.Services.AddSingleton<PositionHistorySyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionHistorySyncService>());
+// 数据保留（LC-STD-03 §2.5）：每日本地 03:30 清理 90 天前的阶段/工具明细；
+// 只删审计明细，不触交易数据，与交易调度链无关。
+builder.Services.AddHostedService<DataRetentionService>();
 builder.Services.AddSingleton<AccountStreamService>();
 builder.Services.AddSingleton<SseEventHub>();
 // 统一弹性管道（情绪/新闻等所有经 HttpClientFactory 的请求）：突发超时最多重试 3 次、线性退避 1/2/3 秒
