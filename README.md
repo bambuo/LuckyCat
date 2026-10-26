@@ -117,7 +117,7 @@ LuckyCat/
 ## 测试
 
 ```bash
-dotnet test Tests/LuckyCat.Tests.csproj   # 460 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
+dotnet test Tests/LuckyCat.Tests.csproj   # 468 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
 cd web && bun test                        # 前端纯函数单测（SSE 帧解析等）
 cd web && bun run build                   # 前端类型检查与构建
 ```
@@ -131,6 +131,7 @@ cd web && bun run build                   # 前端类型检查与构建
 - [运维手册](docs/交付/招财猫多智能体重构-运维手册.md) —— 启停/巡检/故障处置/备份与保留/安全约束
 - [规范索引与版本（LC-STD-00）](docs/standards/00-规范索引与版本.md) —— 文档地图、版本规则、状态生命周期与变更传播矩阵；各角色、工具、数据、提示词与测试标准从这里进入
 - [多智能体重构设计（LC-SPEC-001）](docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md) —— 四段交易工作流、复盘、工具安全、数据与前端契约
+- [提示词与交易风控现状](docs/prompt-risk-controls.md) —— 五角色提示词、风控硬闸与记忆/消息面索引
 - [示例策略：日内顺势回调](docs/strategies/intraday-trend-pullback.md) —— 可直接导入策略工作室
 - [存量库建表与补列脚本](docs/sql/2026-10-26-多智能体新表.sql)
 - [机器可读版本清单](docs/standards/版本清单.json)
