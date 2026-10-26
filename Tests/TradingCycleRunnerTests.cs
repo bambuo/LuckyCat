@@ -97,7 +97,8 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
             await WaitUntilAsync(async () =>
                 "aborted" == (await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale")).Status
                 && env.Runner.IsRunning(env.Trader.Id)
-                && await env.Db.TradingCycles.AsNoTracking().AnyAsync(c => c.Trigger == "schedule"));
+                // 遗留行本身就是 schedule：必须等「除它之外的新周期已落库」，否则会在恢复前抢跑
+                && await env.Db.TradingCycles.AsNoTracking().CountAsync(c => c.Id != "stale") >= 1);
             await hosted.StopAsync(default);
 
             var stale = await env.Db.TradingCycles.AsNoTracking().SingleAsync(c => c.Id == "stale");

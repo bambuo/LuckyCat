@@ -129,7 +129,7 @@ public class AgentBudgetConfig
     public int ExecutorTimeoutSeconds { get; set; } = 45;
     public int CycleTimeoutSeconds { get; set; } = 300;
     public int AnalystToolLimit { get; set; } = 20;
-    public int TraderToolLimit { get; set; } = 10;
+    public int TraderToolLimit { get; set; } = 14;
     public int RiskToolLimit { get; set; } = 4;
     public int ExecutorToolLimit { get; set; } = 6;
     public int CycleToolLimit { get; set; } = 45;
