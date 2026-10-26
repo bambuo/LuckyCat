@@ -507,8 +507,7 @@ public class TradingWorkflowTests
             IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct) =>
             Task.FromResult<IReadOnlyDictionary<string, SymbolSentiment>>(new Dictionary<string, SymbolSentiment>());
 
-        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources,
-            CancellationToken ct) =>
+        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<ExternalDataResult>>([]);
 
         public Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct) =>

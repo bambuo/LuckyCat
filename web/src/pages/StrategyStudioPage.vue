@@ -326,8 +326,6 @@ function remove(strategy: Strategy) {
 function exportStrategy(strategy: Strategy) {
   try {
     const config = clone(strategy.config)
-    // 对齐设计稿「公开分享时自动剥离」：导出即剥离外部数据源请求头（可能含密钥）
-    for (const source of config.indicators.externalDataSources) source.headers = []
     const payload = {
       exported_at: new Date().toISOString(),
       version: '1.0',
@@ -411,13 +409,15 @@ function importStrategy() {
 // （ApiJson 对未映射字段 Disallow，会 400 validation_failed）。
 function normalizeImportedConfig(raw: Partial<StrategyConfig>): StrategyConfig {
   const base = clone(defaults.value?.config as StrategyConfig)
+  const rawIndicators = { ...(raw.indicators ?? {}) } as Record<string, unknown>
+  // 旧导出文件里的 externalDataSources 已下线；未映射字段会被 ApiJson 拒绝，导入时剔除
+  delete rawIndicators.externalDataSources
   return {
     coinSource: { ...base.coinSource, ...raw.coinSource },
     indicators: {
       ...base.indicators,
-      ...raw.indicators,
+      ...rawIndicators,
       klines: { ...base.indicators.klines, ...raw.indicators?.klines },
-      externalDataSources: raw.indicators?.externalDataSources ?? base.indicators.externalDataSources,
     },
     riskControl: { ...base.riskControl, ...raw.riskControl },
     promptSections: { ...base.promptSections, ...raw.promptSections },

@@ -1699,8 +1699,8 @@ public class ExecutionToolsTests
             Task.FromResult<IReadOnlyDictionary<string, SymbolSentiment>>(
                 new Dictionary<string, SymbolSentiment>());
 
-        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources,
-            CancellationToken ct) => Task.FromResult<IReadOnlyList<ExternalDataResult>>([]);
+        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<ExternalDataResult>>([]);
 
         public Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct) =>
             Task.FromResult<CoinSourceResolution?>(null);

@@ -15,7 +15,7 @@ namespace LuckyCat.Services.NewsSources;
 /// - 正文/标题剥离 HTML 与实体，<c>important</c>（线上为 0/1 数字，兼容布尔）加「【重要】」前缀；
 /// - 每轮最多 10 条（取最新）、每条 Text ≤200 字符；请求 10s 超时、响应体 1MB 上限；
 /// - 网络/解析失败只返回 Problem（短中文原因），调用方取消原样传播；
-/// - 单实例 TTL 缓存 300s（与策略外部源 RefreshSecs 默认值一致；只保留一条结果，成功与失败都在 TTL 内复用）。
+/// - 单实例 TTL 缓存 300s（只保留一条结果，成功与失败都在 TTL 内复用）。
 /// IHttpClientFactory 由 DI 以单例提供，本类只按请求创建 HttpClient，不持有长生命周期的 HttpClient。
 /// </summary>
 public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INewsSource
@@ -105,7 +105,7 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
         return Parse(body, maxItems);
     }
 
-    // 1MB 上限（与 ExternalDataSourceService 一致），避免异常大响应拖垮周期
+    // 1MB 上限，避免异常大响应拖垮周期
     private static async Task<string> ReadLimitedAsync(HttpResponseMessage response, CancellationToken ct)
     {
         using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -120,7 +120,7 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
             buffer.Write(chunk, 0, take);
             total += take;
         }
-        // 个别网关会在 JSON 前带 BOM；JsonDocument 不接受，先剥掉（与 ExternalDataSourceService 同口径）
+        // 个别网关会在 JSON 前带 BOM；JsonDocument 不接受，先剥掉
         return Encoding.UTF8.GetString(buffer.ToArray()).TrimStart('\uFEFF');
     }
 
@@ -222,7 +222,7 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
     private static string FormatUtc(DateTimeOffset? at) =>
         at?.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) ?? "";
 
-    // 小体量本地清洗（既有 StripHtml 为 ExternalDataSourceService 私有；不复制其整段实现）
+    // 小体量本地清洗（新闻源只需去标签，不引入完整 HTML 解析）
     private static string StripHtml(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return "";
@@ -231,7 +231,7 @@ public sealed class Jin10NewsSource(IHttpClientFactory httpClientFactory) : INew
         return WhitespaceRegex.Replace(decoded, " ").Trim();
     }
 
-    // 严格 ≤200（省略号计入预算），与外部源「每条 ≤200 字符」口径一致
+    // 严格 ≤200（省略号计入预算），与新闻源「每条 ≤200 字符」口径一致
     private static string Clamp(string value) =>
         value.Length <= MaxItemChars ? value : value[..(MaxItemChars - 1)] + "…";
 

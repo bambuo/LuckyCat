@@ -30,8 +30,7 @@
       "vwap": { "enabled": false, "periods": [] },
       "volume": { "enabled": true },
       "openInterest": { "enabled": false },
-      "fundingRate": { "enabled": true },
-      "externalDataSources": []
+      "fundingRate": { "enabled": true }
     },
     "riskControl": {
       "maxPositions": 1,

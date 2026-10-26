@@ -368,10 +368,6 @@ public static class PromptLibrary
         }
 
         sb.Append("- 市场情绪：").Append(sentiment.Count > 0 ? string.Join("、", sentiment) : "无");
-        if (indicators.ExternalDataSources.Count > 0)
-        {
-            sb.Append("；外部数据源：").Append(string.Join("、", indicators.ExternalDataSources.Select(s => s.Name)));
-        }
 
         return sb.ToString();
     }

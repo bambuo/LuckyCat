@@ -50,10 +50,10 @@ public sealed class MarketDataCache(IMarketDataReader reader)
         return value;
     }
 
-    public async Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources, CancellationToken ct)
+    public async Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct)
     {
         if (_news is { } hit) return hit;
-        var value = await reader.GetNewsAsync(sources, ct);
+        var value = await reader.GetNewsAsync(ct);
         if (value.Any(result => result.Problem is null && result.Items.Count > 0)) _news = value;
         return value;
     }

@@ -20,8 +20,8 @@ public interface IMarketDataReader
     Task<IReadOnlyDictionary<string, SymbolSentiment>> GetSentimentAsync(string exchange,
         IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct);
 
-    /// <summary>外部数据源（新闻/事件）一轮拉取结果。</summary>
-    Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources, CancellationToken ct);
+    /// <summary>内置新闻源一轮拉取结果。</summary>
+    Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct);
 
     /// <summary>币种候选解析（静态/网格来源返回 null）。</summary>
     Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct);

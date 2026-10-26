@@ -889,7 +889,6 @@ public class CycleHttpTests
             builder.Services.AddScoped<CoinRankingService>();
             builder.Services.AddScoped<MarketSnapshotService>();
             builder.Services.AddScoped<MarketSentimentService>();
-            builder.Services.AddScoped<ExternalDataSourceService>();
             // 真实 AccountStreamService：stream 测试的交易员绑定缺失账户，绝不会触达 Acquire（零网络）。
             builder.Services.AddSingleton<AccountStreamService>(sp =>
                 new AccountStreamService(sp.GetRequiredService<IServiceScopeFactory>(), hub));
@@ -1484,8 +1483,8 @@ public class CycleHttpTests
             IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct) =>
             Task.FromResult<IReadOnlyDictionary<string, SymbolSentiment>>(new Dictionary<string, SymbolSentiment>());
 
-        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources,
-            CancellationToken ct) => Task.FromResult<IReadOnlyList<ExternalDataResult>>([]);
+        public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<ExternalDataResult>>([]);
 
         public Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct) =>
             Task.FromResult<CoinSourceResolution?>(null);

@@ -123,7 +123,7 @@ const emit = defineEmits<{
           <div class="context-row">
             <div class="context-text">
               <div class="context-name">实时消息面</div>
-              <div class="section-desc">决策时注入最新消息面数据；作为外部数据源总开关，关闭后 AI 测试不拉取、不注入</div>
+              <div class="section-desc">控制 get_news 工具是否拉取消息面；关闭后模型拿不到新闻，历史决策记忆不受影响</div>
             </div>
             <a-switch v-model="config.newsEnabled" />
           </div>

@@ -42,7 +42,6 @@ public class IndicatorSettings
     public SentimentConfig Volume { get; set; } = new() { Enabled = true };
     public SentimentConfig OpenInterest { get; set; } = new() { Enabled = true };
     public SentimentConfig FundingRate { get; set; } = new() { Enabled = true };
-    public List<ExternalDataSource> ExternalDataSources { get; set; } = [];
 }
 
 public class KlineConfig
@@ -62,22 +61,6 @@ public class IndicatorConfig
 public class SentimentConfig
 {
     public bool Enabled { get; set; }
-}
-
-public class ExternalDataSource
-{
-    public string Name { get; set; } = "";
-    public string Method { get; set; } = "GET";                 // GET | POST
-    public string Url { get; set; } = "";
-    public string DataPath { get; set; } = "";
-    public int RefreshSecs { get; set; } = 300;
-    public List<ExternalHeader> Headers { get; set; } = [];
-}
-
-public class ExternalHeader
-{
-    public string Key { get; set; } = "";
-    public string Value { get; set; } = "";
 }
 
 public class RiskControlConfig

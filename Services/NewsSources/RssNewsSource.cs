@@ -79,7 +79,7 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
         }
 
         result = result with { FetchedAtUtc = DateTime.UtcNow };
-        // 失败不缓存：600s 的失败窗口会让一次瞬时抖动把该源藏 10 分钟（外部源无 SLA，宁可下轮重试）
+        // 失败不缓存：600s 的失败窗口会让一次瞬时抖动把该源藏 10 分钟（第三方源无 SLA，宁可下轮重试）
         if (result.Problem is null) Store(result);
         return result;
     }
@@ -109,7 +109,7 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
         return Parse(body, maxItems);
     }
 
-    // 1MB 上限（与 ExternalDataSourceService 一致），避免异常大响应拖垮周期
+    // 1MB 上限，避免异常大响应拖垮周期
     private static async Task<string> ReadLimitedAsync(HttpResponseMessage response, CancellationToken ct)
     {
         using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -209,7 +209,7 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
     private static string FormatUtc(DateTimeOffset at) =>
         at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
-    // 小体量本地清洗（既有 StripHtml 为 ExternalDataSourceService 私有；不复制其整段实现）
+    // 小体量本地清洗（新闻源只需去标签，不引入完整 HTML 解析）
     private static string StripHtml(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return "";
@@ -218,7 +218,7 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
         return WhitespaceRegex.Replace(decoded, " ").Trim();
     }
 
-    // 严格 ≤200（省略号计入预算），与外部源「每条 ≤200 字符」口径一致
+    // 严格 ≤200（省略号计入预算），与新闻源「每条 ≤200 字符」口径一致
     private static string Clamp(string value) =>
         value.Length <= MaxItemChars ? value : value[..(MaxItemChars - 1)] + "…";
 

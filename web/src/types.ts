@@ -98,7 +98,6 @@ export interface OutboundIp {
 
 export type CoinSourceType = 'static' | 'score' | 'oi_top' | 'oi_low' | 'mixed'
 export type CoinSourceExchange = 'binance' | 'gate'
-export type HttpMethod = 'GET' | 'POST'
 
 export interface CoinSourceConfig {
   sourceType: CoinSourceType
@@ -129,20 +128,6 @@ export interface SentimentConfig {
   enabled: boolean
 }
 
-export interface ExternalHeader {
-  key: string
-  value: string
-}
-
-export interface ExternalDataSource {
-  name: string
-  method: HttpMethod
-  url: string
-  dataPath: string
-  refreshSecs: number
-  headers: ExternalHeader[]
-}
-
 export interface IndicatorSettings {
   klines: KlineConfig
   enableRawKlines: boolean
@@ -155,7 +140,6 @@ export interface IndicatorSettings {
   volume: SentimentConfig
   openInterest: SentimentConfig
   fundingRate: SentimentConfig
-  externalDataSources: ExternalDataSource[]
 }
 
 export interface RiskControlConfig {

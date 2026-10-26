@@ -468,7 +468,6 @@ public class ApiContractTests
             builder.Services.AddScoped<CoinRankingService>();
             builder.Services.AddScoped<MarketSnapshotService>();
             builder.Services.AddScoped<MarketSentimentService>();
-            builder.Services.AddScoped<ExternalDataSourceService>();
             builder.Services.AddScoped<ExchangeTradingService>();
             builder.Services.AddScoped<ExchangeVerificationRunner>();
             builder.Services.AddSingleton<SseEventHub>();

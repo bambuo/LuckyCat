@@ -5,7 +5,7 @@ namespace LuckyCat.Services;
 
 /// <summary>
 /// <see cref="IMarketDataReader"/> 的真实实现：行情快照/情绪/币源仍为转发（重试、缓存、币源解析口径不变）；
-/// 新闻经 <see cref="CryptoNewsAggregator"/> 把策略配置的外部源与内置源（金十数据）并行拉取后合并去重。
+/// 新闻经 <see cref="CryptoNewsAggregator"/> 拉取内置源并合并去重。
 /// </summary>
 public sealed class MarketDataReader(
     MarketSnapshotService snapshots,
@@ -24,8 +24,8 @@ public sealed class MarketDataReader(
         IReadOnlyList<SharedSymbol> symbols, bool includeOi, bool includeFunding, CancellationToken ct) =>
         sentiment.GetAsync(exchange, symbols, includeOi, includeFunding, ct);
 
-    public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(IEnumerable<ExternalDataSource> sources, CancellationToken ct) =>
-        news.FetchAsync(sources, ct);
+    public Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(CancellationToken ct) =>
+        news.FetchAsync(ct);
 
     public Task<CoinSourceResolution?> GetCandidatesAsync(StrategyConfig config, CancellationToken ct) =>
         ranking.ResolveAsync(config, ct);

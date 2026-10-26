@@ -30,13 +30,11 @@ builder.Services.AddScoped<ExchangeVerificationRunner>();
 builder.Services.AddScoped<MarketSnapshotService>();
 builder.Services.AddScoped<CoinRankingService>();
 builder.Services.AddScoped<MarketSentimentService>();
-builder.Services.AddScoped<ExternalDataSourceService>();
-// 内置新闻源（Task 14.5/14.6/14.7）：都只依赖单例 IHttpClientFactory，自身仅持本地 TTL 缓存，
-// 不俘获 HttpClient；聚合器与 ExternalDataSourceService 同为 scoped（后者是 scoped，单例注入会构成 captive 依赖）。
-// 注册顺序即 IEnumerable<INewsSource> 顺序，也是 get_news 轮转取条的首轮顺序（limit 上限 10，
-// 内置源已有 11 个 → 每轮只有前 10 个有出场机会）：
+// 内置新闻源（Task 14.5/14.6/14.7）：都只依赖单例 IHttpClientFactory，自身仅持本地 TTL 缓存，不俘获 HttpClient。
+// 聚合器 scoped；注册顺序即 IEnumerable<INewsSource> 顺序，也是 get_news 轮转取条的首轮顺序
+// （limit 上限 12，内置源 11 个 → 首轮 11 个全部出场，第 12 行回到第一家继续）：
 // 金十 → 链捕手（最及时的中文快讯）→ PANews → Binance/OKX 公告 → 财经日历 → 美联储 → 四家英文媒体。
-// 财经日历没有事件时返回 Problem、不占轮转名额，此时最后一家英文媒体（Decrypt）补进第 10 行。
+// 财经日历没有事件时返回 Problem、不占轮转名额。
 builder.Services.AddSingleton<Jin10NewsSource>();
 builder.Services.AddSingleton<ChainCatcherNewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());

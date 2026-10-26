@@ -989,7 +989,7 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task Aggregator_merges_jin10_chaincatcher_and_configured_sources()
+    public async Task Aggregator_merges_jin10_and_chaincatcher_and_dedupes_title_time()
     {
         const string jin10Body = """
         {"status":200,"message":"OK","data":[{"id":"1","time":"2026-10-02 12:19:46","important":0,"data":{"content":"来自金十的同一条","title":"同一条快讯"}}]}
@@ -1002,23 +1002,19 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         var router = new StubHandler((request, _) => Task.FromResult(JsonResponse(
             request.RequestUri!.Host == "api.chaincatcher.com" ? chainCatcherBody : jin10Body)));
         var builtInFactory = new StubFactory(router);
-        var configured = new ExternalDataSourceService(new StubFactory(new StubHandler((_, _) =>
-            Task.FromResult(JsonResponse("""{"items":[{"title":"配置源独有","time":"t-1","content":"配置源"}]}""")))));
         var aggregator = new CryptoNewsAggregator(
-            [new Jin10NewsSource(builtInFactory), new ChainCatcherNewsSource(builtInFactory)], configured);
+            [new Jin10NewsSource(builtInFactory), new ChainCatcherNewsSource(builtInFactory)]);
 
-        var results = await aggregator.FetchAsync(
-            [new ExternalDataSource { Name = "wire", Url = $"https://wire.example/{Guid.NewGuid():N}", DataPath = "items" }],
-            default);
+        var results = await aggregator.FetchAsync(default);
 
-        Assert.Equal(3, results.Count);
-        Assert.Equal(new[] { "wire", "金十数据", "链捕手" }, results.Select(result => result.Name));
-        // 配置源 1 条 + 金十 1 条 + 链捕手 2 条，其中「同一条快讯 / 2026-10-02T04:19:46Z」跨源重复只保留先到的金十
-        Assert.Equal(3, results.Sum(result => result.Items.Count));
+        Assert.Equal(2, results.Count);
+        Assert.Equal(new[] { "金十数据", "链捕手" }, results.Select(result => result.Name));
+        // 金十 1 条 + 链捕手 2 条，其中「同一条快讯 / 2026-10-02T04:19:46Z」跨源重复只保留先到的金十
+        Assert.Equal(2, results.Sum(result => result.Items.Count));
         Assert.Single(results.SelectMany(result => result.Items), item => item.Title == "同一条快讯");
-        Assert.DoesNotContain(results[2].Items, item => item.Title == "同一条快讯");
-        Assert.Contains(results[2].Items, item => item.Title == "链捕手独有");
-        Assert.Equal("2026-10-02T04:19:46Z", results[1].Items[0].Time);
+        Assert.DoesNotContain(results[1].Items, item => item.Title == "同一条快讯");
+        Assert.Contains(results[1].Items, item => item.Title == "链捕手独有");
+        Assert.Equal("2026-10-02T04:19:46Z", results[0].Items[0].Time);
     }
 
     [Fact]
@@ -1037,46 +1033,13 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task Aggregator_merges_configured_and_builtin_and_dedupes_title_time()
-    {
-        var configured = new ExternalDataSourceService(new StubFactory(new StubHandler((_, _) =>
-            Task.FromResult(JsonResponse("""
-            {"items":[
-              {"title":"同一条快讯","time":"t-1","content":"来自配置源"},
-              {"title":"另一条","time":"t-2","content":"配置源独有"}
-            ]}
-            """)))));
-        var builtIn = new FakeNewsSource("内置源",
-            new ExternalDataItem("t-1", "同一条快讯", "来自内置源（重复）"),
-            new ExternalDataItem("t-3", "第三条", "内置源独有"));
-        var aggregator = new CryptoNewsAggregator([builtIn], configured);
-
-        var results = await aggregator.FetchAsync(
-            [new ExternalDataSource { Name = "wire", Url = $"https://wire.example/{Guid.NewGuid():N}", DataPath = "items" }],
-            default);
-
-        Assert.Equal(2, results.Count);
-        Assert.Equal("wire", results[0].Name);
-        Assert.Equal("内置源", results[1].Name);
-
-        // 配置源 2 条 + 内置源 1 条；「同一条快讯 / t-1」只保留一次（先到先得）
-        Assert.Equal(3, results.Sum(result => result.Items.Count));
-        Assert.Single(results.SelectMany(result => result.Items), item => item.Title == "同一条快讯");
-        Assert.Contains(results[0].Items, item => item.Title == "另一条");
-        Assert.Contains(results[1].Items, item => item.Title == "第三条");
-        Assert.DoesNotContain(results[1].Items, item => item.Title == "同一条快讯");
-    }
-
-    [Fact]
     public async Task Aggregator_dedupes_by_text_prefix_when_titles_are_empty()
     {
-        var emptyFeed = new ExternalDataSourceService(new StubFactory(new StubHandler((_, _) =>
-            Task.FromResult(JsonResponse("""{"items":[]}""")))));
         var first = new FakeNewsSource("A", new ExternalDataItem("t-9", "", new string('X', 50) + "甲"));
         var second = new FakeNewsSource("B", new ExternalDataItem("t-9", "", new string('X', 50) + "乙"));
-        var aggregator = new CryptoNewsAggregator([first, second], emptyFeed);
+        var aggregator = new CryptoNewsAggregator([first, second]);
 
-        var results = await aggregator.FetchAsync([], default);
+        var results = await aggregator.FetchAsync(default);
 
         Assert.Equal(2, results.Count);
         Assert.Equal(1, results.Sum(result => result.Items.Count));
@@ -1085,18 +1048,15 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     [Fact]
     public async Task Failing_builtin_leaves_other_results_intact()
     {
-        var configured = new ExternalDataSourceService(new StubFactory(new StubHandler((_, _) =>
-            Task.FromResult(JsonResponse("""{"items":[{"title":"配置快讯","time":"t-1","content":"正常"}]}""")))));
         var aggregator = new CryptoNewsAggregator(
-            [new FailingNewsSource(), new ThrowingNewsSource()], configured);
+            [new FakeNewsSource("好源", new ExternalDataItem("t-1", "正常快讯", "正常")),
+             new FailingNewsSource(), new ThrowingNewsSource()]);
 
-        var results = await aggregator.FetchAsync(
-            [new ExternalDataSource { Name = "wire", Url = $"https://wire.example/{Guid.NewGuid():N}", DataPath = "items" }],
-            default);
+        var results = await aggregator.FetchAsync(default);
 
         Assert.Equal(3, results.Count);
         Assert.Single(results[0].Items);
-        Assert.Equal("配置快讯", results[0].Items[0].Title);
+        Assert.Equal("正常快讯", results[0].Items[0].Title);
         Assert.Contains(results, result => result.Name == "坏源" && result.Problem == "拉取失败");
         Assert.Contains(results, result => result.Name == "抛异常源" && result.Problem is not null);
     }

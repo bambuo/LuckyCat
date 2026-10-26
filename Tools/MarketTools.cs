@@ -346,9 +346,8 @@ public sealed class MarketTools(
             return ToolEnvelope.Success("（策略未启用新闻）", DateTimeOffset.UtcNow, "incomplete", ["新闻已关闭"]);
         }
 
-        // 内置源（快讯/RSS/交易所公告/财经日历）不写入策略配置：即使未配置外部源也照常拉取，与配置源在聚合器内合并去重
-        var sources = config.Indicators.ExternalDataSources;
-        var results = await cache.GetNewsAsync(sources, ct);
+        // 内置源（快讯/RSS/交易所公告/财经日历）由聚合器统一拉取，策略配置不再声明新闻源
+        var results = await cache.GetNewsAsync(ct);
         var warnings = results
             .Where(r => r.Problem is not null)
             .Select(r => $"源 {r.Name} 缺席：{r.Problem}")

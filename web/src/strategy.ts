@@ -1,7 +1,6 @@
 import type {
   CoinSourceExchange,
   CoinSourceType,
-  ExternalDataSource,
 } from './types'
 
 // 周期分类（对齐设计稿：超短/日内/波段/趋势；3D 无 CryptoClients 对应粒度，不提供）
@@ -48,41 +47,3 @@ export const SENTIMENT_CATALOG: { key: SentimentKey; label: string; color: strin
 ]
 
 export const LIMIT_OPTIONS = [5, 10, 15, 20, 30, 50]
-
-// 外部数据源的一键预设：消息面常用源（URL 与取值口径均为实测可用配置）
-export interface ExternalSourcePreset {
-  key: string
-  label: string
-  make: () => ExternalDataSource
-}
-
-export const EXTERNAL_SOURCE_PRESETS: ExternalSourcePreset[] = [
-  {
-    key: 'chaincatcher',
-    label: 'ChainCatcher 快讯',
-    make: () => ({
-      name: 'ChainCatcher 中文快讯',
-      method: 'GET',
-      url: 'https://api.chaincatcher.com/v1/open-api/news-flash?type=flash&page=1&size=50&lang=zh-CN',
-      dataPath: 'data.items',
-      refreshSecs: 300,
-      headers: [],
-    }),
-  },
-  {
-    key: 'panews',
-    label: 'PANews RSS',
-    make: () => ({
-      name: 'PANews 中文快讯',
-      method: 'GET',
-      url: 'https://rss.panewslab.com/zh/gtimg/rss',
-      dataPath: '',
-      refreshSecs: 300,
-      headers: [],
-    }),
-  },
-]
-
-export function createEmptyExternalSource(): ExternalDataSource {
-  return { name: '', method: 'GET', url: '', dataPath: '', refreshSecs: 300, headers: [] }
-}
