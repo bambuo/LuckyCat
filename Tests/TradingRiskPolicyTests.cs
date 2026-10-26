@@ -102,7 +102,7 @@ public class TradingRiskPolicyTests
     [InlineData("{\"action\":\"close\",\"symbol\":\"BTC/USDT\",\"confidence\":70,\"reason\":\"x\",\"leverage\":3}")]
     public void InvalidJsonContractIsRejected(string raw)
     {
-        Assert.Null(StrategyTestRunner.TryParseDecision(raw, out _));
+        Assert.Null(DecisionJson.TryParseDecision(raw, out _));
     }
 
     [Fact]

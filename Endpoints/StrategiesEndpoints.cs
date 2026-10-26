@@ -127,7 +127,7 @@ public static class StrategiesEndpoints
                 var roles = PreviewRoles.Select(role =>
                 {
                     var prompt = PromptLibrary.Build(role, request.Config!);
-                    return new RolePromptPreviewDto(role, prompt, StrategyTestRunner.EstimateTokens(prompt));
+                    return new RolePromptPreviewDto(role, prompt, PromptTokenEstimator.EstimateTokens(prompt));
                 }).ToList();
                 return ApiResults.Ok(new PromptPreviewResultDto(roles));
             });
