@@ -258,7 +258,8 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     """;
 
     // ForexFactory 本周日历：date 带 -04:00 偏移；只保留 High/Medium，空字段渲染为 '-'。
-    private const string ForexFixture = """
+    // 日期相对固定时钟（2026-10-26T00:00Z）生成：Past 已过去、CPI 两天后、NFP 四天后，不随挂钟漂移
+    private static string ForexFixture() => """
     [
       {"title": "Nonfarm Payrolls", "country": "USD", "date": "2026-10-30T08:30:00-04:00", "impact": "High", "forecast": "150K", "previous": "120K"},
       {"title": "CPI", "country": "EUR", "date": "2026-10-28T05:00:00-04:00", "impact": "Medium", "forecast": "", "previous": "2.1%"},
@@ -460,9 +461,28 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Rss_title_only_item_uses_title_as_text()
+    {
+        const string body = """
+        <rss version="2.0"><channel>
+          <item><title>Only Title Here</title><description></description><pubDate>Mon, 26 Oct 2026 01:15:26 GMT</pubDate></item>
+        </channel></rss>
+        """;
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse(body)));
+
+        var result = await source.FetchAsync(10, default);
+
+        var item = Assert.Single(result.Items);
+        Assert.Equal("Only Title Here", item.Title);
+        Assert.Equal("Only Title Here", item.Text);
+    }
+
+    [Fact]
     public async Task Forex_calendar_keeps_high_medium_sorts_ascending_and_renders_fields()
     {
-        var (source, handler) = NewForexSource((_, _) => Task.FromResult(JsonResponse(ForexFixture)));
+        // 固定时钟 + 相对日期：不依赖运行当天的挂钟（原夹具钉死 2026-10-28/30，两天后必红）
+        var now = new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
+        var (source, handler) = NewForexSource((_, _) => Task.FromResult(JsonResponse(ForexFixture())), now);
         var result = await source.FetchAsync(10, default);
 
         Assert.Null(result.Problem);
@@ -484,6 +504,42 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         Assert.DoesNotContain(result.Items, item => item.Title is "Low impact event" or "Holiday");
         // 前向日历：本周已过去的高影响事件不再列出
         Assert.DoesNotContain(result.Items, item => item.Title == "Past FOMC");
+    }
+
+    [Fact]
+    public async Task Forex_calendar_all_past_events_returns_problem()
+    {
+        const string body = """
+        [
+          {"title": "Old FOMC", "country": "USD", "date": "2026-10-20T14:00:00-04:00", "impact": "High", "forecast": "", "previous": ""}
+        ]
+        """;
+        var now = new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
+        var (source, _) = NewForexSource((_, _) => Task.FromResult(JsonResponse(body)), now);
+
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Empty(result.Items);
+        Assert.Equal("本周暂无待发生的高影响事件", result.Problem);
+    }
+
+    [Fact]
+    public async Task Forex_calendar_keeps_events_inside_the_thirty_minute_grace()
+    {
+        // 刚过去 10 分钟（可能仍在发布/发酵）保留；过去 40 分钟不再列出
+        const string body = """
+        [
+          {"title": "Just Released", "country": "USD", "date": "2026-10-25T19:50:00-04:00", "impact": "High", "forecast": "", "previous": ""},
+          {"title": "Too Old", "country": "USD", "date": "2026-10-25T19:20:00-04:00", "impact": "High", "forecast": "", "previous": ""}
+        ]
+        """;
+        var now = new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
+        var (source, _) = NewForexSource((_, _) => Task.FromResult(JsonResponse(body)), now);
+
+        var result = await source.FetchAsync(10, default);
+
+        var item = Assert.Single(result.Items);
+        Assert.Equal("Just Released", item.Title);
     }
 
     [Fact]
@@ -1096,10 +1152,11 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
     }
 
     private static (ForexCalendarNewsSource Source, StubHandler Handler) NewForexSource(
-        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond,
+        DateTimeOffset? now = null)
     {
         var handler = new StubHandler(respond);
-        return (new ForexCalendarNewsSource(new StubFactory(handler)), handler);
+        return (new ForexCalendarNewsSource(new StubFactory(handler), () => now ?? DateTimeOffset.UtcNow), handler);
     }
 
     private static string RssBody() => RssFixture.Replace("LONG_TEXT", new string('长', 250));

@@ -13,8 +13,8 @@ namespace LuckyCat.Services.NewsSources;
 /// - 响应为数组：<c>{title, country, date(带偏移的 ISO-8601), impact, forecast, previous}</c>；
 ///   只保留 impact 为 High / Medium 的事件（Low / Holiday 丢弃）；
 /// - 时间：date 带偏移（线上为 -04:00），按偏移换算后渲染为 ISO-8601 UTC（Z 结尾）；
-///   不可解析的条目跳过；按时间<b>升序</b>取最近的 maxItems 条（日历视角：先发生的先看）；
-///   本接口是「本周」日历，含已发生事件，未按当前时间过滤——过滤会让源在周后段整体变空；
+///   不可解析的条目跳过；只保留<b>尚未发生</b>的事件（给 30 分钟宽限，进行中的仍可见），
+///   按时间<b>升序</b>取最近的 maxItems 条（日历视角：先发生的先看）；本周已无待发生事件时记 Problem；
 /// - 展示：Title = 事件名；Text = <c>国家=… 预期=… 前值=…（影响=…）</c>，空字段渲染为 <c>-</c>；
 /// - 每轮最多 <see cref="MaxItems"/> 条、每条 Title/Text ≤200 字符；
 ///   请求 10s 超时（linked CTS 覆盖响应体读取）、响应体 1MB 上限、BOM 容忍；
@@ -22,8 +22,12 @@ namespace LuckyCat.Services.NewsSources;
 /// - 单实例 TTL 缓存 600s；失败不缓存（与链捕手修复同口径）；调用方要得更少时裁剪缓存切片。
 /// IHttpClientFactory 由 DI 以单例提供，本类只按请求创建 HttpClient，不持有长生命周期的 HttpClient。
 /// </summary>
-public sealed class ForexCalendarNewsSource(IHttpClientFactory httpClientFactory) : INewsSource
+public sealed class ForexCalendarNewsSource(
+    IHttpClientFactory httpClientFactory,
+    Func<DateTimeOffset>? now = null) : INewsSource
 {
+    private readonly Func<DateTimeOffset> _now = now ?? (() => DateTimeOffset.UtcNow);
+
     public const string SourceName = "财经日历";
     private const string Url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
     private const string UserAgent =
@@ -152,7 +156,7 @@ public sealed class ForexCalendarNewsSource(IHttpClientFactory httpClientFactory
 
             // 前向日历：只保留尚未发生（含刚过去 30 分钟内的进行中事件）的 High/Medium 事件，
             // 否则周五还会看到周一的非农，变成过期噪音。
-            var since = DateTimeOffset.UtcNow.AddMinutes(-30);
+            var since = _now().AddMinutes(-30);
             var selected = parsed
                 .Where(entry => entry.At >= since)
                 .OrderBy(entry => entry.At)

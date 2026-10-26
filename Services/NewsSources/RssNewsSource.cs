@@ -162,6 +162,8 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
         // RSS 2.0 用 description；Atom 用 summary（description 为空时才回落）
         var text = StripHtml(ChildText(entry, "description"));
         if (text.Length == 0) text = StripHtml(ChildText(entry, "summary"));
+        // 只有标题的条目（邮件式 RSS）用标题充当正文，避免渲染出「标题 — 」的悬空分隔符
+        if (text.Length == 0) text = title;
         if (title.Length == 0 && text.Length == 0) return null;
 
         // 时间不可解析（含缺 pubDate）时跳过该条：不产出无时间戳条目，跨源去重与排序才有意义
@@ -228,7 +230,8 @@ public sealed class RssNewsSource(string name, string url, IHttpClientFactory ht
         {
             if (_cached is not null && DateTime.UtcNow - _cachedAtUtc < CacheTtl)
             {
-                // 缓存按最大条数存放：调用方要得更少时按需裁剪，不越过 INewsSource 的 maxItems 契约
+                // 缓存保留首次请求的条数：调用方要得更少时按需裁剪（不越过 maxItems 契约）；
+                // 首次请求较小会限制本 TTL 内的后续大请求（聚合器固定要 10，生产无影响）
                 result = _cached.Items.Count <= maxItems
                     ? _cached
                     : _cached with { Items = _cached.Items.Take(maxItems).ToList() };
