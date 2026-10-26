@@ -4,7 +4,7 @@ using LuckyCat.Services.NewsSources;
 namespace LuckyCat.Services;
 
 /// <summary>
-/// 新闻聚合（Task 14.5）：内置来源（当前仅金十数据）与策略配置的外部源<b>并行</b>拉取，
+/// 新闻聚合（Task 14.5 / 14.6）：内置来源（金十数据 + 链捕手）与策略配置的外部源<b>并行</b>拉取，
 /// 合并为一个 <see cref="ExternalDataResult"/> 列表供 get_news 消费。
 /// 去重键 = (标题；标题为空时取正文前 <see cref="DedupeTextPrefixChars"/> 字符, 时间)，跨源重复的快讯只保留先出现的一条。
 /// 单个内置来源失败（Problem 或意外异常）只降级为带 Problem 的结果，不吞掉其他来源；调用方取消原样传播。

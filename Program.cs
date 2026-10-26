@@ -31,10 +31,13 @@ builder.Services.AddScoped<MarketSnapshotService>();
 builder.Services.AddScoped<CoinRankingService>();
 builder.Services.AddScoped<MarketSentimentService>();
 builder.Services.AddScoped<ExternalDataSourceService>();
-// 内置新闻源（金十数据）：只依赖单例 IHttpClientFactory，自身仅持 300s TTL 缓存，不俘获 HttpClient；
-// 聚合器与 ExternalDataSourceService 同为 scoped（后者是 scoped，单例注入会构成 captive 依赖）。
+// 内置新闻源（金十数据 300s TTL / 链捕手 600s TTL）：都只依赖单例 IHttpClientFactory，
+// 自身仅持本地 TTL 缓存，不俘获 HttpClient；聚合器与 ExternalDataSourceService 同为 scoped
+// （后者是 scoped，单例注入会构成 captive 依赖）。
 builder.Services.AddSingleton<Jin10NewsSource>();
+builder.Services.AddSingleton<ChainCatcherNewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<ChainCatcherNewsSource>());
 builder.Services.AddScoped<CryptoNewsAggregator>();
 builder.Services.AddScoped<ExchangeTradingService>();
 // P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的宿主与旧单发演练链路已在
