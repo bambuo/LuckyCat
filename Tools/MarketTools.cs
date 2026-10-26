@@ -346,7 +346,7 @@ public sealed class MarketTools(
             return ToolEnvelope.Success("（策略未启用新闻）", DateTimeOffset.UtcNow, "incomplete", ["新闻已关闭"]);
         }
 
-        // 内置源（金十数据）不写入策略配置：即使未配置外部源也照常拉取，与配置源在聚合器内合并去重
+        // 内置源（快讯/RSS/交易所公告/财经日历）不写入策略配置：即使未配置外部源也照常拉取，与配置源在聚合器内合并去重
         var sources = config.Indicators.ExternalDataSources;
         var results = await cache.GetNewsAsync(sources, ct);
         var warnings = results
@@ -358,15 +358,21 @@ public sealed class MarketTools(
             return ToolEnvelope.Failure(ToolErrors.DataUnavailable, "全部新闻源本轮缺席", true);
         }
 
+        // 跨源轮转取条：先各源第 1 条，再各源第 2 条……直到 limit。
+        // 内置源增至 11 家后，若按源顺序取满，前一个源会吃掉全部 10 行，其余源等于白接。
+        // 单源时行为与逐条顺序取完全一致。
         var lines = new List<string>();
-        foreach (var result in results.Where(r => r.Problem is null))
+        var liveResults = results.Where(r => r.Problem is null).ToList();
+        var depth = liveResults.Count == 0 ? 0 : liveResults.Max(r => r.Items.Count);
+        for (var index = 0; index < depth && lines.Count < limit; index++)
         {
-            foreach (var item in result.Items)
+            foreach (var result in liveResults)
             {
                 if (lines.Count >= limit) break;
+                if (index >= result.Items.Count) continue;
+                var item = result.Items[index];
                 lines.Add(EscapeUntrusted($"[{result.Name}] {item.Time} {item.Title} — {item.Text}"));
             }
-            if (lines.Count >= limit) break;
         }
         if (lines.Count == 0)
         {

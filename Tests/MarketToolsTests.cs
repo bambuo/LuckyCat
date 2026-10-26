@@ -272,6 +272,50 @@ public class MarketToolsTests
     }
 
     [Fact]
+    public async Task News_round_robins_across_sources_instead_of_letting_the_first_source_fill_the_limit()
+    {
+        // 3 源 × 5 条、limit=6：甲/乙/丙各 2 条且按轮次交错，而不是甲源先吃满 6 行。
+        var tools = new MarketTools(new MarketDataCache(new RoundRobinReader()), new StrategyConfig { NewsEnabled = true },
+            new HashSet<string>(["BTC/USDT"]));
+
+        var result = await tools.GetNewsAsync(6, default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var text = result.Data!.Value.GetString()!;
+        var lines = text.Split('\n').Where(line => line.StartsWith('[')).ToList();
+        Assert.Equal(6, lines.Count);
+        Assert.Equal(2, lines.Count(line => line.StartsWith("[甲源]")));
+        Assert.Equal(2, lines.Count(line => line.StartsWith("[乙源]")));
+        Assert.Equal(2, lines.Count(line => line.StartsWith("[丙源]")));
+        Assert.StartsWith("[甲源]", lines[0]);
+        Assert.StartsWith("[乙源]", lines[1]);
+        Assert.StartsWith("[丙源]", lines[2]);
+        Assert.Contains("标题甲-1", lines[0]);
+        Assert.Contains("标题乙-1", lines[1]);
+        Assert.Contains("标题丙-1", lines[2]);
+        Assert.Contains("标题甲-2", lines[3]);
+        Assert.Contains("标题乙-2", lines[4]);
+        Assert.Contains("标题丙-2", lines[5]);
+        Assert.EndsWith("</untrusted>", text);
+    }
+
+    [Fact]
+    public async Task News_single_source_keeps_sequential_order()
+    {
+        var tools = new MarketTools(new MarketDataCache(new SingleSourceReader()), new StrategyConfig { NewsEnabled = true },
+            new HashSet<string>(["BTC/USDT"]));
+
+        var result = await tools.GetNewsAsync(3, default);
+
+        Assert.True(result.Ok, result.Error?.Message);
+        var lines = result.Data!.Value.GetString()!.Split('\n').Where(line => line.StartsWith('[')).ToList();
+        Assert.Equal(3, lines.Count);
+        Assert.Contains("标题-1", lines[0]);
+        Assert.Contains("标题-2", lines[1]);
+        Assert.Contains("标题-3", lines[2]);
+    }
+
+    [Fact]
     public async Task Auditor_persists_invocation_enforces_budget_and_publishes_failure()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -476,6 +520,35 @@ public class MarketToolsTests
                     [new ExternalDataItem("2026-10-25T18:23:36Z", "", "内置快讯条目")], null, Now)
             ]);
         }
+    }
+
+    /// <summary>3 个内置源、各 5 条，用于验证 get_news 的跨源轮转取条。</summary>
+    private sealed class RoundRobinReader : StubReader
+    {
+        public override Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(
+            IEnumerable<ExternalDataSource> sources, CancellationToken ct)
+        {
+            var results = new[] { "甲源", "乙源", "丙源" }.Select(name =>
+                new ExternalDataResult(name,
+                    Enumerable.Range(1, 5)
+                        .Select(i => new ExternalDataItem($"t-{i}", $"标题{name[0]}-{i}", $"正文{name[0]}-{i}"))
+                        .ToList(),
+                    null, Now)).ToList();
+            return Task.FromResult<IReadOnlyList<ExternalDataResult>>(results);
+        }
+    }
+
+    /// <summary>单源 5 条：轮转改动后单源仍应按 1→2→3 顺序取条。</summary>
+    private sealed class SingleSourceReader : StubReader
+    {
+        public override Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(
+            IEnumerable<ExternalDataSource> sources, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<ExternalDataResult>>(
+            [
+                new ExternalDataResult("独源",
+                    Enumerable.Range(1, 5).Select(i => new ExternalDataItem($"t-{i}", $"标题-{i}", $"正文-{i}")).ToList(),
+                    null, Now)
+            ]);
     }
 
     private sealed class BigReader : StubReader
