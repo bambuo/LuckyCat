@@ -398,8 +398,8 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         // description（纯文本）优先于 HTML content；content 中的标签不得漏进 Text
         Assert.Equal("ChainCatcher 消息，博通 (AVGO.O) 筹集 600 亿美元，用于为 Anthropic 供应芯片。", first.Text);
         Assert.DoesNotContain("<p>", first.Text);
-        // 1790914786000 ms ÷ 1000 = 1790914786 s；1790914786 = 20728×86400 + 101986，
-        // 101986 s = 28h19m46s（跨日取次日 04:19:46），epoch 后第 20728 天 = 2026-10-02。
+        // 1790914786000 ms ÷ 1000 = 1790914786 s；1790914786 = 20727×86400 + 101986，
+        // 101986 s = 28h19m46s（落进第 20728 天 04:19:46），第 20728 天 = 2026-10-02。
         Assert.Equal("2026-10-02T04:19:46Z", first.Time);
 
         // 超长 description 按 200 字符截断（省略号计入），且不会回落到 HTML content
@@ -472,6 +472,21 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         Assert.Empty(timeoutResult.Items);
         Assert.NotNull(timeoutResult.Problem);
         Assert.Contains("超时", timeoutResult.Problem);
+    }
+
+    [Fact]
+    public async Task ChainCatcher_failure_is_not_cached_so_the_next_cycle_retries()
+    {
+        // 失败缓存 600s 会让一次瞬时抖动把该源藏满 10 分钟；失败一律不缓存，下次调用重新请求。
+        var (source, handler) = NewChainCatcherSource((_, _) => Task.FromResult(JsonResponse(
+            """{"result":0,"message":"invalid language code"}""")));
+
+        var first = await source.FetchAsync(10, default);
+        var second = await source.FetchAsync(10, default);
+
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal("服务返回错误", first.Problem);
+        Assert.Equal("服务返回错误", second.Problem);
     }
 
     [Fact]

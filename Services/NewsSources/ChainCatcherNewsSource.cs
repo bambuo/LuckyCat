@@ -69,9 +69,11 @@ public sealed class ChainCatcherNewsSource(IHttpClientFactory httpClientFactory)
         {
             result = Failure("拉取超时");
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // 异常原文可能含上游 URL/凭据形状内容，Problem 只给固定中文原因（LC-STD-02）
+            // 异常原文可能含上游 URL/凭据形状内容，Problem 只给固定中文原因（LC-STD-02）；
+            // 异常类型名只进日志，便于区分上游故障与自身缺陷。
+            Console.WriteLine($"[News] {Name} 拉取异常（{ex.GetType().Name}）");
             result = Failure("拉取失败");
         }
 
@@ -81,7 +83,8 @@ public sealed class ChainCatcherNewsSource(IHttpClientFactory httpClientFactory)
         }
 
         result = result with { FetchedAtUtc = DateTime.UtcNow };
-        Store(result);
+        // 失败不缓存：600s 的失败窗口会让一次瞬时抖动把该源藏 10 分钟（外部源无 SLA，宁可下轮重试）
+        if (result.Problem is null) Store(result);
         return result;
     }
 
