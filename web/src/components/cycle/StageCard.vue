@@ -25,12 +25,15 @@ function roleLabel(role: StageRole): string {
   return ROLE_LABELS[role] ?? role
 }
 
-function statusMeta(status: StageStatus): { label: string; color: string } {
-  return STATUS_META[status] ?? { label: status, color: 'gray' }
+function statusMeta(stage: StageDto): { label: string; color: string } {
+  // 阶段超时仍是 failed 终态，但界面需要与普通异常区分；错误文本由后端 stage_timeout 前缀标识。
+  if (stage.error?.startsWith('stage_timeout')) return { label: '超时', color: 'orange' }
+  return STATUS_META[stage.status] ?? { label: stage.status, color: 'gray' }
 }
 
 function formatElapsed(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`
+  // 历史失败记录曾固定写 0：没有真实耗时就不显示 0.0s。
+  return ms > 0 ? `${(ms / 1000).toFixed(1)}s` : '—'
 }
 
 function formatTokens(value: number | null): string {
@@ -43,7 +46,7 @@ function formatTokens(value: number | null): string {
     <template #title>
       <a-space :size="8">
         <span class="stage-role">{{ roleLabel(stage.role) }}</span>
-        <a-tag size="small" :color="statusMeta(stage.status).color">{{ statusMeta(stage.status).label }}</a-tag>
+        <a-tag size="small" :color="statusMeta(stage).color">{{ statusMeta(stage).label }}</a-tag>
         <span class="stage-elapsed">{{ formatElapsed(stage.elapsedMs) }}</span>
       </a-space>
     </template>

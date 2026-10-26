@@ -49,20 +49,29 @@ public sealed class TraderExecutor(TradingCycleContext ctx, TradingAgentFactory 
         AgentRunResult<AgentTradeProposal> result;
         try
         {
-            result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
-        }
-        catch (AgentOutputFormatException)
-        {
-            // 输出不是合法 JSON 契约：与越界动作同属契约失败，走 FLOW-07 的同一次重试
-            result = null!;
-        }
+            try
+            {
+                result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
+            }
+            catch (AgentOutputFormatException)
+            {
+                // 输出不是合法 JSON 契约：与越界动作同属契约失败，走 FLOW-07 的同一次重试
+                result = null!;
+            }
 
-        // FLOW-07（LC-STD-05）：交易员契约失败先重试 1 次——同一提示词、同一阶段超时窗口内再跑一轮
-        // （不新起阶段，模型调用消耗仍归本阶段预算）；重试得到合法输出则照常继续。
-        if (result is null || !IsContractValid(result.Output))
+            // FLOW-07（LC-STD-05）：交易员契约失败先重试 1 次——同一提示词、同一阶段超时窗口内再跑一轮
+            // （不新起阶段，模型调用消耗仍归本阶段预算）；重试得到合法输出则照常继续。
+            if (result is null || !IsContractValid(result.Output))
+            {
+                attempt = 2;
+                result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
+            }
+        }
+        catch (OperationCanceledException) when (stageTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
         {
-            attempt = 2;
-            result = await runner.RunAsync<AgentTradeProposal>(agent, prompt, stageTimeout.Token);
+            // 仅阶段自身超时写入计时；用户停止/周期超时的取消不得伪装成阶段超时。
+            ctx.MarkStageTimeout(Stage, started.ElapsedMilliseconds);
+            throw;
         }
 
         var proposal = result.Output;

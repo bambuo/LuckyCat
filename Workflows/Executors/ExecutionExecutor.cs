@@ -51,7 +51,18 @@ public sealed class ExecutionExecutor(TradingCycleContext ctx, TradingAgentFacto
         // 阶段超时（LC-STD-01 §6）：执行超时同样按失败终止，绝不留下「已提交但阶段未完成」的中间态。
         using var stageTimeout = ctx.StageTimeout(ct, Stage);
         var started = Stopwatch.StartNew();
-        var result = await runner.RunAsync<ExecutionReport>(agent, prompt, stageTimeout.Token);
+        AgentRunResult<ExecutionReport> result;
+        try
+        {
+            result = await runner.RunAsync<ExecutionReport>(agent, prompt, stageTimeout.Token);
+        }
+        catch (OperationCanceledException) when (stageTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // 仅阶段自身超时写入计时；用户停止/周期超时的取消不得伪装成阶段超时。
+            ctx.MarkStageTimeout(Stage, started.ElapsedMilliseconds);
+            throw;
+        }
+
         var report = result.Output;
         var stats = StageRunStats.From(result.Messages, result.Usage, started.ElapsedMilliseconds);
 

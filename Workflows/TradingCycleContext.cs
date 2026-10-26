@@ -66,6 +66,9 @@ public sealed record StageRunStats(
         : value.HasValue ? (int)value.Value : null;
 }
 
+/// <summary>阶段超时事实（阶段名、实际耗时、配置的秒数），由执行器在超时令牌触发时写入上下文。</summary>
+public sealed record StageTimeoutFailure(string Stage, long ElapsedMs, int TimeoutSeconds);
+
 /// <summary>
 /// 单周期作用域上下文（LC-STD-01 §4.2）：持有交易员、策略快照、提供商、账户、模式、触发来源、
 /// 行情缓存、账户读取器、工具预算与落库记录器。不得包含可变静态状态，不同周期之间不共享。
@@ -102,7 +105,14 @@ public sealed class TradingCycleContext(
     /// <summary>周期终态（阶段写入、Finalizer 读取）。</summary>
     public CycleOutcome? Outcome { get; private set; }
 
+    /// <summary>本周期第一个撞上自身阶段超时的阶段；仅供宿主归因 stage_timeout，不影响路由。</summary>
+    public StageTimeoutFailure? TimedOutStage { get; private set; }
+
     public void SetOutcome(CycleOutcome outcome) => Outcome = outcome;
+
+    /// <summary>执行器在阶段超时令牌触发时写入真实耗时；用户/周期级取消不得调用。</summary>
+    public void MarkStageTimeout(string stage, long elapsedMs) =>
+        TimedOutStage = new StageTimeoutFailure(stage, elapsedMs, Budget.StageTimeoutSeconds(stage));
 
     /// <summary>
     /// SSE 频道的单点决策（R-11-7）：试运行按周期独立成频道（<see cref="CycleRecorder.TestRunChannel"/>），

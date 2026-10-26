@@ -171,7 +171,7 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
     /// 只写稳定错误码与中文摘要，绝不写入上游异常原文（R-11-1）。
     /// </summary>
     public async Task RecordStageFailureAsync(string role, string stageRunId, string errorCode, string summary,
-        CancellationToken ct)
+        long elapsedMs, CancellationToken ct)
     {
         if (_ctx is not { } ctx || _cycle is null) return;
 
@@ -190,13 +190,14 @@ public sealed class CycleRecorder(AppDbContext db, SseEventHub hub) : ICycleReco
             Instructions = PromptLibrary.Build(RoleOf(role), ctx.Config),
             TranscriptJson = "[]",
             Error = Truncate($"{errorCode}：{summary}", 1000),
+            ElapsedMs = elapsedMs,
             ToolCallCount = toolCalls,
             Truncated = false,
             CreatedAt = DateTime.UtcNow,
         });
         await db.SaveChangesAsync(CancellationToken.None);
         hub.Publish(_channelKey!, new SseEvent("stage", new StageRecordedEvent(ctx.CycleId, stageRunId, role,
-            "failed", 1, 0, null, null, toolCalls, null, Truncate($"{errorCode}：{summary}", 500))));
+            "failed", 1, elapsedMs, null, null, toolCalls, null, Truncate($"{errorCode}：{summary}", 500))));
     }
 
     /// <summary>

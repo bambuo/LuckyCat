@@ -67,6 +67,7 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
     //    stage_failed 与 cycle_internal_error 为本轮补充的通用失败码）——
     internal const string RiskStageFailedCode = "risk_stage_failed";
     internal const string StageFailedCode = "stage_failed";
+    internal const string StageTimeoutCode = "stage_timeout";
     internal const string CycleTimeoutCode = "cycle_timeout";
     internal const string CancelledByUserCode = "cancelled_by_user";
     internal const string ProcessRestartCode = "process_restart";
@@ -505,21 +506,30 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         switch (evt)
         {
             case ExecutorFailedEvent failed:
+                // 阶段自身超时优先归因 stage_timeout（执行器已记录真实耗时）；
                 // 预算闸拒绝（每次模型调用前的检查）归因到既有 token 码；其余沿用阶段/风控失败码。
+                var timedOut = ctx.TimedOutStage is { } timeout
+                    && string.Equals(timeout.Stage, failed.ExecutorId, StringComparison.Ordinal)
+                        ? timeout
+                        : null;
                 var refused = IsTokenBudgetRefusal(failed.Data);
-                var code = refused
-                    ? TokenBudgetExhaustedCode
-                    : failed.ExecutorId == "risk" ? RiskStageFailedCode : StageFailedCode;
-                var summary = refused
-                    ? "输入 token 预算已达上限，不再发起模型调用，本周期已按失败安全终止"
-                    : failed.ExecutorId == "risk"
-                        ? "风控阶段执行失败，本周期已按失败安全终止（不下单）"
-                        : $"{failed.ExecutorId} 阶段执行失败，本周期已按失败安全终止";
+                var code = timedOut is not null
+                    ? StageTimeoutCode
+                    : refused
+                        ? TokenBudgetExhaustedCode
+                        : failed.ExecutorId == "risk" ? RiskStageFailedCode : StageFailedCode;
+                var summary = timedOut is not null
+                    ? $"{StageLabel(failed.ExecutorId)}阶段执行超时（{timedOut.TimeoutSeconds} 秒），本周期已按失败安全终止"
+                    : refused
+                        ? "输入 token 预算已达上限，不再发起模型调用，本周期已按失败安全终止"
+                        : failed.ExecutorId == "risk"
+                            ? "风控阶段执行失败，本周期已按失败安全终止（不下单）"
+                            : $"{failed.ExecutorId} 阶段执行失败，本周期已按失败安全终止";
                 state.StageFailure ??= new StageFailure(code, summary);
                 if (slots.TryGetValue(failed.ExecutorId, out var slot))
                 {
                     await recorder.RecordStageFailureAsync(slot.Role, slot.StageRunId, code, summary,
-                        CancellationToken.None);
+                        timedOut?.ElapsedMs ?? 0, CancellationToken.None);
                 }
                 LogException($"cycle:{ctx.CycleId} stage:{failed.ExecutorId}", failed.Data);
                 break;
@@ -636,6 +646,15 @@ public class TradingCycleRunner(IServiceScopeFactory scopeFactory, SseEventHub h
         }
         return parsed;
     }
+
+    private static string StageLabel(string executorId) => executorId switch
+    {
+        "analyst" => "分析师",
+        "trader" => "交易员",
+        "risk" => "风控",
+        "executor" => "执行员",
+        _ => executorId,
+    };
 
     private static void LogException(string context, Exception? ex)
     {

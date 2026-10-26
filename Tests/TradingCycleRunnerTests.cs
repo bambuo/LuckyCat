@@ -287,10 +287,13 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
 
         var cycle = await env.Db.TradingCycles.SingleAsync();
         Assert.Equal("failed", cycle.Status);
-        Assert.Equal("risk_stage_failed", cycle.ErrorCode);
+        Assert.Equal("stage_timeout", cycle.ErrorCode);
+        Assert.Contains("风控阶段执行超时（1 秒）", cycle.Error);
         Assert.Empty(env.Db.RiskVerdicts);
         Assert.Empty(env.Db.TraderOrders);
-        Assert.Equal("failed", (await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "risk")).Status);
+        var riskStage = await env.Db.AgentStageRuns.SingleAsync(r => r.Role == "risk");
+        Assert.Equal("failed", riskStage.Status);
+        Assert.InRange(riskStage.ElapsedMs, 900, 15_000);
         // 分析/交易两段正常落库，风控段按失败落库，执行段根本没有运行（fail-closed 不下单）。
         Assert.Equal(["analyst", "risk", "trader"],
             (await env.Db.AgentStageRuns.ToListAsync()).Select(r => r.Role).OrderBy(r => r, StringComparer.Ordinal).ToArray());
@@ -391,6 +394,29 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         Assert.Equal("stage_failed", cycle.ErrorCode);
         Assert.Empty(env.Db.TradeProposals);
         Assert.Equal("failed", (await env.Db.AgentStageRuns.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Analyst_stage_timeout_reports_timeout_code_and_actual_elapsed()
+    {
+        // 阶段超时不是通用 stage_failed：错误码、文案与耗时都必须如实反映 1 秒超时，
+        // 界面不能显示 0.0s（修复前失败记录固定写 Empty stats）。
+        await using var env = await RunnerEnv.CreateAsync(analystBehavior: "hang", analystTimeoutSeconds: 1);
+
+        await env.Runner.RunAsync(env.Trader, default);
+
+        var cycle = await env.Db.TradingCycles.SingleAsync();
+        Assert.Equal("failed", cycle.Status);
+        Assert.Equal("stage_timeout", cycle.ErrorCode);
+        Assert.Contains("阶段执行超时（1 秒）", cycle.Error);
+        Assert.Empty(env.Db.TradeProposals);
+        Assert.True(env.Clients.StageObservedCancellation);
+
+        var stage = await env.Db.AgentStageRuns.SingleAsync();
+        Assert.Equal("analyst", stage.Role);
+        Assert.Equal("failed", stage.Status);
+        Assert.Contains("stage_timeout", stage.Error);
+        Assert.InRange(stage.ElapsedMs, 900, 15_000);
     }
 
     [Fact]
@@ -934,7 +960,8 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
         public static async Task<RunnerEnv> CreateAsync(
             string analystBehavior = "brief", string riskBehavior = "approve",
             string executorBehavior = "clean", string clientFactoryBehavior = "normal",
-            int cycleTimeoutSeconds = 300, int riskTimeoutSeconds = 45, List<SymbolPosition>? positions = null,
+            int cycleTimeoutSeconds = 300, int riskTimeoutSeconds = 45, int analystTimeoutSeconds = 90,
+            List<SymbolPosition>? positions = null,
             bool hangPositions = false, bool terminalFaultOnce = false, string traderBehavior = "proposal",
             int inputTokenBudget = 0)
         {
@@ -956,6 +983,7 @@ public class TradingCycleRunnerTests(ITestOutputHelper output)
                 {
                     CycleTimeoutSeconds = cycleTimeoutSeconds,
                     RiskTimeoutSeconds = riskTimeoutSeconds,
+                    AnalystTimeoutSeconds = analystTimeoutSeconds,
                 }
             };
             if (inputTokenBudget > 0) config.AgentBudget.InputTokenBudget = inputTokenBudget;
