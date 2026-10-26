@@ -33,8 +33,10 @@ builder.Services.AddScoped<MarketSentimentService>();
 builder.Services.AddScoped<ExternalDataSourceService>();
 // 内置新闻源（Task 14.5/14.6/14.7）：都只依赖单例 IHttpClientFactory，自身仅持本地 TTL 缓存，
 // 不俘获 HttpClient；聚合器与 ExternalDataSourceService 同为 scoped（后者是 scoped，单例注入会构成 captive 依赖）。
-// 注册顺序即 IEnumerable<INewsSource> 顺序，也是 get_news 轮转取条的首轮顺序：
-// 金十 → 链捕手（最及时的中文快讯）→ PANews → Binance/OKX 公告 → 四家英文媒体 → 美联储/财经日历。
+// 注册顺序即 IEnumerable<INewsSource> 顺序，也是 get_news 轮转取条的首轮顺序（limit 上限 10，
+// 内置源已有 11 个 → 每轮只有前 10 个有出场机会）：
+// 金十 → 链捕手（最及时的中文快讯）→ PANews → Binance/OKX 公告 → 财经日历 → 美联储 → 四家英文媒体。
+// 财经日历没有事件时返回 Problem、不占轮转名额，此时最后一家英文媒体（Decrypt）补进第 10 行。
 builder.Services.AddSingleton<Jin10NewsSource>();
 builder.Services.AddSingleton<ChainCatcherNewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());
@@ -46,6 +48,10 @@ builder.Services.AddSingleton<BinanceAnnouncementsNewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<BinanceAnnouncementsNewsSource>());
 builder.Services.AddSingleton<OkxAnnouncementsNewsSource>();
 builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<OkxAnnouncementsNewsSource>());
+builder.Services.AddSingleton<ForexCalendarNewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<ForexCalendarNewsSource>());
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "美联储新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml", sp.GetRequiredService<IHttpClientFactory>()));
 builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
     "Cointelegraph", "https://cointelegraph.com/rss", sp.GetRequiredService<IHttpClientFactory>()));
 builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
@@ -54,10 +60,6 @@ builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
     "The Block", "https://www.theblock.co/rss.xml", sp.GetRequiredService<IHttpClientFactory>()));
 builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
     "Decrypt", "https://decrypt.co/feed", sp.GetRequiredService<IHttpClientFactory>()));
-builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
-    "美联储新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml", sp.GetRequiredService<IHttpClientFactory>()));
-builder.Services.AddSingleton<ForexCalendarNewsSource>();
-builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<ForexCalendarNewsSource>());
 builder.Services.AddScoped<CryptoNewsAggregator>();
 builder.Services.AddScoped<ExchangeTradingService>();
 // P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的宿主与旧单发演练链路已在
