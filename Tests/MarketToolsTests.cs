@@ -300,6 +300,31 @@ public class MarketToolsTests
     }
 
     [Fact]
+    public async Task News_limit_12_covers_all_eleven_sources_and_13_is_rejected()
+    {
+        // 内置源 11 家、各 2 条：limit=12 的轮转第一圈让 11 家全部出场，第 12 行回到首家取第 2 条。
+        var tools = new MarketTools(new MarketDataCache(new ElevenSourceReader()),
+            new StrategyConfig { NewsEnabled = true }, new HashSet<string>(["BTC/USDT"]));
+
+        var accepted = await tools.GetNewsAsync(12, default);
+
+        Assert.True(accepted.Ok, accepted.Error?.Message);
+        var lines = accepted.Data!.Value.GetString()!.Split('\n').Where(line => line.StartsWith('[')).ToList();
+        Assert.Equal(12, lines.Count);
+        for (var index = 1; index <= 11; index++)
+        {
+            Assert.Contains(lines, line => line.StartsWith($"[源{index}]"));
+        }
+        // 第 12 行来自轮转第二圈：首家第 2 条，而不是被某一家吃满。
+        Assert.StartsWith("[源1]", lines[11]);
+        Assert.Contains("标题源1-2", lines[11]);
+
+        var rejected = await tools.GetNewsAsync(13, default);
+        Assert.False(rejected.Ok);
+        Assert.Equal(ToolErrors.InvalidArgument, rejected.Error!.Code);
+    }
+
+    [Fact]
     public async Task News_single_source_keeps_sequential_order()
     {
         var tools = new MarketTools(new MarketDataCache(new SingleSourceReader()), new StrategyConfig { NewsEnabled = true },
@@ -532,6 +557,22 @@ public class MarketToolsTests
                 new ExternalDataResult(name,
                     Enumerable.Range(1, 5)
                         .Select(i => new ExternalDataItem($"t-{i}", $"标题{name[0]}-{i}", $"正文{name[0]}-{i}"))
+                        .ToList(),
+                    null, Now)).ToList();
+            return Task.FromResult<IReadOnlyList<ExternalDataResult>>(results);
+        }
+    }
+
+    /// <summary>11 个内置源、各 2 条：验证 limit=12 时全部源都能出场。</summary>
+    private sealed class ElevenSourceReader : StubReader
+    {
+        public override Task<IReadOnlyList<ExternalDataResult>> GetNewsAsync(
+            IEnumerable<ExternalDataSource> sources, CancellationToken ct)
+        {
+            var results = Enumerable.Range(1, 11).Select(index =>
+                new ExternalDataResult($"源{index}",
+                    Enumerable.Range(1, 2)
+                        .Select(i => new ExternalDataItem($"t-{i}", $"标题源{index}-{i}", $"正文源{index}-{i}"))
                         .ToList(),
                     null, Now)).ToList();
             return Task.FromResult<IReadOnlyList<ExternalDataResult>>(results);
