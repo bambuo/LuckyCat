@@ -7,16 +7,13 @@ namespace LuckyCat.Services;
 
 /// <summary>
 /// 阶段/工具明细 90 天保留清理（LC-STD-03 §2.5）：每日本地 03:30 跑一次，同一事务内先删
-/// <see cref="ToolInvocation"/>、再删 <see cref="AgentStageRun"/>，每批 5,000 行一条 DELETE 循环到清空；
-/// 启动已过 03:30 不回补（首次排到次日 03:30），单次失败只记异常类型并在下一日程重试。
+/// <see cref="ToolInvocation"/>、再删 <see cref="AgentStageRun"/>，每表一条按 cutoff 的 DELETE 即可
+/// 删完所有到期行；启动已过 03:30 不回补（首次排到次日 03:30），单次失败只记异常类型并在下一日程重试。
 /// 模型未声明 HasOne/HasForeignKey，不存在「被外键引用而需跳过」的行；TraderLesson.StageRunId
 /// 只是松散历史引用，不阻止明细清理，经验正文永久保留。
 /// </summary>
 public sealed class DataRetentionService : BackgroundService
 {
-    /// <summary>单条 DELETE 的行数上限，避免一条大语句长时间持锁。</summary>
-    internal const int BatchSize = 5_000;
-
     /// <summary>明细保留期：90 天（严格小于 cutoff 才删除，恰好 90 天保留）。</summary>
     internal static readonly TimeSpan RetentionPeriod = TimeSpan.FromDays(90);
 
@@ -80,7 +77,7 @@ public sealed class DataRetentionService : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        // 工具明细先于阶段明细；两者与分批删除同属一个事务。
+        // 工具明细先于阶段明细；两条删除同属一个事务。
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         var tools = await DeleteToolInvocationsAsync(db, cutoff, ct);
         var stages = await DeleteAgentStageRunsAsync(db, cutoff, ct);
@@ -106,51 +103,19 @@ public sealed class DataRetentionService : BackgroundService
 
     internal DateTimeOffset NextRunAt() => NextRunAt(_clock());
 
-    private static async Task<int> DeleteToolInvocationsAsync(AppDbContext db, DateTime cutoff, CancellationToken ct)
-    {
-        var deleted = 0;
-        while (true)
-        {
-            // ExecuteDelete 不支持 Take/Skip：先物化一批主键，再按主键删除（每批一条 DELETE）。
-            var ids = await db.ToolInvocations.AsNoTracking()
-                .Where(invocation => invocation.CreatedAt < cutoff)
-                .OrderBy(invocation => invocation.Id)
-                .Select(invocation => invocation.Id)
-                .Take(BatchSize)
-                .ToListAsync(ct);
-            if (ids.Count == 0) break;
+    // 不再分批：ExecuteDelete 不支持 Take/Skip，旧实现只能先物化 5,000 个主键再按主键删除，
+    // 白多一次查询并抬高内存峰值。SQLite 的单条 DELETE 本就能按 cutoff 删完匹配行，
+    // 因此两表各用一句 ExecuteDelete 直接交给数据库（仍包在同一事务内）。
+    private static Task<int> DeleteToolInvocationsAsync(AppDbContext db, DateTime cutoff, CancellationToken ct) =>
+        db.ToolInvocations
+            .Where(invocation => invocation.CreatedAt < cutoff)
+            .ExecuteDeleteAsync(ct);
 
-            deleted += await db.ToolInvocations
-                .Where(invocation => ids.Contains(invocation.Id))
-                .ExecuteDeleteAsync(ct);
-            if (ids.Count < BatchSize) break;
-        }
-
-        return deleted;
-    }
-
-    private static async Task<int> DeleteAgentStageRunsAsync(AppDbContext db, DateTime cutoff, CancellationToken ct)
-    {
-        var deleted = 0;
-        while (true)
-        {
-            var ids = await db.AgentStageRuns.AsNoTracking()
-                .Where(stage => stage.CreatedAt < cutoff)
-                .OrderBy(stage => stage.Id)
-                .Select(stage => stage.Id)
-                .Take(BatchSize)
-                .ToListAsync(ct);
-            if (ids.Count == 0) break;
-
-            // 无 FK 约束：TraderLesson.StageRunId 是松散历史引用，不阻塞删除。
-            deleted += await db.AgentStageRuns
-                .Where(stage => ids.Contains(stage.Id))
-                .ExecuteDeleteAsync(ct);
-            if (ids.Count < BatchSize) break;
-        }
-
-        return deleted;
-    }
+    private static Task<int> DeleteAgentStageRunsAsync(AppDbContext db, DateTime cutoff, CancellationToken ct) =>
+        // 无 FK 约束：TraderLesson.StageRunId 是松散历史引用，不阻塞删除。
+        db.AgentStageRuns
+            .Where(stage => stage.CreatedAt < cutoff)
+            .ExecuteDeleteAsync(ct);
 }
 
 /// <summary>一次清理的结果：各表删除行数与耗时。</summary>

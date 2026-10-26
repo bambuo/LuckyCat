@@ -100,12 +100,12 @@ public class DataRetentionTests
     }
 
     [Fact]
-    public async Task Deletion_loops_in_batches_until_no_rows_remain()
+    public async Task Single_delete_clears_more_than_the_old_batch_size()
     {
         await using var env = await RetentionEnv.CreateAsync();
         var cutoff = Now.UtcDateTime.AddDays(-90);
-        // 超过单批上限 1 行：必须至少两条 DELETE 才能清空，循环判定不能提前退出。
-        for (var i = 0; i <= DataRetentionService.BatchSize; i++)
+        // 旧实现每批 5,000 行循环；改为单条 ExecuteDelete 后必须一次清空超过旧批大小的存量。
+        for (var i = 0; i < 5_001; i++)
         {
             env.SeedTool("stage-bulk", cutoff.AddDays(-1));
         }
@@ -113,8 +113,40 @@ public class DataRetentionTests
 
         var result = await env.Service.RunOnceAsync(Now, default);
 
-        Assert.Equal(DataRetentionService.BatchSize + 1, result.ToolInvocationsDeleted);
+        Assert.Equal(5_001, result.ToolInvocationsDeleted);
         Assert.Equal(0, await env.Db.ToolInvocations.CountAsync());
+    }
+
+    [Fact]
+    public async Task Scheduled_failure_is_logged_as_type_only_and_does_not_escape()
+    {
+        // 走已有时钟注入缝：本地 03:30 零等待触发一次，之后返回 03:31 让循环进入当日等待。
+        var at330 = LocalTime(3, 30);
+        var at331 = LocalTime(3, 31);
+        var clockCalls = 0;
+        var service = new DataRetentionService(new ThrowingScopeFactory(),
+            () => clockCalls++ == 0 ? at330 : at331);
+
+        var original = Console.Out;
+        var log = new FailureLog();
+        Console.SetOut(log);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            await service.StartAsync(cts.Token);
+            // 首轮在后台线程执行：等失败日志实际写出后再停止，避免把取消当成「未运行」。
+            await log.FailureWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.StopAsync(CancellationToken.None);
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+
+        var text = log.ToString();
+        Assert.Contains("[Retention] 清理失败：InvalidOperationException", text);
+        // 只记录异常类型：异常原文（可能含内部路径）不得进日志。
+        Assert.DoesNotContain("scope factory unavailable", text);
     }
 
     [Fact]
@@ -136,6 +168,33 @@ public class DataRetentionTests
 
     private static DateTime LocalWallClock(DateTimeOffset instant) =>
         TimeZoneInfo.ConvertTime(instant, TimeZoneInfo.Local).DateTime;
+
+    private static DateTimeOffset LocalTime(int hour, int minute)
+    {
+        var local = new DateTime(2026, 10, 26, hour, minute, 0);
+        return new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+    }
+
+    private sealed class ThrowingScopeFactory : IServiceScopeFactory
+    {
+        public IServiceScope CreateScope() =>
+            throw new InvalidOperationException("scope factory unavailable: /secret/path");
+    }
+
+    /// <summary>收集控制台输出，并在清理失败日志写出时放行测试线程。</summary>
+    private sealed class FailureLog : StringWriter
+    {
+        public TaskCompletionSource FailureWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override void WriteLine(string? value)
+        {
+            base.WriteLine(value);
+            if (value?.Contains("[Retention] 清理失败", StringComparison.Ordinal) == true)
+            {
+                FailureWritten.TrySetResult();
+            }
+        }
+    }
 
     private sealed class RetentionEnv : IAsyncDisposable
     {
