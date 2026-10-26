@@ -110,7 +110,7 @@ const emit = defineEmits<{
 
       <a-collapse-item key="context" class="section-item">
         <template #header>
-          <span class="section-title"><IconLoop class="section-icon success" />上下文增强</span>
+          <span class="section-title"><IconLoop class="section-icon success" />记忆与消息面</span>
         </template>
         <div class="context-body">
           <div class="context-row">
