@@ -1861,17 +1861,12 @@ function shortCycleId(id: string): string {
   color: rgb(var(--danger-6));
 }
 
+/* 只有左列内容（净值曲线 + 当前持仓）：单列全宽，避免右侧 1fr 留白 */
 .main-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
-}
-
-@media (max-width: 1000px) {
-  .main-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .main-left {

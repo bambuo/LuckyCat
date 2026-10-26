@@ -51,6 +51,14 @@ const scale = computed(() => {
   const pad = (max - min) * 0.08
   min -= pad
   max += pad
+  // 采样几乎不变时（如实盘空仓、净值恒定），把定义域撑到最小跨度，
+  // 否则 4 个刻度会因整数格式化全部显示成同一个值。
+  const minSpan = Math.max(Math.abs((min + max) / 2) * 0.004, props.percentMode ? 0.2 : 0.04)
+  if (max - min < minSpan) {
+    const center = (min + max) / 2
+    min = center - minSpan / 2
+    max = center + minSpan / 2
+  }
   return { min, max }
 })
 
@@ -112,7 +120,12 @@ const xTicks = computed(() => {
 })
 
 function formatAxis(value: number): string {
-  return props.percentMode ? `${value.toFixed(1)}%` : `$${value >= 10000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(0)}`
+  if (props.percentMode) return `${value.toFixed(1)}%`
+  if (value >= 10000) return `$${(value / 1000).toFixed(1)}k`
+  // 按当前定义域跨度选小数位：跨度小的时候必须保留小数，否则刻度会重复
+  const span = scale.value.max - scale.value.min
+  const decimals = span < 1 ? 2 : span < 20 ? 1 : 0
+  return `$${value.toFixed(decimals)}`
 }
 
 function formatTime(iso: string): string {
