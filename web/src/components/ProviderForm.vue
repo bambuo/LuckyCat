@@ -39,7 +39,7 @@ const submitting = ref(false)
 
 const form = reactive({
   name: '',
-  type: 'OpenAICompatible' as ProviderType,
+  type: 'openAICompatible' as ProviderType,
   baseUrl: '',
   apiKey: '',
   model: '',
@@ -53,8 +53,8 @@ const form = reactive({
 const isEdit = computed(() => props.provider !== null)
 const isCustom = computed(() => presetKey.value === CUSTOM_PRESET_KEY)
 const selectedPreset = computed(() => getPreset(presetKey.value))
-const isAzure = computed(() => form.type === 'AzureOpenAI')
-const isOllama = computed(() => form.type === 'Ollama')
+const isAzure = computed(() => form.type === 'azureOpenAI')
+const isOllama = computed(() => form.type === 'ollama')
 
 const canSubmit = computed(
   () => form.name.trim() !== '' && form.baseUrl.trim() !== '' && form.model.trim() !== '',
@@ -131,7 +131,7 @@ watch(
       step.value = 0
       presetKey.value = null
       form.name = ''
-      form.type = 'OpenAICompatible'
+      form.type = 'openAICompatible'
       form.baseUrl = ''
       form.apiKey = ''
       form.model = ''
@@ -155,7 +155,7 @@ function pickPreset(preset: ProviderPreset) {
 
 function pickCustom() {
   presetKey.value = CUSTOM_PRESET_KEY
-  form.type = 'OpenAICompatible'
+  form.type = 'openAICompatible'
   form.baseUrl = ''
   form.model = ''
   form.name = ''

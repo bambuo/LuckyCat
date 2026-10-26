@@ -1,0 +1,328 @@
+{
+  "schemaVersion": "1",
+  "generatedAt": "2026-10-26",
+  "baseline": {
+    "repository": "LuckyCat",
+    "commit": "195a0b5",
+    "targetFramework": "net10.0",
+    "sdk": "10.0.302"
+  },
+  "documents": [
+    {
+      "id": "LC-SPEC-001",
+      "path": "docs/superpowers/specs/2026-10-25-招财猫多智能体重构-设计.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-00",
+      "path": "docs/standards/00-规范索引与版本.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-01",
+      "path": "docs/standards/01-系统架构与多智能体工作流规范.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-02",
+      "path": "docs/standards/02-工具契约与交易安全规范.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-03",
+      "path": "docs/standards/03-数据模型与接口契约规范.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-04",
+      "path": "docs/standards/04-提示词与记忆规范.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-05",
+      "path": "docs/standards/05-测试与验收规范.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    },
+    {
+      "id": "LC-STD-06",
+      "path": "docs/standards/06-外部标准与依赖版本.md",
+      "version": "1.0.0",
+      "status": "生效",
+      "normative": true
+    }
+  ],
+  "externalStandards": [
+    {
+      "id": "EXT-01",
+      "name": "Microsoft Agent Framework Overview",
+      "version": "updated 2026-08-25",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/overview/",
+      "scope": "Agent/Workflows/上下文/中间件总览",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-02",
+      "name": "Agent concepts",
+      "version": "updated 2026-09-24",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/agents/",
+      "scope": "AIAgent、ChatClientAgent、会话、中间件",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-03",
+      "name": "Running agents",
+      "version": "updated 2026-10-15",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/agents/running-agents",
+      "scope": "RunAsync、流式、结构化输出、选项",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-04",
+      "name": "Workflow concepts",
+      "version": "updated 2026-07-30",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/workflows/",
+      "scope": "图模型、超步、执行器与边",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-05",
+      "name": "Workflow Builder & Execution",
+      "version": "updated 2026-10-15",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/workflows/builder-and-execution",
+      "scope": "WorkflowBuilder、事件、流式执行",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-06",
+      "name": "Edges",
+      "version": "updated 2026-10-15",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/workflows/edges",
+      "scope": "条件边、扇出/扇入、AddEdge<T>",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-07",
+      "name": "Agents in Workflows",
+      "version": "updated 2026-10-06",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/workflows/agents-in-workflows",
+      "scope": "Agent 作为执行器、TurnToken、事件",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-08",
+      "name": "Session",
+      "version": "updated 2026-08-25",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/agents/conversations/session",
+      "scope": "AgentSession 生命周期与序列化",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-09",
+      "name": "Context Providers",
+      "version": "2026",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/agents/conversations/context-providers",
+      "scope": "记忆/上下文注入与持久化",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-10",
+      "name": "Agent Middleware",
+      "version": "updated 2026-08-07",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/concepts/agents/middleware/",
+      "scope": "Agent/Function/Chat 中间件与终止",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-11",
+      "name": "Self-hosting",
+      "version": "updated 2026-10-16",
+      "url": "https://learn.microsoft.com/en-us/agent-framework/hosting/self-hosting/",
+      "scope": "Hosting 包为 prerelease；本项目不使用",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-12",
+      "name": "Microsoft.Extensions.AI",
+      "version": "10.10.0",
+      "url": "https://learn.microsoft.com/en-us/dotnet/ai/microsoft-extensions-ai",
+      "scope": "IChatClient、工具、OTel 埋点",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-13",
+      "name": "Server-sent events (WHATWG HTML Living Standard)",
+      "version": "Living",
+      "url": "https://html.spec.whatwg.org/multipage/server-sent-events.html",
+      "scope": "SSE 帧格式、事件、重连",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-14",
+      "name": "RFC 3339",
+      "version": "2005-07",
+      "url": "https://www.rfc-editor.org/rfc/rfc3339",
+      "scope": "UTC 时间戳格式",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-15",
+      "name": "RFC 2119",
+      "version": "1997-03",
+      "url": "https://www.rfc-editor.org/rfc/rfc2119",
+      "scope": "规范性用语",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-16",
+      "name": "Semantic Versioning",
+      "version": "2.0.0",
+      "url": "https://semver.org/",
+      "scope": "文档与依赖版本号",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-17",
+      "name": "OpenTelemetry GenAI Semantic Conventions",
+      "version": "Living",
+      "url": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+      "scope": "模型调用追踪/指标命名；以 M.E.AI 内置埋点为准",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-18",
+      "name": "OpenTelemetry .NET",
+      "version": "1.19.x",
+      "url": "https://github.com/open-telemetry/opentelemetry-dotnet",
+      "scope": "追踪、指标、日志导出",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-19",
+      "name": "EF Core",
+      "version": "10.0.12",
+      "url": "https://learn.microsoft.com/en-us/ef/core/",
+      "scope": "数据访问与 SQLite",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-20",
+      "name": "CryptoClients.Net",
+      "version": "5.9.0",
+      "url": "https://github.com/JKorf/CryptoClients.Net",
+      "scope": "交易所共享 API",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-21",
+      "name": "OllamaSharp",
+      "version": "5.5.0",
+      "url": "https://github.com/awaescher/OllamaSharp",
+      "scope": "本地模型接入",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-22",
+      "name": "Azure.AI.OpenAI",
+      "version": "2.1.0",
+      "url": "https://www.nuget.org/packages/Azure.AI.OpenAI/2.1.0",
+      "scope": "Azure OpenAI 接入",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-23",
+      "name": "Vue",
+      "version": "3.5.42",
+      "url": "https://vuejs.org/",
+      "scope": "前端框架",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-24",
+      "name": "Vite",
+      "version": "8.3.0",
+      "url": "https://vite.dev/",
+      "scope": "前端构建",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-25",
+      "name": "Arco Design Vue",
+      "version": "2.58.0",
+      "url": "https://arco.design/vue",
+      "scope": "组件库",
+      "checkedAt": "2026-10-25"
+    },
+    {
+      "id": "EXT-26",
+      "name": "Bun",
+      "version": "1.x",
+      "url": "https://bun.sh/docs",
+      "scope": "前端包管理与运行",
+      "checkedAt": "2026-10-25"
+    }
+  ],
+  "packages": {
+    "dotnet": {
+      "direct": {
+        "Microsoft.Agents.AI": "1.26.0",
+        "Microsoft.Agents.AI.Workflows": "1.26.0",
+        "Azure.AI.OpenAI": "2.1.0",
+        "CryptoClients.Net": "5.9.0",
+        "Microsoft.EntityFrameworkCore.Sqlite": "10.0.12",
+        "Microsoft.Extensions.AI": "10.10.0",
+        "Microsoft.Extensions.AI.OpenAI": "10.10.1",
+        "Microsoft.Extensions.Http.Resilience": "10.10.0",
+        "OllamaSharp": "5.5.0",
+        "OpenTelemetry.Exporter.Console": "1.19.1",
+        "OpenTelemetry.Exporter.OpenTelemetryProtocol": "1.19.1",
+        "OpenTelemetry.Extensions.Hosting": "1.19.1",
+        "OpenTelemetry.Instrumentation.AspNetCore": "1.19.0",
+        "OpenTelemetry.Instrumentation.Http": "1.19.0",
+        "OpenTelemetry.Instrumentation.Runtime": "1.19.0"
+      },
+      "transitive": {
+        "Microsoft.Agents.AI.Abstractions": "1.26.0",
+        "Microsoft.Extensions.AI.Abstractions": "10.10.1",
+        "OpenTelemetry.Api": "1.18.0"
+      },
+      "prohibited": [
+        "Microsoft.Agents.AI.Hosting",
+        "Microsoft.Agents.AI.Hosting.AspNetCore",
+        "Microsoft.Agents.AI.Hosting.OpenAI"
+      ]
+    },
+    "frontend": {
+      "vue": "^3.5.42",
+      "vue-router": "^5.4.0",
+      "@arco-design/web-vue": "^2.58.0",
+      "markdown-it": "^15.0.2",
+      "vite": "^8.3.0",
+      "typescript": "~6.0.2",
+      "vue-tsc": "^3.3.11",
+      "@vitejs/plugin-vue": "^6.0.8",
+      "@vue/tsconfig": "^0.9.1",
+      "@types/node": "^24.13.3",
+      "@types/markdown-it": "^14.2.0"
+    }
+  },
+  "review": {
+    "lastReviewedAt": "2026-10-25",
+    "cadenceDays": 90,
+    "nextReviewDue": "2027-01-23",
+    "owner": "LuckyCat 工程"
+  }
+}

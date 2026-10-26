@@ -25,8 +25,14 @@ public static class Telemetry
     /// <summary>每周期决策计数（标签：action）。</summary>
     public static readonly Counter<long> Decisions = Meter.CreateCounter<long>("trader.decisions", "1", "交易员每周期决策数");
 
+    /// <summary>周期计数（标签：status=completed|failed|skipped|aborted、trigger；LC-STD-01 §10）。</summary>
+    public static readonly Counter<long> Cycles = Meter.CreateCounter<long>("trader.cycles", "1", "周期计数（按终态）");
+
     /// <summary>AI 调用耗时（毫秒；标签：provider/model）。</summary>
     public static readonly Histogram<double> AiCallDuration = Meter.CreateHistogram<double>("trader.ai.duration", "ms", "AI 调用耗时");
+
+    /// <summary>复盘耗时（毫秒；标签：status=completed|failed|skipped、role=reviewer；LC-STD-01 §10「复盘耗时」）。</summary>
+    public static readonly Histogram<double> ReviewDuration = Meter.CreateHistogram<double>("trader.review.duration", "ms", "复盘任务耗时");
 
     /// <summary>AI token 用量（标签：type=输入/输出）。</summary>
     public static readonly Counter<long> AiTokens = Meter.CreateCounter<long>("trader.ai.tokens", "1", "AI token 用量");

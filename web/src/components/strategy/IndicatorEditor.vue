@@ -1,23 +1,16 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Message } from '@arco-design/web-vue'
 import {
-  IconClockCircle,
   IconDashboard,
-  IconPlus,
   IconStar,
   IconThunderbolt,
 } from '@arco-design/web-vue/es/icon'
 import {
-  createEmptyExternalSource,
-  EXTERNAL_SOURCE_PRESETS,
   INDICATOR_CATALOG,
   SENTIMENT_CATALOG,
   TIMEFRAME_GROUPS,
 } from '../../strategy'
-import type { ExternalSourcePreset } from '../../strategy'
 import type { IndicatorConfig, IndicatorSettings, SentimentConfig } from '../../types'
-import ExternalSourcesEditor from './ExternalSourcesEditor.vue'
 
 type IndicatorKey = 'ema' | 'macd' | 'rsi' | 'atr' | 'boll' | 'vwap'
 
@@ -98,20 +91,6 @@ function indicatorCardStyle(color: string, enabled: boolean): Record<string, str
     borderColor: `color-mix(in srgb, ${color} 35%, transparent)`,
     background: `color-mix(in srgb, ${color} 8%, transparent)`,
   }
-}
-
-// 外部数据源：一键预设（同 URL 提示去重）与空源添加
-function addExternalPreset(preset: ExternalSourcePreset) {
-  const source = preset.make()
-  if (props.config.externalDataSources.some((s) => s.url === source.url)) {
-    Message.info(`已存在相同地址的数据源（${preset.label}）`)
-    return
-  }
-  props.config.externalDataSources.push(source)
-}
-
-function addExternalSource() {
-  props.config.externalDataSources.push(createEmptyExternalSource())
 }
 </script>
 
@@ -251,33 +230,6 @@ function addExternalSource() {
         </div>
       </div>
     </div>
-
-    <!-- 4. 外部数据源 -->
-    <div class="block">
-      <div class="block-head">
-        <IconClockCircle class="block-icon primary" />
-        <span class="block-title">外部数据源</span>
-        <span class="head-actions">
-          <a-button
-            v-for="preset in EXTERNAL_SOURCE_PRESETS"
-            :key="preset.key"
-            size="mini"
-            @click="addExternalPreset(preset)"
-          >
-            <template #icon><IconPlus /></template>
-            {{ preset.label }}
-          </a-button>
-          <a-button size="mini" type="primary" @click="addExternalSource">
-            <template #icon><IconPlus /></template>
-            添加数据源
-          </a-button>
-        </span>
-      </div>
-      <div class="block-desc">
-        AI 测试时并行拉取并注入用户提示词；每源最多 10 条、按刷新间隔缓存，失败源本轮缺席；Prompt 预览仅声明数据源；受「上下文增强 · 实时消息面」总开关控制
-      </div>
-      <ExternalSourcesEditor :sources="config.externalDataSources" />
-    </div>
   </div>
 </template>
 
@@ -327,14 +279,6 @@ function addExternalSource() {
   margin-left: auto;
   font-size: 12px;
   color: var(--color-text-3);
-}
-
-.head-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  flex-wrap: wrap;
 }
 
 .block > :not(.block-head) {

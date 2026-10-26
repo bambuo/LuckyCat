@@ -2,22 +2,61 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
-import { IconArrowFall, IconArrowRise, IconClockCircle, IconCopy, IconDashboard, IconDownload, IconRobot } from '@arco-design/web-vue/es/icon'
-import { closeTraderPosition, getTraderDashboard, listTraders } from '../api'
+import { IconDashboard, IconRobot } from '@arco-design/web-vue/es/icon'
+import {
+  ApiRequestError,
+  closePosition as apiClosePosition,
+  fetchTraderDashboard,
+  getCycle,
+  listTraders,
+  openTraderStream,
+  startTrader,
+  stopTrader,
+} from '../api'
+import type { ConnectionState } from '../api'
 import LuckyCatScene from '../components/trader/LuckyCatScene.vue'
-import type { DashboardDecision, DashboardPosition, Trader, TraderDashboard, TraderOrder } from '../types'
+import CycleTimeline from '../components/cycle/CycleTimeline.vue'
+import OrderCard from '../components/cycle/OrderCard.vue'
+import ProposalCard from '../components/cycle/ProposalCard.vue'
+import VerdictCard from '../components/cycle/VerdictCard.vue'
 import EquityChart from '../components/trader/EquityChart.vue'
-import MarkdownBlock from '../components/trader/MarkdownBlock.vue'
+import type {
+  CycleDetailDto,
+  CycleDto,
+  CycleEvent,
+  CycleOrderDto,
+  CycleStatus,
+  DashboardSample,
+  DashboardSymbolStatDto,
+  ExecutionMode,
+  OrderStatus,
+  ProposalAction,
+  ProposalDto,
+  RecentOrderDto,
+  RiskDecision,
+  StageDto,
+  StageRole,
+  StageStatus,
+  Trader,
+  TraderDashboardDto,
+  TriggerType,
+  VerdictDto,
+} from '../types'
 
 const route = useRoute()
 const router = useRouter()
 
+// 新链路看板（Contracts/TraderContracts.cs TraderDashboardDto）：金额/数量/百分比均为字符串。
 const traders = ref<Trader[]>([])
-const dashboard = ref<TraderDashboard | null>(null)
+const dashboard = ref<TraderDashboardDto | null>(null)
+// 最新周期详情（dashboard.latestCycle；SSE 增量合并；新周期按事件里缺失的字段用 getCycle 补齐）。
+const latestCycle = ref<CycleDetailDto | null>(null)
+const cycleLoading = ref(false)
+const cycleErrorText = ref<string | null>(null)
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const percentMode = ref(false)
-const decisionsLimit = ref(2)
+const actionBusy = ref(false)
 
 // 走动的时钟：像「运行时间」这类随时间增长的显示，computed 的依赖不含 Date.now()，
 // 事件驱动（无定时拉取）下不会自行重算——显式依赖这个每 30 秒更新的 ref（UI 时钟，非数据轮询）
@@ -25,242 +64,542 @@ const clock = ref(Date.now())
 let clockTimer: number | undefined
 const closingSymbol = ref<string | null>(null)
 
-// 实时推送（SSE）：持仓/余额来自交易所 WS 订阅、行情 ticker 驱动未实现盈亏、最新决策/审计行/周期状态/
-// 净值样本随事件秒推（事件总线），历史变化时触发一次聚合刷新——不再有定时轮询；
-// 断线自动重连（EventSource 被终止时按 3 秒节拍重建），重连后重同步一次聚合数据。
-const liveConnected = ref(false)
-const realtimeMarks = ref<Record<string, number>>({})
-const realtimePriceType = ref<string | null>(null)
-let eventSource: EventSource | null = null
-let streamOpenedOnce = false
+// SSE（openTraderStream）：状态横幅 + 按周期/阶段/提案/裁决/订单/工具/权益增量合并。
+// 断线（reconnecting/closed/error）后重拉一次 dashboard + 最新周期详情，再恢复增量合并；
+// 重拉期间到达的帧先缓冲，快照落地后按幂等键合并（不重复应用、不让迟到帧回退终态）。
+const streamStatus = ref<ConnectionState>('connecting')
+const STREAM_STATUS_META: Record<ConnectionState, { label: string; color: string }> = {
+  connecting: { label: '连接中', color: 'arcoblue' },
+  open: { label: '已连接', color: 'green' },
+  reconnecting: { label: '重连中', color: 'gold' },
+  error: { label: '连接失败', color: 'red' },
+  closed: { label: '连接失败', color: 'gray' },
+}
+const streamStatusMeta = computed(() => STREAM_STATUS_META[streamStatus.value])
+
+interface ToolChip {
+  key: string
+  stageId: string
+  tool: string
+  success: boolean
+  error: string | null
+  errorCode: string | null
+  elapsedMs: number
+  at: string
+}
+
+const stageTools = ref<Record<string, ToolChip[]>>({})
+const malformedFrameCount = ref(0)
+const streamStale = ref(false)
+let disposeStream: (() => void) | null = null
+let streamTraderId: number | null = null
+let streamHasOpened = false
+let needsResync = false
+let resyncInFlight = false
 let lastFrameAt = 0
-let watchdogTimer: number | undefined
+let lastPositionHistoryRefreshAt = 0
+let closedRebuildUsed = false
+let closedRebuildTimer: number | undefined
+let livenessTimer: number | undefined
+let dashboardGeneration = 0
+// 重连重同步期间到达的帧按「代次」缓冲：交易员切换后旧代次的帧不得落到新看板
+const pendingEvents: Array<{ generation: number; event: CycleEvent }> = []
 
-// 链路判活：任何一帧（含后端心跳 ping）都刷新；看门狗在 45 秒无帧时判定连接已死并重建
-// （后端重启/代理静默断开时，EventSource 可能既不报错也不重连）
-function markAlive() {
-  lastFrameAt = Date.now()
-  liveConnected.value = true
+// —— 数值展示（后端金额/百分比/数量一律字符串：只解析做格式化，不做业务计算）——
+
+function toNumber(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
-function startWatchdog(traderId: number) {
-  if (watchdogTimer !== undefined) window.clearInterval(watchdogTimer)
-  watchdogTimer = window.setInterval(() => {
-    if (eventSource && Date.now() - lastFrameAt > 45000) {
-      openStream(traderId)
-    }
-  }, 15000)
+/** 定点小数（字符串来源绝不直接 .toFixed 原值）。 */
+function fmtNumber(value: string | number | null | undefined, digits = 2): string {
+  const n = toNumber(value)
+  return n === null ? '—' : n.toFixed(digits)
 }
 
-// 历史信号触发的聚合刷新节流（同步循环可能连续上报；3 秒内只刷一次，避免自激）
-let lastHistoryRefreshAt = 0
-
-// SSE 秒推的决策记录：可能与首次 HTTP 响应在途存在竞态（新决策先经 SSE 到达、HTTP 快照稍后覆盖），
-// 故先缓存再合并——后台决策记录只增不改，按 id 去重合并即可（更早明细由种子帧与聚合刷新补齐）。
-const sseDecisions = ref<DashboardDecision[]>([])
-
-function mergeDecisions(current: DashboardDecision[], incoming: DashboardDecision[]): DashboardDecision[] {
-  const byId = new Map<number, DashboardDecision>()
-  for (const d of current) byId.set(d.id, d)
-  for (const d of incoming) byId.set(d.id, d)
-  return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, 50)
+/** 百分比（后端按百分数口径返回，如 "62.5" → "62.5%"）。 */
+function fmtPct(value: string | number | null | undefined, digits = 1): string {
+  const n = toNumber(value)
+  return n === null ? '—' : `${n.toFixed(digits)}%`
 }
 
-function applySseDecisions() {
-  if (dashboard.value && sseDecisions.value.length > 0) {
-    dashboard.value.decisions = mergeDecisions(dashboard.value.decisions, sseDecisions.value)
+/** 带符号百分比（盈亏/涨跌幅展示）。 */
+function signedPct(value: string | number | null | undefined, digits = 2): string {
+  const n = toNumber(value)
+  return n === null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(digits)}%`
+}
+
+/** 金额（千分位 + 固定小数）；解析失败显示 —。 */
+function fmtAmount(value: string | number | null | undefined, digits = 2): string {
+  const n = toNumber(value)
+  if (n === null) return '—'
+  return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+}
+
+function signedAmount(value: string | number | null | undefined, digits = 2): string {
+  const n = toNumber(value)
+  if (n === null) return '—'
+  return `${n >= 0 ? '+' : ''}${fmtAmount(n, digits)}`
+}
+
+/** 占用/空闲比例：需要算术，解析 → 有限性/分母守卫 → 定点。 */
+function ratioPct(part: string | number | null | undefined, whole: string | number | null | undefined): string {
+  const p = toNumber(part)
+  const w = toNumber(whole)
+  if (p === null || w === null || w <= 0) return '—'
+  return `${((p / w) * 100).toFixed(1)}%`
+}
+
+/** 两个字符串数值的比值（盈亏比等展示；分母为 0 或不可解析 → —）。 */
+function ratioOf(numerator: string | null, denominator: string | null): string {
+  const a = toNumber(numerator)
+  const b = toNumber(denominator)
+  if (a === null || b === null || b === 0) return '—'
+  return Math.abs(a / b).toFixed(2)
+}
+
+function text(value: string | null | undefined): string {
+  return value === null || value === undefined || value === '' ? '—' : value
+}
+
+function pnlClass(value: string | number | null | undefined): string {
+  const n = toNumber(value)
+  if (n === null) return ''
+  return n >= 0 ? 'gain' : 'loss'
+}
+
+function strOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+}
+
+const CYCLE_STATUSES: readonly CycleStatus[] = ['running', 'completed', 'failed', 'skipped', 'aborted']
+const MODES: readonly ExecutionMode[] = ['dry', 'live']
+const TRIGGERS: readonly TriggerType[] = ['schedule', 'manual', 'test']
+const STAGE_ROLES: readonly StageRole[] = ['analyst', 'trader', 'risk', 'executor', 'reviewer']
+const STAGE_STATUSES: readonly StageStatus[] = ['completed', 'failed', 'skipped']
+const PROPOSAL_ACTIONS: readonly ProposalAction[] = ['open', 'close', 'hold']
+const RISK_DECISIONS: readonly RiskDecision[] = ['approved', 'rejected']
+const ORDER_STATUSES: readonly OrderStatus[] = ['submitted', 'filled', 'partial', 'failed', 'unknown', 'cancelled']
+
+// —— SSE：连接生命周期 ——
+
+function applyEventSafely(event: CycleEvent) {
+  try {
+    applyEvent(event)
+  } catch {
+    // 防御：单帧结构异常不拖垮页面（api 层已拦截非法 JSON）
   }
 }
 
-// 审计行插入（按 Id 去重，倒序保留 20 条）；拉取在途期间 SSE 已插入的行在合并时复用同一逻辑
-function upsertOrder(row: TraderOrder) {
-  if (!dashboard.value || typeof row?.id !== 'number') return
-  const rest = dashboard.value.recentOrders.filter((o) => o.id !== row.id)
-  dashboard.value.recentOrders = [row, ...rest].sort((a, b) => b.id - a.id).slice(0, 20)
+function disposeCurrentStream() {
+  disposeStream?.()
+  disposeStream = null
+  streamTraderId = null
 }
 
-// 净值样本点追加（时间升序，保留最近 200 个；不早于最后一个点时忽略）
-function appendSample(at: string, equity: number) {
-  if (!dashboard.value || !at || typeof equity !== 'number') return
+function connectStream(traderId: number, resume = false) {
+  disposeCurrentStream()
+  streamTraderId = traderId
+  // resume=重建：已有首屏快照，重建后的 open 走一次补拉
+  streamHasOpened = resume
+  streamStatus.value = 'connecting'
+  lastFrameAt = Date.now()
+  streamStale.value = false
+  const generation = dashboardGeneration
+  disposeStream = openTraderStream(
+    traderId,
+    (event) => {
+      if (streamTraderId !== traderId || generation !== dashboardGeneration) return
+      // 任何帧（含 ping）都算存活
+      lastFrameAt = Date.now()
+      streamStale.value = false
+      // 交易员切换瞬间旧看板仍在内存：不把新流事件落到旧交易员的快照上
+      if (dashboard.value && dashboard.value.trader.id !== traderId) return
+      if (resyncInFlight) {
+        pendingEvents.push({ generation, event })
+        return
+      }
+      applyEventSafely(event)
+    },
+    {
+      onStatus: (state) => {
+        if (streamTraderId === traderId && generation === dashboardGeneration) onStreamStatus(state)
+      },
+      onError: () => {
+        // 坏帧已由 api 层跳过且流继续；计数后统一显示一条轻提示，不弹 toast
+        malformedFrameCount.value += 1
+      },
+    },
+  )
+}
+
+function disconnectStream() {
+  disposeCurrentStream()
+  streamHasOpened = false
+  needsResync = false
+  closedRebuildUsed = false
+  if (closedRebuildTimer !== undefined) {
+    window.clearTimeout(closedRebuildTimer)
+    closedRebuildTimer = undefined
+  }
+  pendingEvents.length = 0
+  stageTools.value = {}
+  streamStale.value = false
+  lastFrameAt = 0
+}
+
+function onStreamStatus(state: ConnectionState) {
+  streamStatus.value = state
+  if (state === 'open') {
+    lastFrameAt = Date.now()
+    streamStale.value = false
+    // 首屏快照在 connect 之前已完成；只有断线后的 open 才补拉，避免同一快照拉两次。
+    const shouldResync = streamHasOpened && needsResync
+    streamHasOpened = true
+    if (shouldResync) void resyncStream()
+    return
+  }
+  if (state === 'reconnecting' || state === 'error' || state === 'closed') {
+    needsResync = true
+    if (state === 'closed') scheduleStreamRebuild()
+  }
+}
+
+// EventSource 已放弃（readyState=CLOSED）时重建一次；同一交易员只自动重建一次，避免失败循环。
+function scheduleStreamRebuild() {
+  const traderId = streamTraderId
+  if (traderId === null || closedRebuildUsed) return
+  closedRebuildUsed = true
+  closedRebuildTimer = window.setTimeout(() => {
+    closedRebuildTimer = undefined
+    if (selectedId.value !== traderId || streamTraderId !== traderId) return
+    connectStream(traderId, true)
+  }, 2000)
+}
+
+// 重连重同步：回到 open 后才执行（dashboard + 最新周期详情各拉一次）；
+// 重拉期间到达的帧缓冲，快照落地后幂等合并。
+async function resyncStream() {
+  const traderId = streamTraderId
+  const generation = dashboardGeneration
+  if (traderId === null || selectedId.value !== traderId || resyncInFlight) return
+  resyncInFlight = true
+  try {
+    const ok = await loadDashboard(true)
+    if (!ok) {
+      needsResync = true
+      return
+    }
+    if (generation !== dashboardGeneration || selectedId.value !== traderId) return
+    const cycleId = latestCycle.value?.cycle.id
+    if (cycleId) await loadCycleDetail(cycleId, true)
+    if (generation === dashboardGeneration && selectedId.value === traderId) needsResync = false
+  } finally {
+    resyncInFlight = false
+    const buffered = pendingEvents.splice(0)
+    for (const entry of buffered) {
+      // 旧代次的帧丢弃；当前代次的帧必须补上（交易员切换发生在旧重同步期间时不能丢新流事件）
+      if (entry.generation !== dashboardGeneration) continue
+      if (selectedId.value !== streamTraderId) continue
+      applyEventSafely(entry.event)
+    }
+  }
+}
+
+// —— SSE：按事件类型增量合并（字段显式映射，不 spread 原始载荷）——
+
+function applyEvent(event: CycleEvent) {
+  switch (event.type) {
+    case 'state':
+      applyState(event)
+      break
+    case 'cycle':
+      applyCycle(event)
+      break
+    case 'stage':
+      applyStage(event)
+      break
+    case 'proposal':
+      applyProposal(event)
+      break
+    case 'verdict':
+      applyVerdict(event)
+      break
+    case 'order':
+      applyOrder(event)
+      break
+    case 'tool':
+      applyTool(event)
+      break
+    case 'equity':
+      applyEquity(event)
+      break
+    case 'position-history':
+      applyPositionHistory(event)
+      break
+    case 'ping':
+      // 心跳帧：仅保活，无业务含义
+      break
+  }
+}
+
+function applyState(event: Extract<CycleEvent, { type: 'state' }>) {
+  const info = dashboard.value?.trader
+  if (!info) return
+  if (typeof event.isRunning === 'boolean') {
+    info.isRunning = event.isRunning
+    if (!event.isRunning) info.startedAt = null
+  }
+  info.lastCycleStatus = isOneOf(event.lastCycleStatus, CYCLE_STATUSES) ? event.lastCycleStatus : null
+  info.lastCycleAt = strOrNull(event.lastCycleAt)
+}
+
+function applyCycle(event: Extract<CycleEvent, { type: 'cycle' }>) {
+  const id = event.cycleId
+  if (typeof id !== 'string' || id === '') return
+  if (!isOneOf(event.mode, MODES) || !isOneOf(event.trigger, TRIGGERS) || !isOneOf(event.status, CYCLE_STATUSES)) {
+    return
+  }
+  const current = latestCycle.value
+  const same = current?.cycle.id === id
+  // 迟到的旧周期帧：不覆盖当前更新的周期
+  if (current && !same && current.cycle.startedAt > event.startedAt) return
+  // 快照已终态后重放的 running 帧：不把状态回退
+  if (same && current.cycle.status !== 'running' && event.status === 'running') return
+
+  const cycle: CycleDto = {
+    id,
+    traderId: typeof event.traderId === 'number' ? event.traderId : same ? current.cycle.traderId : null,
+    // 事件不含 strategyId：新周期先用 0 占位（CycleTimeline 不展示该字段），随后 getCycle 覆盖
+    strategyId: same ? current.cycle.strategyId : 0,
+    providerId: same ? current.cycle.providerId : null,
+    exchangeAccountId: same ? current.cycle.exchangeAccountId : null,
+    mode: event.mode,
+    trigger: event.trigger,
+    status: event.status,
+    startedAt: event.startedAt,
+    completedAt: event.completedAt ?? null,
+    errorCode: same ? current.cycle.errorCode : null,
+    error: event.error ?? null,
+    inputTokens: same ? current.cycle.inputTokens : null,
+    outputTokens: same ? current.cycle.outputTokens : null,
+    elapsedMs: same ? current.cycle.elapsedMs : null,
+  }
+
+  if (same) {
+    latestCycle.value = { ...current, cycle }
+  } else {
+    latestCycle.value = { cycle, stages: [], proposal: null, verdict: null, orders: [] }
+    stageTools.value = {}
+    // 新周期：仅此时拉取详情（阶段/提案/裁决/订单），不是每帧都拉
+    void loadCycleDetail(id, true)
+  }
+  if (dashboard.value) {
+    dashboard.value.trader.lastCycleAt = event.startedAt
+    dashboard.value.trader.lastCycleStatus = event.status
+  }
+}
+
+function applyStage(event: Extract<CycleEvent, { type: 'stage' }>) {
+  const cycle = latestCycle.value
+  if (!cycle || event.cycleId !== cycle.cycle.id) return
+  if (!isOneOf(event.role, STAGE_ROLES) || !isOneOf(event.status, STAGE_STATUSES)) return
+  const stageId = typeof event.stageId === 'string' ? event.stageId : ''
+  if (!stageId) return
+  const stage: StageDto = {
+    id: stageId,
+    role: event.role,
+    status: event.status,
+    elapsedMs: typeof event.elapsedMs === 'number' && Number.isFinite(event.elapsedMs) ? event.elapsedMs : 0,
+    inputTokens: typeof event.inputTokens === 'number' ? event.inputTokens : null,
+    outputTokens: typeof event.outputTokens === 'number' ? event.outputTokens : null,
+    toolCalls: typeof event.toolCalls === 'number' && Number.isFinite(event.toolCalls) ? event.toolCalls : 0,
+    summary: strOrNull(event.summary),
+    error: strOrNull(event.error),
+  }
+  const index = cycle.stages.findIndex((s) => s.id === stageId)
+  if (index >= 0) cycle.stages.splice(index, 1, stage)
+  else cycle.stages.push(stage)
+}
+
+function applyProposal(event: Extract<CycleEvent, { type: 'proposal' }>) {
+  const cycle = latestCycle.value
+  if (!cycle) return
+  if (!isOneOf(event.action, PROPOSAL_ACTIONS)) return
+  const id = typeof event.id === 'string' ? event.id : ''
+  if (!id) return
+  const proposal: ProposalDto = {
+    id,
+    action: event.action,
+    symbol: strOrNull(event.symbol),
+    side: event.side === 'long' || event.side === 'short' ? event.side : null,
+    confidence: strOrNull(event.confidence),
+    entryPrice: strOrNull(event.entryPrice),
+    stopLossPrice: strOrNull(event.stopLossPrice),
+    takeProfitPrice: strOrNull(event.takeProfitPrice),
+    positionPct: strOrNull(event.positionPct),
+    leverage: strOrNull(event.leverage),
+    thesis: typeof event.thesis === 'string' ? event.thesis : '',
+    invalidation: strOrNull(event.invalidation),
+  }
+  latestCycle.value = { ...cycle, proposal }
+}
+
+function applyVerdict(event: Extract<CycleEvent, { type: 'verdict' }>) {
+  const cycle = latestCycle.value
+  if (!cycle || event.cycleId !== cycle.cycle.id) return
+  if (!isOneOf(event.decision, RISK_DECISIONS)) return
+  const id = typeof event.id === 'string' ? event.id : ''
+  if (!id) return
+  const verdict: VerdictDto = {
+    id,
+    decision: event.decision,
+    reasons: Array.isArray(event.reasons) ? event.reasons.filter((r): r is string => typeof r === 'string') : [],
+    maxPositionPct: strOrNull(event.maxPositionPct),
+    maxLeverage: strOrNull(event.maxLeverage),
+    entryZoneMin: strOrNull(event.entryZoneMin),
+    entryZoneMax: strOrNull(event.entryZoneMax),
+    allowMarket: typeof event.allowMarket === 'boolean' ? event.allowMarket : null,
+    validUntilUtc: strOrNull(event.validUntilUtc),
+  }
+  latestCycle.value = { ...cycle, verdict }
+}
+
+function applyOrder(event: Extract<CycleEvent, { type: 'order' }>) {
+  const cycle = latestCycle.value
+  if (!cycle) return
+  if (typeof event.orderId !== 'number' || !Number.isFinite(event.orderId)) return
+  if (event.cycleId !== cycle.cycle.id) return
+  const order: CycleOrderDto = {
+    orderId: event.orderId,
+    cycleId: event.cycleId,
+    traderId: typeof event.traderId === 'number' ? event.traderId : null,
+    exchangeAccountId: typeof event.exchangeAccountId === 'number' ? event.exchangeAccountId : null,
+    proposalId: strOrNull(event.proposalId),
+    action: typeof event.action === 'string' ? event.action : 'unknown',
+    side: strOrNull(event.side),
+    symbol: strOrNull(event.symbol),
+    quantity: strOrNull(event.quantity),
+    filledQuantity: strOrNull(event.filledQuantity),
+    price: strOrNull(event.price),
+    averagePrice: strOrNull(event.averagePrice),
+    status: isOneOf(event.status, ORDER_STATUSES) ? event.status : null,
+    simulated: event.simulated === true,
+    note: strOrNull(event.note),
+    at: typeof event.at === 'string' ? event.at : new Date().toISOString(),
+  }
+  const orders = cycle.orders.filter((o) => o.orderId !== order.orderId)
+  latestCycle.value = { ...cycle, orders: [...orders, order] }
+  upsertRecentOrder(order)
+}
+
+function applyTool(event: Extract<CycleEvent, { type: 'tool' }>) {
+  // cycleId 为 null = 复盘工具事件（不属于周期 UI）
+  if (event.cycleId === null) return
+  const cycle = latestCycle.value
+  if (!cycle || event.cycleId !== cycle.cycle.id) return
+  const stageId = typeof event.stageId === 'string' ? event.stageId : ''
+  if (!stageId || typeof event.tool !== 'string' || !event.tool) return
+  const at = typeof event.at === 'string' ? event.at : ''
+  const elapsedMs = typeof event.elapsedMs === 'number' && Number.isFinite(event.elapsedMs) ? event.elapsedMs : 0
+  const key = `${stageId}|${at}|${event.tool}|${elapsedMs}`
+  const list = stageTools.value[stageId] ?? []
+  if (list.some((chip) => chip.key === key)) return
+  const chip: ToolChip = {
+    key,
+    stageId,
+    tool: event.tool,
+    success: event.success === true,
+    error: strOrNull(event.error),
+    errorCode: strOrNull(event.errorCode),
+    elapsedMs,
+    at,
+  }
+  stageTools.value = { ...stageTools.value, [stageId]: [...list, chip].slice(-30) }
+}
+
+function applyEquity(event: Extract<CycleEvent, { type: 'equity' }>) {
+  if (!dashboard.value?.account) return
+  if (typeof event.equity !== 'string' || event.equity === '') return
+  const account = dashboard.value.account
+  account.equity = event.equity
+  // 总盈亏/收益率是从净值推导的展示值：净值更新后同步重算，避免统计卡互相打架
+  const equity = toNumber(event.equity)
+  const initial = toNumber(dashboard.value.trader.initialBalance)
+  if (equity !== null && initial !== null && initial > 0) {
+    const pnl = equity - initial
+    account.totalPnl = pnl.toFixed(2)
+    account.pnlPct = ((pnl / initial) * 100).toFixed(2)
+  } else {
+    account.totalPnl = null
+    account.pnlPct = null
+  }
+  if (typeof event.at === 'string' && event.at) {
+    account.at = event.at
+    appendSample(event.at, event.equity)
+  }
+}
+
+// position-history 帧只带单行（symbol/realizedPnl/closeTime），聚合指标仍由后端计算：
+// 先按 symbol+closeTime 就地更新对应行，再节流重拉 dashboard 让历史/指标按服务端口径刷新。
+function applyPositionHistory(event: Extract<CycleEvent, { type: 'position-history' }>) {
+  if (!dashboard.value) return
+  if (typeof event.symbol === 'string' && typeof event.closeTime === 'string' && typeof event.realizedPnl === 'string') {
+    const row = dashboard.value.history.rows.find(
+      (r) => r.symbol === event.symbol && r.closeTime === event.closeTime,
+    )
+    if (row) row.realizedPnl = event.realizedPnl
+  }
+  const now = Date.now()
+  if (now - lastPositionHistoryRefreshAt < 3000) return
+  lastPositionHistoryRefreshAt = now
+  void loadDashboard(true)
+}
+
+// 净值样本点追加（字符串金额原样保存；时间升序，保留最近 200 个）
+function appendSample(at: string, equity: string) {
+  if (!dashboard.value || !at || !equity) return
   const samples = dashboard.value.samples
   if (samples.length > 0 && samples[samples.length - 1].at >= at) return
   dashboard.value.samples = [...samples, { at, equity }].slice(-200)
 }
 
-// 价格列名随实际来源如实显示：默认「最新价」（行情 WS 回退口径），来源为标记价时显示「标记价」
-const priceHeader = computed(() => (realtimePriceType.value === 'mark' ? '标记价' : '最新价'))
-
-function closeStream() {
-  eventSource?.close()
-  eventSource = null
-  liveConnected.value = false
-  realtimeMarks.value = {}
-  realtimePriceType.value = null
-  sseDecisions.value = []
-  if (watchdogTimer !== undefined) {
-    window.clearInterval(watchdogTimer)
-    watchdogTimer = undefined
+// 执行审计：新订单插入列表头（按 Id 去重，保留 20 条）。
+// recentOrders 是旧链路 TraderOrderDto：只有 id/quantity/price/note/error，没有 status/simulated/success。
+function upsertRecentOrder(order: CycleOrderDto) {
+  if (!dashboard.value || typeof order.orderId !== 'number') return
+  // SSE order 载荷没有 error 字段：已有同 id 行时保留其错误文案，避免更新时被清空
+  const existing = dashboard.value.recentOrders.find((o) => o.id === order.orderId)
+  const row: RecentOrderDto = {
+    id: order.orderId,
+    at: order.at,
+    symbol: order.symbol,
+    action: order.action,
+    quantity: order.quantity,
+    price: order.price,
+    note: order.note,
+    error: existing?.error ?? null,
   }
+  const rest = dashboard.value.recentOrders.filter((o) => o.id !== row.id)
+  dashboard.value.recentOrders = [row, ...rest].sort((a, b) => b.id - a.id).slice(0, 20)
 }
 
-function openStream(traderId: number) {
-  closeStream()
-  const source = new EventSource(`/api/traders/${traderId}/stream`)
-  eventSource = source
-  source.onopen = () => {
-    markAlive()
-    // 重连（首次连接由 onMounted 拉取）：断开期间的事件无法补发，重同步一次聚合数据
-    if (streamOpenedOnce) void loadDashboard(true)
-    streamOpenedOnce = true
+// 净值曲线/初始余额：图组件需要数字，这里只在绘图边界解析字符串并守卫有限性。
+const chartSamples = computed<DashboardSample[]>(() => {
+  const samples: DashboardSample[] = []
+  for (const sample of dashboard.value?.samples ?? []) {
+    const equity = toNumber(sample.equity)
+    if (equity !== null) samples.push({ at: sample.at, equity })
   }
-  source.onerror = () => {
-    liveConnected.value = false
-    // 后端不可达/代理返回非 200 时浏览器会「终止」EventSource（规范：不再自动重试）：按 3 秒节拍重建
-    if (source.readyState === EventSource.CLOSED) {
-      window.setTimeout(() => {
-        if (eventSource === source) openStream(traderId)
-      }, 3000)
-    }
-  }
-  source.addEventListener('ping', () => markAlive())
-  source.addEventListener('state', (event) => {
-    markAlive()
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as {
-        at: string
-        equity: number | null
-        available: number | null
-        priceType: string | null
-        marks: Record<string, number>
-        positions: Array<{
-          symbol: string
-          side: string
-          quantity: number
-          averageOpenPrice: number
-          unrealizedPnl: number | null
-          liquidationPrice: number | null
-          leverage: number | null
-        }>
-      }
-      realtimeMarks.value = payload.marks ?? {}
-      realtimePriceType.value = payload.priceType ?? null
-      if (!dashboard.value) return
-      dashboard.value.positions = (payload.positions ?? []).map((p) => ({
-        symbol: p.symbol,
-        side: p.side,
-        quantity: p.quantity,
-        averageOpenPrice: p.averageOpenPrice,
-        unrealizedPnl: p.unrealizedPnl,
-        liquidationPrice: p.liquidationPrice,
-        leverage: p.leverage,
-      }))
-      if (dashboard.value.account) {
-        if (typeof payload.equity === 'number') dashboard.value.account.equity = payload.equity
-        if (typeof payload.available === 'number') dashboard.value.account.available = payload.available
-        dashboard.value.account.at = payload.at
-        dashboard.value.account.positionCount = dashboard.value.positions.length
-      }
-    } catch {
-      // 忽略无效帧
-    }
-  })
-  source.addEventListener('decisions', (event) => {
-    markAlive()
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as { decisions?: DashboardDecision[] }
-      sseDecisions.value = mergeDecisions(sseDecisions.value, payload.decisions ?? [])
-      applySseDecisions()
-    } catch {
-      // 忽略无效帧
-    }
-  })
-  // 执行审计：新行插入列表头（按 Id 去重，保留 20 条）
-  source.addEventListener('order', (event) => {
-    markAlive()
-    try {
-      upsertOrder(JSON.parse((event as MessageEvent).data) as TraderOrder)
-    } catch {
-      // 忽略无效帧
-    }
-  })
-  // 周期状态：更新顶部状态行的最近周期时间/结果/运行状态
-  source.addEventListener('cycle', (event) => {
-    markAlive()
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as {
-        at: string | null
-        status: string | null
-        isRunning: boolean
-      }
-      if (!dashboard.value) return
-      dashboard.value.trader.lastCycleAt = payload.at
-      dashboard.value.trader.lastCycleStatus = payload.status
-      dashboard.value.trader.isRunning = payload.isRunning
-    } catch {
-      // 忽略无效帧
-    }
-  })
-  // 净值样本：新点到图表（时间升序，保留最近 200 个）
-  source.addEventListener('equity', (event) => {
-    markAlive()
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as { at: string; equity: number }
-      appendSample(payload?.at, payload?.equity)
-    } catch {
-      // 忽略无效帧
-    }
-  })
-  // 仓位历史变化：聚合（历史/指标/品种表现）由后端算，触发一次刷新（节流）
-  source.addEventListener('history', () => {
-    markAlive()
-    const now = Date.now()
-    if (now - lastHistoryRefreshAt < 3000) return
-    lastHistoryRefreshAt = now
-    void loadDashboard(true)
-  })
-
-  startWatchdog(traderId)
-}
-
-// 单仓未实现盈亏：有实时标记价用标记价重算（毫秒级跟随），否则用接口/推送值
-function livePnl(position: DashboardPosition): number | null {
-  const mark = realtimeMarks.value[position.symbol]
-  if (mark === undefined || position.averageOpenPrice <= 0) return position.unrealizedPnl
-  const quantity = Math.abs(position.quantity)
-  const isLong = position.side.toLowerCase().includes('long') || position.side === 'Buy'
-  return (mark - position.averageOpenPrice) * quantity * (isLong ? 1 : -1)
-}
-
-// 净值口径：钱包余额 + 未实现盈亏（保证金余额语义），实时价可用时逐仓用实时价
-const displayUnrealizedTotal = computed(() => {
-  const positions = dashboard.value?.positions ?? []
-  if (positions.length === 0) return 0
-  let total = 0
-  for (const p of positions) {
-    total += livePnl(p) ?? 0
-  }
-  return total
+  return samples
 })
-
-const displayEquity = computed(() => {
-  const account = dashboard.value?.account
-  if (!account?.success || account.equity === null) return null
-  return account.equity + displayUnrealizedTotal.value
-})
-
-const displayTotalPnl = computed(() => {
-  const equity = displayEquity.value
-  const initial = dashboard.value?.trader.initialBalance
-  if (equity === null || initial == null || initial <= 0) return null
-  return equity - initial
-})
-
-const displayPnlPct = computed(() => {
-  const pnl = displayTotalPnl.value
-  const initial = dashboard.value?.trader.initialBalance
-  if (pnl === null || initial == null || initial <= 0) return null
-  return (pnl / initial) * 100
-})
+const chartInitialBalance = computed(() => toNumber(dashboard.value?.trader.initialBalance))
 
 // 仓位历史分页（默认每页 10 条，可选页容量）+ 筛选（标的/方向）
 const HISTORY_PAGE_SIZE_OPTIONS = [10, 20, 50]
@@ -298,30 +637,17 @@ watch([historyFilterSymbol, historyFilterSide], () => {
   historyPage.value = 1
 })
 
-// 品种表现（从当前行数据按标的筛选实时聚合——与后端口径一致）+ 同款分页
+// 品种表现：直接使用后端聚合的 history.symbols（金额/胜率为字符串），只做筛选与分页
 const symbolPageSize = ref(HISTORY_PAGE_SIZE_OPTIONS[0])
 const symbolPage = ref(1)
 const symbolFilterSymbol = ref<string | undefined>(undefined)
 
-const filteredSymbolStats = computed(() => {
-  const rows = allHistoryRows.value.filter((r) => !symbolFilterSymbol.value || r.symbol === symbolFilterSymbol.value)
-  const groups = new Map<string, { count: number; wins: number; pnl: number }>()
-  for (const row of rows) {
-    const group = groups.get(row.symbol) ?? { count: 0, wins: 0, pnl: 0 }
-    group.count++
-    if (row.realizedPnl > 0) group.wins++
-    group.pnl += row.realizedPnl
-    groups.set(row.symbol, group)
-  }
-  return [...groups.entries()]
-    .map(([symbol, g]) => ({
-      symbol,
-      count: g.count,
-      winRate: g.count > 0 ? Math.round((g.wins / g.count) * 10000) / 100 : 0,
-      totalPnl: Math.round(g.pnl * 10000) / 10000,
-    }))
-    .sort((a, b) => b.count - a.count || a.symbol.localeCompare(b.symbol))
-})
+const symbolStats = computed<DashboardSymbolStatDto[]>(() => dashboard.value?.history.symbols ?? [])
+const filteredSymbolStats = computed(() =>
+  symbolStats.value
+    .filter((s) => !symbolFilterSymbol.value || s.symbol === symbolFilterSymbol.value)
+    .sort((a, b) => b.count - a.count || a.symbol.localeCompare(b.symbol)),
+)
 
 const symbolPageCount = computed(() => Math.max(1, Math.ceil(filteredSymbolStats.value.length / symbolPageSize.value)))
 const pagedSymbols = computed(() =>
@@ -342,9 +668,9 @@ interface DirectionCard {
   side: string
   label: string
   count: number
-  winRate: number | null
-  totalPnl: number
-  avgPnl: number | null
+  winRate: string | null
+  totalPnl: string
+  avgPnl: string | null
   empty: boolean
 }
 
@@ -358,7 +684,7 @@ const directionCards = computed<DirectionCard[]>(() => {
       label: side === 'Long' ? '多头' : '空头',
       count: found?.count ?? 0,
       winRate: found ? found.winRate : null,
-      totalPnl: found?.totalPnl ?? 0,
+      totalPnl: found?.totalPnl ?? '0',
       avgPnl: found ? found.avgPnl : null,
       empty: !found || found.count === 0,
     }
@@ -380,25 +706,92 @@ async function loadTraders() {
   }
 }
 
-async function loadDashboard(silent = false) {
+// 快照与 SSE 增量合并：同周期 id 时按 id 联合，事件侧优先（查询可能早于在途事件）。
+function mergeCycleDetail(base: CycleDetailDto, live: CycleDetailDto | null): CycleDetailDto {
+  if (!live || live.cycle.id !== base.cycle.id) return base
+  const stages = new Map(base.stages.map((s) => [s.id, s] as const))
+  for (const s of live.stages) stages.set(s.id, s)
+  const orders = new Map(base.orders.map((o) => [o.orderId, o] as const))
+  for (const o of live.orders) orders.set(o.orderId, o)
+  const cycle = live.cycle.status !== 'running' && base.cycle.status === 'running' ? live.cycle : base.cycle
+  return {
+    cycle,
+    stages: [...stages.values()],
+    proposal: live.proposal ?? base.proposal,
+    verdict: live.verdict ?? base.verdict,
+    orders: [...orders.values()].sort((a, b) => a.orderId - b.orderId),
+  }
+}
+
+function cycleStartedMs(cycle: CycleDto): number {
+  const ms = new Date(cycle.startedAt).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
+
+/** 快照与实时周期择新：同 id 合并；快照缺失或更旧时保留实时周期（SSE 已看到的新周期不能被旧快照回退）。 */
+function pickSnapshotCycle(snapshot: CycleDetailDto | null, live: CycleDetailDto | null): CycleDetailDto | null {
+  if (!snapshot) return live
+  if (!live) return snapshot
+  if (snapshot.cycle.id === live.cycle.id) return mergeCycleDetail(snapshot, live)
+  return cycleStartedMs(live.cycle) > cycleStartedMs(snapshot.cycle) ? live : snapshot
+}
+
+async function loadDashboard(silent = false): Promise<boolean> {
   const id = selectedId.value
-  if (id === null) return
+  const generation = dashboardGeneration
+  if (id === null) return false
   if (!silent) loading.value = true
   try {
-    const previous = dashboard.value
-    const fetched = await getTraderDashboard(id)
-    dashboard.value = fetched
-    // 拉取在途期间 SSE 已推送的更新（审计行/净值样本点/决策）并回，避免被旧快照覆盖；跨交易员不合并
-    if (previous && previous.trader.id === fetched.trader.id) {
-      for (const order of previous.recentOrders) upsertOrder(order)
-      for (const sample of previous.samples) appendSample(sample.at, sample.equity)
+    const fetched = await fetchTraderDashboard(id)
+    if (selectedId.value !== id || generation !== dashboardGeneration) return false
+    const liveCycle = latestCycle.value
+    const nextCycle = pickSnapshotCycle(fetched.latestCycle, liveCycle)
+    const nextCycleId = nextCycle?.cycle.id ?? null
+    if ((liveCycle?.cycle.id ?? null) !== nextCycleId) stageTools.value = {}
+    // SSE 净值帧可能比在途快照新：按采样时间保留较新的账户块
+    const liveAccount = dashboard.value?.account
+    if (fetched.account && liveAccount && liveAccount.at > fetched.account.at) {
+      fetched.account = liveAccount
     }
-    applySseDecisions()
+    dashboard.value = fetched
+    latestCycle.value = nextCycle
+    cycleErrorText.value = null
     errorText.value = null
+    return true
   } catch (err) {
-    if (!silent) errorText.value = err instanceof Error ? err.message : '加载失败'
+    if (!silent && generation === dashboardGeneration && selectedId.value === id) {
+      errorText.value = err instanceof Error ? err.message : '加载失败'
+    }
+    return false
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && selectedId.value === id) loading.value = false
+  }
+}
+
+// 周期详情（阶段/提案/裁决/订单）：仅新周期 id 变化时按需拉取；force 用于重连重同步。
+let cycleRequestSeq = 0
+async function loadCycleDetail(cycleId: string, force = false) {
+  if (!force && latestCycle.value?.cycle.id === cycleId) return
+  const traderId = selectedId.value
+  const generation = dashboardGeneration
+  const seq = ++cycleRequestSeq
+  cycleLoading.value = true
+  try {
+    const detail = await getCycle(cycleId)
+    if (seq !== cycleRequestSeq) return
+    // 请求发出后切换了交易员：旧交易员的详情不得填充新看板
+    if (generation !== dashboardGeneration || selectedId.value !== traderId) return
+    if (traderId !== null && detail.cycle.traderId !== null && detail.cycle.traderId !== traderId) return
+    const live = latestCycle.value
+    if (live && live.cycle.id !== cycleId) return
+    latestCycle.value = mergeCycleDetail(detail, live)
+    cycleErrorText.value = null
+  } catch (err) {
+    if (seq === cycleRequestSeq && generation === dashboardGeneration && selectedId.value === traderId) {
+      cycleErrorText.value = err instanceof Error ? err.message : '周期详情加载失败'
+    }
+  } finally {
+    if (seq === cycleRequestSeq) cycleLoading.value = false
   }
 }
 
@@ -408,8 +801,18 @@ let retryTimer: number | undefined
 async function bootstrap() {
   try {
     await loadTraders()
-    await loadDashboard()
-    if (selectedId.value !== null) openStream(selectedId.value)
+    // 零交易员：页面展示空态即可，不进入 5 秒重试循环
+    if (traders.value.length === 0) {
+      errorText.value = null
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer)
+        retryTimer = undefined
+      }
+      return
+    }
+    const ok = await loadDashboard()
+    if (!ok) throw new Error(errorText.value ?? '加载失败')
+    if (selectedId.value !== null) connectStream(selectedId.value)
     errorText.value = null
     if (retryTimer !== undefined) {
       window.clearTimeout(retryTimer)
@@ -426,19 +829,46 @@ onMounted(() => {
   clockTimer = window.setInterval(() => {
     clock.value = Date.now()
   }, 30000)
+  // 存活看门狗：服务端每 15 秒发 ping，45 秒无任何帧才提示；不主动重启连接
+  livenessTimer = window.setInterval(() => {
+    const active = streamStatus.value === 'open' || streamStatus.value === 'reconnecting'
+    streamStale.value = active && lastFrameAt > 0 && Date.now() - lastFrameAt > 45000
+  }, 10000)
 })
 
 onUnmounted(() => {
   if (retryTimer !== undefined) window.clearTimeout(retryTimer)
   if (clockTimer !== undefined) window.clearInterval(clockTimer)
-  closeStream()
+  if (livenessTimer !== undefined) window.clearInterval(livenessTimer)
+  disconnectStream()
 })
 
-watch(selectedId, () => {
+watch(selectedId, async (id) => {
+  dashboardGeneration += 1
+  const generation = dashboardGeneration
   historyPage.value = 1
   symbolPage.value = 1
-  void loadDashboard()
-  if (selectedId.value !== null) openStream(selectedId.value)
+  latestCycle.value = null
+  cycleErrorText.value = null
+  stageTools.value = {}
+  malformedFrameCount.value = 0
+  streamStatus.value = 'closed'
+  disposeCurrentStream()
+  streamHasOpened = false
+  needsResync = false
+  closedRebuildUsed = false
+  if (closedRebuildTimer !== undefined) {
+    window.clearTimeout(closedRebuildTimer)
+    closedRebuildTimer = undefined
+  }
+  pendingEvents.length = 0
+  if (id === null) {
+    disconnectStream()
+    return
+  }
+  await loadDashboard()
+  if (generation !== dashboardGeneration || selectedId.value !== id) return
+  connectStream(id)
 })
 
 // 数据刷新后页码越界自动回收（行数变少时）
@@ -460,22 +890,17 @@ function onSwitch(value: unknown) {
 // —— 展示映射 ——
 
 const ACTION_MAP: Record<string, { label: string; color: string; icon: string }> = {
+  open: { label: '开仓', color: 'arcoblue', icon: '▶' },
   buy: { label: '开多', color: 'green', icon: '↑' },
   sell: { label: '开空', color: 'red', icon: '↓' },
   close: { label: '平仓', color: 'arcoblue', icon: '⇄' },
+  skip: { label: '跳过', color: 'gray', icon: '⏭' },
   error: { label: '轮次失败', color: 'red', icon: '!' },
   hold: { label: '观望', color: 'gray', icon: '⏸' },
 }
 
 function actionInfo(action: string | null) {
   return (action && ACTION_MAP[action]) || { label: action ?? '—', color: 'gray', icon: '·' }
-}
-
-function confidenceColor(confidence: number | null): string {
-  if (confidence === null || confidence <= 0) return 'gray'
-  if (confidence >= 80) return 'green'
-  if (confidence >= 60) return 'gold'
-  return 'red'
 }
 
 function sideLabel(side: string | null | undefined): string {
@@ -485,39 +910,33 @@ function sideLabel(side: string | null | undefined): string {
   return side
 }
 
-function pnlClass(value: number | null | undefined): string {
-  if (value === null || value === undefined) return ''
-  return value >= 0 ? 'gain' : 'loss'
-}
-
-function money(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined) return '—'
-  return value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
-}
-
-function signedMoney(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined) return '—'
-  return `${value >= 0 ? '+' : ''}${money(value, digits)}`
-}
-
+// 决策卡止损/止盈幅度：后端字符串 → 解析 → 绝对值 + 2 位小数（纯展示）
 function fmtTime(iso: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
-  return d.toLocaleString('zh-CN', { hour12: false })
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
 }
 
 function fmtClock(iso: string | null): string {
   if (!iso) return '--:--:--'
   const d = new Date(iso)
-  return d.toLocaleTimeString('zh-CN', { hour12: false })
+  return Number.isNaN(d.getTime()) ? '--:--:--' : d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-function fmtPrice(value: number | null | undefined): string {
-  if (value === null || value === undefined) return '—'
-  const abs = Math.abs(value)
-  const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : abs >= 0.01 ? 6 : 8
-  return value.toLocaleString('en-US', { maximumFractionDigits: digits })
+const EXCHANGE_LABELS: Record<string, string> = {
+  binance: 'BINANCE',
+  bybit: 'BYBIT',
+  okx: 'OKX',
+  bitget: 'BITGET',
+  gateio: 'GATE',
+  kucoin: 'KUCOIN',
 }
+
+// 后端 exchangeLabel 取枚举名（GateIo）；直接大写会得到 GATEIO，这里按交易所惯用简称展示
+const exchangeLabel = computed(() => {
+  const raw = dashboard.value?.trader.exchangeLabel ?? ''
+  return EXCHANGE_LABELS[raw.toLowerCase()] ?? raw.toUpperCase()
+})
 
 const runtimeText = computed(() => {
   const info = dashboard.value?.trader
@@ -526,87 +945,150 @@ const runtimeText = computed(() => {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟` : `${minutes} 分钟`
 })
 
-const visibleDecisions = computed<DashboardDecision[]>(() =>
-  (dashboard.value?.decisions ?? []).slice(0, Math.max(1, Math.min(50, decisionsLimit.value))),
-)
-
-// 思维链三段解析（关键信号 / 风险点 / 失效条件，与输出契约同源）；模型未按格式输出时回退整段 Markdown
-const COT_SECTIONS = [
-  { label: '关键信号', tone: 'cot-chip-signal' },
-  { label: '风险点', tone: 'cot-chip-risk' },
-  { label: '失效条件', tone: 'cot-chip-invalid' },
-] as const
-
-function reasoningSections(text: string): Array<{ label: string; tone: string; text: string }> {
-  const starters = COT_SECTIONS.map((s) => s.label).join('|')
-  const sections: Array<{ label: string; tone: string; text: string }> = []
-  for (const section of COT_SECTIONS) {
-    const body = text.match(new RegExp(`${section.label}[：:]\\s*([\\s\\S]*?)(?=(?:${starters})[：:]|$)`))?.[1]?.trim()
-    if (body) sections.push({ label: section.label, tone: section.tone, text: body })
-  }
-  return sections
-}
-
-function riskReward(decision: DashboardDecision): number | null {
-  // 用 == null 同时兜住 null 与 undefined（帧字段缺失时不参与计算，避免出现 NaN）
-  if (decision.stopLossPct == null || decision.takeProfitPct == null) return null
-  const sl = Math.abs(decision.stopLossPct)
-  const tp = Math.abs(decision.takeProfitPct)
-  if (!Number.isFinite(sl) || !Number.isFinite(tp) || sl <= 0) return null
-  return Math.round((tp / sl) * 10) / 10
-}
-
 const historyMetrics = computed(() => {
   const m = dashboard.value?.history.metrics
   return m
     ? [
         { label: '总交易次数', value: String(m.totalTrades) },
-        { label: '胜率', value: `${m.winRate.toFixed(1)}%` },
-        { label: '总盈亏', value: signedMoney(m.totalPnl), cls: pnlClass(m.totalPnl) },
-        { label: '净盈亏', value: signedMoney(m.netPnl), cls: pnlClass(m.netPnl), hint: '交易所共享接口未提供手续费字段' },
-        { label: '盈利因子', value: m.profitFactor.toFixed(2) },
-        { label: '盈亏比', value: m.avgLoss !== 0 ? Math.abs(m.avgWin / m.avgLoss).toFixed(2) : '—' },
-        { label: '平均盈利', value: `$${money(m.avgWin)}`, cls: 'gain' },
-        { label: '平均亏损', value: `$${money(m.avgLoss)}`, cls: 'loss' },
-        { label: '最大回撤', value: `${m.maxDrawdownPct.toFixed(1)}%`, cls: 'loss' },
-        { label: '夏普比率', value: m.sharpe.toFixed(2), hint: '近似口径：按笔盈亏均值/标准差×√笔数' },
+        { label: '胜率', value: fmtPct(m.winRate, 1) },
+        { label: '总盈亏', value: signedAmount(m.totalPnl), cls: pnlClass(m.totalPnl) },
+        { label: '净盈亏', value: signedAmount(m.netPnl), cls: pnlClass(m.netPnl), hint: '交易所共享接口未提供手续费字段' },
+        { label: '盈利因子', value: fmtNumber(m.profitFactor, 2) },
+        { label: '盈亏比', value: ratioOf(m.avgWin, m.avgLoss) },
+        { label: '平均盈利', value: `$${fmtAmount(m.avgWin)}`, cls: 'gain' },
+        { label: '平均亏损', value: `$${fmtAmount(m.avgLoss)}`, cls: 'loss' },
+        { label: '最大回撤', value: fmtPct(m.maxDrawdownPct, 1), cls: 'loss' },
+        { label: '夏普比率', value: fmtNumber(m.sharpe, 2), hint: '近似口径：按笔盈亏均值/标准差×√笔数' },
       ]
     : []
 })
 
-// 提示词页的复制 / 下载（对齐 nofx 的复制与 .txt 下载按钮）
-async function copyText(text: string) {
+// 启停/平仓错误：422 等业务错误原样展示后端文案；409 cycle_in_progress 是并发提示，用警告而非错误弹层
+function showActionError(err: unknown, fallback: string) {
+  if (err instanceof ApiRequestError) {
+    if (err.code === 'cycle_in_progress') {
+      Message.warning(err.message)
+      return
+    }
+    Message.error(err.message)
+    return
+  }
+  Message.error(err instanceof Error ? err.message : fallback)
+}
+
+async function onStartTrader() {
+  const id = selectedId.value
+  if (id === null || actionBusy.value) return
+  actionBusy.value = true
   try {
-    await navigator.clipboard.writeText(text)
-    Message.success('已复制')
-  } catch {
-    Message.error('复制失败（浏览器未授权剪贴板）')
+    await startTrader(id)
+    Message.success('交易员已启动')
+    await loadDashboard(true)
+  } catch (err) {
+    showActionError(err, '启动失败')
+  } finally {
+    actionBusy.value = false
   }
 }
 
-function downloadText(filename: string, text: string) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
+async function onStopTrader() {
+  const id = selectedId.value
+  if (id === null || actionBusy.value) return
+  actionBusy.value = true
+  try {
+    await stopTrader(id)
+    Message.success('交易员已停止')
+    await loadDashboard(true)
+  } catch (err) {
+    showActionError(err, '停止失败')
+  } finally {
+    actionBusy.value = false
+  }
 }
 
+const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  submitted: '已提交',
+  filled: '已成交',
+  partial: '部分成交',
+  failed: '失败',
+  unknown: '结果未知',
+  cancelled: '已撤销',
+}
+
+function orderStatusLabel(status: OrderStatus | null): string {
+  return status ? (ORDER_STATUS_LABELS[status] ?? status) : '状态未知'
+}
+
+/** 平仓订单未成交时补齐周期级 errorCode/error（手动平仓响应只在 order=null 时带回它们）。 */
+async function loadCloseFailure(cycleId: string): Promise<{ code: string | null; error: string | null }> {
+  try {
+    const detail = await getCycle(cycleId)
+    return { code: detail.cycle.errorCode, error: detail.cycle.error }
+  } catch {
+    return { code: null, error: null }
+  }
+}
+
+// 手动平仓（新链路）：quantity/price 为字符串金额；只有 order.status=filled 才算平仓成功。
 async function closePosition(symbol: string) {
   const id = selectedId.value
   if (id === null || closingSymbol.value) return
   closingSymbol.value = symbol
   try {
-    await closeTraderPosition(id, symbol)
-    Message.success(`已平仓 ${symbol}`)
+    const result = await apiClosePosition(id, { symbol, orderType: 'market', reason: '手动平仓' })
+    const order = result.order
+    if (!order) {
+      Message.warning(result.error ?? result.errorCode ?? '平仓未执行（后端未返回订单）')
+      // 平仓未执行但周期已留痕：静默刷新让最新周期块如实展示失败原因（不报成功）
+      await loadDashboard(true)
+      return
+    }
+    if (order.status === 'filled') {
+      Message.success(`已平仓 ${symbol}（订单 #${order.orderId}）`)
+    } else if (order.status === 'submitted' || order.status === 'partial') {
+      Message.info(`已提交，等待成交（订单 #${order.orderId}）`)
+    } else {
+      let code = result.errorCode
+      let error = result.error
+      if (!code && !error) {
+        const cycleFailure = await loadCloseFailure(result.cycleId)
+        code = cycleFailure.code
+        error = cycleFailure.error
+      }
+      const detail = [code, error, order.note].filter((part): part is string => typeof part === 'string' && part.trim() !== '')
+      Message.warning(
+        `平仓未完成（${orderStatusLabel(order.status)}）${detail.length > 0 ? `：${detail.join('；')}` : ''}`,
+      )
+    }
     await loadDashboard(true)
   } catch (err) {
-    Message.error(err instanceof Error ? err.message : '平仓失败')
+    showActionError(err, '平仓失败')
   } finally {
     closingSymbol.value = null
   }
+}
+
+// 工具调用 chips：按 stageId 分组；阶段行未落库前用 stageId 前缀兜底显示
+const ROLE_LABELS: Record<StageRole, string> = {
+  analyst: '分析师',
+  trader: '交易员',
+  risk: '风控官',
+  executor: '执行员',
+  reviewer: '复盘员',
+}
+
+const toolGroups = computed(() => {
+  const stages = latestCycle.value?.stages ?? []
+  return Object.entries(stageTools.value)
+    .map(([stageId, tools]) => {
+      const stage = stages.find((s) => s.id === stageId)
+      return { stageId, label: stage ? ROLE_LABELS[stage.role] : `阶段 ${stageId.slice(0, 8)}`, tools }
+    })
+    .filter((group) => group.tools.length > 0)
+})
+
+function shortCycleId(id: string): string {
+  return id.slice(0, 8)
 }
 </script>
 
@@ -633,6 +1115,20 @@ async function closePosition(symbol: string) {
             <div class="trader-title" :title="dashboard.trader.name">{{ dashboard.trader.name }}</div>
             <div class="trader-id">ID: {{ dashboard.trader.id }}</div>
           </div>
+          <a-button
+            v-if="!dashboard.trader.isRunning"
+            type="primary"
+            size="small"
+            :loading="actionBusy"
+            @click="onStartTrader"
+          >启动</a-button>
+          <a-button
+            v-else
+            status="danger"
+            size="small"
+            :loading="actionBusy"
+            @click="onStopTrader"
+          >停止</a-button>
           <a-select
             :model-value="selectedId ?? undefined"
             class="trader-switch"
@@ -649,7 +1145,7 @@ async function closePosition(symbol: string) {
           {{ dashboard.trader.providerName }}
         </a-tag>
         <span class="meta-label">交易所:</span>
-        <span>{{ dashboard.trader.exchangeLabel.toUpperCase() }} - {{ dashboard.trader.accountName }}</span>
+        <span>{{ exchangeLabel }} - {{ dashboard.trader.accountName }}</span>
         <span class="meta-label">策略:</span>
         <span class="meta-strategy">{{ dashboard.trader.strategyName }}</span>
         <span class="meta-label">运行时间:</span>
@@ -661,23 +1157,34 @@ async function closePosition(symbol: string) {
         <a-tag size="small" :color="dashboard.trader.executionMode === 'live' ? 'red' : 'arcoblue'">
           {{ dashboard.trader.executionMode === 'live' ? '实盘' : '演练' }}
         </a-tag>
+        <a-tag size="small" :color="streamStatusMeta.color">推送{{ streamStatusMeta.label }}</a-tag>
         <a-tooltip v-if="!dashboard.trader.capabilityCanTrade && dashboard.trader.executionMode === 'live'" :content="dashboard.trader.capabilityNotes.join('；')">
           <a-tag size="small" color="orange">实盘能力不足</a-tag>
         </a-tooltip>
         </div>
       </div>
 
-      <!-- 调试栏 -->
+      <!-- 调试栏（含 SSE 连接状态） -->
       <div class="debug-bar">
-        <span>系统状态::{{ dashboard.trader.isRunning ? 'ONLINE' : 'STOPPED' }}</span>
+        <span class="debug-left">
+          系统状态::{{ dashboard.trader.isRunning ? 'ONLINE' : 'STOPPED' }}
+          <span class="stream-state" :class="`stream-${streamStatus}`">{{ streamStatusMeta.label }}</span>
+        </span>
         <span class="debug-right">
           最后更新::{{ fmtClock(dashboard.account?.at ?? dashboard.trader.lastCycleAt) }}
           <template v-if="dashboard.account?.success">
-            · 净值::{{ money(displayEquity) }}
-            · 盈亏::{{ signedMoney(displayTotalPnl) }}
+            · 净值::{{ fmtAmount(dashboard.account?.equity) }}
+            · 盈亏::{{ signedAmount(dashboard.account?.totalPnl) }}
           </template>
         </span>
       </div>
+
+      <a-alert v-if="streamStale" type="warning" class="page-alert">
+        连接可能已断开：超过 45 秒未收到任何推送帧，正在等待自动重连…
+      </a-alert>
+      <a-alert v-if="malformedFrameCount > 0" type="warning" class="page-alert">
+        已跳过 {{ malformedFrameCount }} 个无法解析的推送帧（不影响后续事件）。
+      </a-alert>
 
       <a-alert v-if="dashboard.account && !dashboard.account.success" type="warning" class="page-alert">
         账户数据读取失败：{{ dashboard.account.error }}（请检查 API Key 权限/IP 白名单；下方账户指标暂不可用）
@@ -687,38 +1194,74 @@ async function closePosition(symbol: string) {
       <div class="stats-row">
         <div class="stat-card">
           <div class="stat-title">总净值</div>
-          <div class="stat-value" :class="pnlClass(displayTotalPnl)">
-            {{ money(displayEquity) }}<span v-if="displayEquity !== null" class="stat-unit">USDT</span>
+          <div class="stat-value" :class="pnlClass(dashboard.account?.totalPnl)">
+            {{ fmtAmount(dashboard.account?.equity) }}<span v-if="dashboard.account?.equity !== null && dashboard.account?.equity !== undefined" class="stat-unit">USDT</span>
           </div>
-          <div v-if="displayPnlPct !== null" class="stat-sub" :class="pnlClass(displayTotalPnl)">
-            {{ displayPnlPct >= 0 ? '+' : '' }}{{ displayPnlPct.toFixed(2) }}%
+          <div v-if="dashboard.account?.pnlPct !== null && dashboard.account?.pnlPct !== undefined" class="stat-sub" :class="pnlClass(dashboard.account?.totalPnl)">
+            {{ signedPct(dashboard.account?.pnlPct, 2) }}
           </div>
           <div v-else class="stat-sub">{{ dashboard.account?.success ? '相对初始余额' : '账户读取失败' }}</div>
         </div>
         <div class="stat-card">
           <div class="stat-title">可用余额</div>
           <div class="stat-value">
-            {{ money(dashboard.account?.available) }}<span v-if="dashboard.account?.available !== null && dashboard.account?.available !== undefined" class="stat-unit">USDT</span>
+            {{ fmtAmount(dashboard.account?.available) }}<span v-if="dashboard.account?.available !== null && dashboard.account?.available !== undefined" class="stat-unit">USDT</span>
           </div>
           <div v-if="dashboard.account?.available !== null && dashboard.account?.available !== undefined && dashboard.account?.equity" class="stat-sub">
-            {{ ((dashboard.account.available! / dashboard.account.equity!) * 100).toFixed(1) }}% 空闲
+            {{ ratioPct(dashboard.account.available, dashboard.account.equity) }} 空闲
           </div>
         </div>
         <div class="stat-card">
           <div class="stat-title">总盈亏</div>
-          <div class="stat-value" :class="pnlClass(displayTotalPnl)">
-            {{ signedMoney(displayTotalPnl) }}<span v-if="displayTotalPnl !== null" class="stat-unit">USDT</span>
+          <div class="stat-value" :class="pnlClass(dashboard.account?.totalPnl)">
+            {{ signedAmount(dashboard.account?.totalPnl) }}<span v-if="dashboard.account?.totalPnl !== null && dashboard.account?.totalPnl !== undefined" class="stat-unit">USDT</span>
           </div>
-          <div v-if="dashboard.trader.initialBalance !== null" class="stat-sub">初始余额 {{ money(dashboard.trader.initialBalance) }}</div>
+          <div v-if="dashboard.trader.initialBalance !== null" class="stat-sub">初始余额 {{ fmtAmount(dashboard.trader.initialBalance) }}</div>
           <div v-else class="stat-sub">未设置初始余额</div>
         </div>
         <div class="stat-card">
           <div class="stat-title">持仓</div>
           <div class="stat-value">{{ dashboard.positions.length }}<span class="stat-unit">ACTIVE</span></div>
           <div v-if="dashboard.account?.marginUsedPct !== null && dashboard.account?.marginUsedPct !== undefined" class="stat-sub">
-            保证金: {{ dashboard.account.marginUsedPct.toFixed(1) }}%
+            保证金: {{ fmtPct(dashboard.account.marginUsedPct, 1) }}
           </div>
         </div>
+      </div>
+
+      <!-- 最新周期（新链路：周期/阶段/提案/裁决/订单 + SSE 增量） -->
+      <div class="cycle-section">
+        <div class="cycle-section-head">
+          <span class="cycle-section-title">最新周期</span>
+          <a-space :size="6">
+            <a-tag v-if="cycleLoading" size="small" color="arcoblue">详情加载中</a-tag>
+            <a-tag v-if="latestCycle" size="small" color="purple">#{{ shortCycleId(latestCycle.cycle.id) }}</a-tag>
+          </a-space>
+        </div>
+        <a-alert v-if="cycleErrorText" type="warning" class="page-alert" closable @close="cycleErrorText = null">
+          {{ cycleErrorText }}
+        </a-alert>
+        <div v-if="!latestCycle" class="cycle-empty">暂无周期记录（交易员启动后按计划生成周期）</div>
+        <template v-else>
+          <CycleTimeline :cycle="latestCycle.cycle" :stages="latestCycle.stages" :proposal="latestCycle.proposal" />
+          <div v-if="toolGroups.length > 0" class="tool-panel">
+            <div class="tool-panel-title">工具调用</div>
+            <div v-for="group in toolGroups" :key="group.stageId" class="tool-group">
+              <span class="tool-group-label">{{ group.label }}</span>
+              <a-tag
+                v-for="chip in group.tools"
+                :key="chip.key"
+                size="small"
+                :color="chip.success ? 'green' : 'red'"
+                class="tool-chip"
+              >{{ chip.tool }}<template v-if="!chip.success && chip.error"> · {{ chip.error }}</template></a-tag>
+            </div>
+          </div>
+          <div v-if="latestCycle.proposal || latestCycle.verdict || latestCycle.orders.length > 0" class="cycle-cards">
+            <ProposalCard v-if="latestCycle.proposal" :proposal="latestCycle.proposal" />
+            <VerdictCard v-if="latestCycle.verdict" :verdict="latestCycle.verdict" />
+            <OrderCard v-for="order in latestCycle.orders" :key="order.orderId" :order="order" />
+          </div>
+        </template>
       </div>
 
       <!-- 主内容两列 -->
@@ -735,22 +1278,22 @@ async function closePosition(symbol: string) {
             </template>
             <div class="chart-head">
               <template v-if="dashboard.account?.success">
-                <span class="chart-equity">{{ money(displayEquity) }} <span class="stat-unit">USDT</span></span>
-                <span v-if="displayTotalPnl !== null" class="chart-pnl" :class="pnlClass(displayTotalPnl)">
-                  {{ signedMoney(displayTotalPnl) }} USDT
+                <span class="chart-equity">{{ fmtAmount(dashboard.account?.equity) }} <span class="stat-unit">USDT</span></span>
+                <span v-if="dashboard.account?.totalPnl !== null && dashboard.account?.totalPnl !== undefined" class="chart-pnl" :class="pnlClass(dashboard.account?.totalPnl)">
+                  {{ signedAmount(dashboard.account?.totalPnl) }} USDT
                 </span>
               </template>
               <span v-else class="chart-unavailable">账户数据不可用——修复 API Key 权限 / IP 白名单后自动展示净值曲线</span>
             </div>
             <EquityChart
-              :samples="dashboard.samples"
-              :initial-balance="dashboard.trader.initialBalance"
+              :samples="chartSamples"
+              :initial-balance="chartInitialBalance"
               :percent-mode="percentMode"
             />
             <div class="chart-footer">
-              <span>初始余额：{{ money(dashboard.trader.initialBalance) }}</span>
-              <span>当前净值：{{ money(displayEquity) }}</span>
-              <span>历史周期：{{ dashboard.samples.length }} 个</span>
+              <span>初始余额：{{ fmtAmount(dashboard.trader.initialBalance) }}</span>
+              <span>当前净值：{{ fmtAmount(dashboard.account?.equity) }}</span>
+              <span>净值采样：{{ dashboard.samples.length }} 个</span>
               <span>显示范围：{{ percentMode ? '%' : 'USDT' }}</span>
             </div>
           </a-card>
@@ -760,7 +1303,7 @@ async function closePosition(symbol: string) {
             <template #title>当前持仓</template>
             <template #extra>
               <a-space :size="6">
-                <a-tag v-if="liveConnected" color="green" size="small">实时</a-tag>
+                <a-tag :color="streamStatusMeta.color" size="small">{{ streamStatusMeta.label }}</a-tag>
                 <a-tag v-if="dashboard.positions.length > 0" color="gold" size="small">{{ dashboard.positions.length }} 活跃</a-tag>
               </a-space>
             </template>
@@ -772,7 +1315,7 @@ async function closePosition(symbol: string) {
                   <th>方向</th>
                   <th class="num">数量</th>
                   <th class="num">杠杆</th>
-                  <th class="num">{{ priceHeader }}</th>
+                  <th class="num">均价</th>
                   <th class="num">未实现盈亏</th>
                   <th class="num">操作</th>
                 </tr>
@@ -783,10 +1326,10 @@ async function closePosition(symbol: string) {
                   <td>
                     <span :class="sideLabel(p.side) === '多头' ? 'gain' : 'loss'">{{ sideLabel(p.side) }}</span>
                   </td>
-                  <td class="num">{{ fmtPrice(p.quantity) }}</td>
+                  <td class="num">{{ text(p.quantity) }}</td>
                   <td class="num">{{ p.leverage ? `${p.leverage}x` : '—' }}</td>
-                  <td class="num">{{ realtimeMarks[p.symbol] !== undefined ? fmtPrice(realtimeMarks[p.symbol]) : '—' }}</td>
-                  <td class="num" :class="pnlClass(livePnl(p))">{{ signedMoney(livePnl(p)) }}</td>
+                  <td class="num">{{ text(p.averageOpenPrice) }}</td>
+                  <td class="num" :class="pnlClass(p.unrealizedPnl)">{{ signedAmount(p.unrealizedPnl) }}</td>
                   <td class="num">
                     <a-popconfirm
                       :content="`确定要平仓 ${p.symbol} ${sideLabel(p.side)} 吗？将以市价整仓平仓。`"
@@ -800,165 +1343,6 @@ async function closePosition(symbol: string) {
             </table>
           </a-card>
         </div>
-
-        <!-- 最近决策 -->
-        <a-card class="decisions-card">
-          <template #title>最近决策</template>
-          <template #extra>
-            <span class="decisions-limit">
-              最近
-              <a-input-number v-model="decisionsLimit" :min="1" :max="50" size="mini" style="width: 56px" />
-              个交易周期
-            </span>
-          </template>
-
-          <div v-if="visibleDecisions.length === 0" class="card-empty">暂无决策记录（交易员启动后每轮落库）</div>
-          <div v-else class="decision-list">
-            <div v-for="d in visibleDecisions" :key="d.id" class="decision-card">
-              <div class="decision-head">
-                <div class="decision-icon"><IconRobot /></div>
-                <div class="decision-meta">
-                  <div class="decision-cycle">周期 #{{ d.id }}</div>
-                  <div class="decision-time">{{ fmtTime(d.at) }}</div>
-                </div>
-                <a-tag size="small" :color="d.status === 'error' ? 'red' : 'green'">{{ d.status === 'error' ? '轮次失败' : '已解析' }}</a-tag>
-              </div>
-
-              <div class="token-bar">
-                <a-tag v-if="d.elapsedMs" size="small" color="arcoblue">
-                  <template #icon><IconClockCircle /></template>
-                  {{ (d.elapsedMs / 1000).toFixed(1) }}s
-                </a-tag>
-                <a-tag v-if="d.inputTokens" size="small" color="purple">
-                  <template #icon><IconArrowFall /></template>
-                  {{ d.inputTokens.toLocaleString() }}
-                </a-tag>
-                <a-tag v-if="d.outputTokens" size="small" color="green">
-                  <template #icon><IconArrowRise /></template>
-                  {{ d.outputTokens.toLocaleString() }}
-                </a-tag>
-              </div>
-
-              <a-tabs size="small" type="text" class="decision-tabs">
-                <a-tab-pane key="coin" title="标的">
-                  <div class="action-card">
-                    <div class="action-head">
-                      <IconClockCircle class="action-clock" />
-                      <a-button v-if="d.symbol?.trim()" type="text" size="small" class="action-symbol-btn">
-                        {{ d.symbol }}
-                      </a-button>
-                      <a-tag size="small" :color="actionInfo(d.action).color">{{ actionInfo(d.action).label }}</a-tag>
-                      <a-tag v-if="d.confidence !== null && d.confidence > 0" size="small" :color="confidenceColor(d.confidence)">
-                        评分 {{ d.confidence }}
-                      </a-tag>
-                      <span class="status-dot" :class="d.status === 'error' ? 'fail' : 'ok'" :title="d.status === 'error' ? '失败轮次已保存' : '决策已解析并落库'"></span>
-                    </div>
-
-                    <div v-if="d.action === 'buy' || d.action === 'sell'" class="price-grid">
-                      <div class="price-cell">
-                        <div class="price-label">入场价</div>
-                        <div class="price-value">{{ fmtPrice(d.entryPrice) }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">止损</div>
-                        <div class="price-value loss">{{ d.stopLossPct !== null ? `-${Math.abs(d.stopLossPct).toFixed(2)}%` : '—' }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">止盈</div>
-                        <div class="price-value gain">{{ d.takeProfitPct !== null ? `+${Math.abs(d.takeProfitPct).toFixed(2)}%` : '—' }}</div>
-                      </div>
-                      <div class="price-cell">
-                        <div class="price-label">杠杆</div>
-                        <div class="price-value leverage">{{ d.leverage ? `${d.leverage}x` : '—' }}</div>
-                      </div>
-                    </div>
-
-                    <div v-if="riskReward(d) !== null" class="rr-row">
-                      <span class="price-label">风险回报比</span>
-                      <span class="loss">1</span>
-                      <span class="rr-colon">:</span>
-                      <span class="gain">{{ riskReward(d)!.toFixed(1) }}</span>
-                      <div class="rr-track">
-                        <div class="rr-fill" :style="{ width: `${Math.min(100, (riskReward(d)! / 5) * 100)}%` }"></div>
-                      </div>
-                    </div>
-
-                    <a-alert v-if="d.error || d.reason" :type="d.status === 'error' ? 'error' : 'info'" class="reason-alert">{{ d.error ?? d.reason }}</a-alert>
-                  </div>
-                </a-tab-pane>
-                <a-tab-pane key="prompt" title="提示词">
-                  <a-collapse :bordered="false" expand-icon-position="right" class="prompt-collapse">
-                    <a-collapse-item key="sys">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label sys">系统提示词</span>
-                          <span v-if="d.systemPrompt" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.systemPrompt)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-系统提示词.txt`, d.systemPrompt)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <MarkdownBlock v-if="d.systemPrompt" :text="d.systemPrompt" />
-                      <div v-else class="card-empty">该轮未落库（历史记录）</div>
-                    </a-collapse-item>
-                    <a-collapse-item key="user">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label user">用户提示词</span>
-                          <span v-if="d.userPrompt" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.userPrompt)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-用户提示词.txt`, d.userPrompt)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <MarkdownBlock v-if="d.userPrompt" :text="d.userPrompt" />
-                      <div v-else class="card-empty">该轮未落库（历史记录）</div>
-                    </a-collapse-item>
-                    <a-collapse-item key="cot">
-                      <template #header>
-                        <div class="prompt-head">
-                          <span class="prompt-label cot">思维链分析</span>
-                          <span v-if="d.reasoning" class="prompt-actions">
-                            <a-button-group size="mini">
-                              <a-button type="text" title="复制" @click.stop="copyText(d.reasoning)">
-                                <template #icon><IconCopy /></template>
-                              </a-button>
-                              <a-button type="text" title="下载 .txt" @click.stop="downloadText(`决策-${d.id}-思维链.txt`, d.reasoning)">
-                                <template #icon><IconDownload /></template>
-                              </a-button>
-                            </a-button-group>
-                          </span>
-                        </div>
-                      </template>
-                      <template v-if="d.reasoning">
-                        <template v-if="reasoningSections(d.reasoning).length > 0">
-                          <div v-for="section in reasoningSections(d.reasoning)" :key="section.label" class="cot-section">
-                            <span class="cot-chip" :class="section.tone">{{ section.label }}</span>
-                            <MarkdownBlock :text="section.text" />
-                          </div>
-                        </template>
-                        <MarkdownBlock v-else :text="d.reasoning" />
-                      </template>
-                      <div v-else class="card-empty">该轮未保存思维链</div>
-                    </a-collapse-item>
-                  </a-collapse>
-                </a-tab-pane>
-              </a-tabs>
-            </div>
-          </div>
-        </a-card>
       </div>
 
       <!-- 历史仓位统计 -->
@@ -985,16 +1369,16 @@ async function closePosition(symbol: string) {
               <div class="direction-head">
                 <span>{{ dir.label }}</span>
                 <span class="direction-pnl" :class="dir.empty ? '' : pnlClass(dir.totalPnl)">
-                  {{ dir.empty ? '—' : signedMoney(dir.totalPnl) }}
+                  {{ dir.empty ? '—' : signedAmount(dir.totalPnl) }}
                 </span>
               </div>
               <div class="direction-stats">
                 <span>交易次数 {{ dir.count }}</span>
                 <span :class="dir.empty ? '' : 'gain'">
-                  胜率 {{ dir.winRate === null ? '—' : `${dir.winRate.toFixed(0)}%` }}
+                  胜率 {{ dir.winRate === null ? '—' : fmtPct(dir.winRate, 0) }}
                 </span>
                 <span :class="dir.empty ? '' : pnlClass(dir.avgPnl)">
-                  平均盈亏 {{ dir.avgPnl === null ? '—' : signedMoney(dir.avgPnl) }}
+                  平均盈亏 {{ dir.avgPnl === null ? '—' : signedAmount(dir.avgPnl) }}
                 </span>
               </div>
             </div>
@@ -1025,8 +1409,8 @@ async function closePosition(symbol: string) {
                 <tr v-for="(s, i) in pagedSymbols" :key="(symbolPage - 1) * symbolPageSize + i">
                   <td>{{ s.symbol }}</td>
                   <td class="num">{{ s.count }}</td>
-                  <td class="num gain">{{ s.winRate.toFixed(0) }}%</td>
-                  <td class="num" :class="pnlClass(s.totalPnl)">{{ signedMoney(s.totalPnl) }}</td>
+                  <td class="num gain">{{ fmtPct(s.winRate, 0) }}</td>
+                  <td class="num" :class="pnlClass(s.totalPnl)">{{ signedAmount(s.totalPnl) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1082,12 +1466,12 @@ async function closePosition(symbol: string) {
                 <tr v-for="(r, i) in pagedHistoryRows" :key="(historyPage - 1) * historyPageSize + i">
                   <td>{{ r.symbol }}</td>
                   <td>{{ sideLabel(r.side) }}</td>
-                  <td class="num">{{ fmtPrice(r.quantity) }}</td>
+                  <td class="num">{{ text(r.quantity) }}</td>
                   <td class="num">{{ r.leverage ? `${r.leverage}x` : '—' }}</td>
-                  <td class="num">{{ fmtPrice(r.entryPrice) }}</td>
-                  <td class="num">{{ fmtPrice(r.exitPrice) }}</td>
-                  <td class="num" :class="pnlClass(r.realizedPnl)">{{ signedMoney(r.realizedPnl) }}</td>
-                  <td class="num fee-cell">{{ r.fee !== null ? money(r.fee, 4) : '—' }}</td>
+                  <td class="num">{{ text(r.entryPrice) }}</td>
+                  <td class="num">{{ text(r.exitPrice) }}</td>
+                  <td class="num" :class="pnlClass(r.realizedPnl)">{{ signedAmount(r.realizedPnl) }}</td>
+                  <td class="num fee-cell">{{ r.fee !== null ? fmtAmount(r.fee, 4) : '—' }}</td>
                   <td class="num">{{ fmtTime(r.closeTime) }}</td>
                 </tr>
               </tbody>
@@ -1113,18 +1497,15 @@ async function closePosition(symbol: string) {
             <template #header>执行审计</template>
           <table class="data-table">
             <thead>
-              <tr><th>时间</th><th>标的</th><th>动作</th><th class="num">数量</th><th class="num">价格</th><th>结果</th><th>说明</th></tr>
+              <tr><th>时间</th><th>标的</th><th>动作</th><th class="num">数量</th><th class="num">价格</th><th>说明</th></tr>
             </thead>
             <tbody>
               <tr v-for="o in dashboard.recentOrders" :key="o.id">
                 <td>{{ fmtTime(o.at) }}</td>
                 <td>{{ o.symbol ?? '—' }}</td>
                 <td>{{ actionInfo(o.action).label }}</td>
-                <td class="num">{{ fmtPrice(o.quantity) }}</td>
-                <td class="num">{{ fmtPrice(o.price) }}</td>
-                <td>
-                  <a-tag size="small" :color="o.success ? 'green' : 'red'">{{ o.success ? '成功' : '失败' }}</a-tag>
-                </td>
+                <td class="num">{{ text(o.quantity) }}</td>
+                <td class="num">{{ text(o.price) }}</td>
                 <td class="note-cell">{{ o.note ?? o.error ?? '—' }}</td>
               </tr>
             </tbody>
@@ -1305,9 +1686,118 @@ async function closePosition(symbol: string) {
   color: var(--color-text-3);
 }
 
+.debug-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* SSE 连接状态（文案与 onStatus 一一对应：连接中/已连接/重连中/连接失败） */
+.stream-state {
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid var(--color-border-2);
+}
+
+.stream-open {
+  color: rgb(var(--success-6));
+  border-color: rgba(var(--success-6), 0.4);
+}
+
+.stream-connecting {
+  color: rgb(var(--primary-6));
+  border-color: rgba(var(--primary-6), 0.4);
+}
+
+.stream-reconnecting {
+  color: rgb(var(--warning-6));
+  border-color: rgba(var(--warning-6), 0.4);
+}
+
+.stream-error,
+.stream-closed {
+  color: rgb(var(--danger-6));
+  border-color: rgba(var(--danger-6), 0.4);
+}
+
 .debug-right {
   display: flex;
   gap: 16px;
+}
+
+/* 最新周期（新链路） */
+.cycle-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cycle-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cycle-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-1);
+}
+
+.cycle-empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-3);
+  border: 1px dashed var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.tool-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-1);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.tool-panel-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-3);
+}
+
+.tool-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-group-label {
+  min-width: 48px;
+  font-size: 12px;
+  line-height: 22px;
+  color: var(--color-text-2);
+}
+
+.tool-chip {
+  height: auto;
+  max-width: 100%;
+  line-height: 18px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.cycle-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
 }
 
 .stats-row {
@@ -1371,17 +1861,12 @@ async function closePosition(symbol: string) {
   color: rgb(var(--danger-6));
 }
 
+/* 只有左列内容（净值曲线 + 当前持仓）：单列全宽，避免右侧 1fr 留白 */
 .main-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
-}
-
-@media (max-width: 1000px) {
-  .main-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .main-left {

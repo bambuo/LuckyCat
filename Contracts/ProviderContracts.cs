@@ -14,6 +14,9 @@ public record ProviderDto(
     int ContextTokens,
     int MaxOutputTokens,
     bool AutoCompressContext,
+    /// <summary>工具调用验证结果（null=未验证）；start/test-run 前置校验依赖本字段（LC-STD-03 §2.2）。</summary>
+    bool? ToolCallingSupported,
+    DateTime? ToolCallingVerifiedAt,
     DateTime CreatedAt,
     DateTime UpdatedAt);
 

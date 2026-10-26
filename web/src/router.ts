@@ -4,6 +4,8 @@ import ExchangesPage from './pages/ExchangesPage.vue'
 import StrategyStudioPage from './pages/StrategyStudioPage.vue'
 import TradersPage from './pages/TradersPage.vue'
 import DashboardPage from './pages/DashboardPage.vue'
+import CyclesPage from './pages/CyclesPage.vue'
+import ReviewsPage from './pages/ReviewsPage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,6 +15,8 @@ const router = createRouter({
     { path: '/strategy', name: 'strategy', component: StrategyStudioPage },
     { path: '/traders', name: 'traders', component: TradersPage },
     { path: '/dashboard', name: 'dashboard', component: DashboardPage },
+    { path: '/cycles', name: 'cycles', component: CyclesPage },
+    { path: '/reviews', name: 'reviews', component: ReviewsPage },
     // 模型提供商与加密交易所页保留（能力已收进 AI 交易员页，含验证；仅 URL 直达）
     { path: '/', redirect: '/traders' },
   ],

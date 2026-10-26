@@ -1,33 +1,88 @@
 {
-  "strategyId": 9,
-  "name": "日内顺势回调（稳健验证）",
-  "checks": {
-    "ai_config_matches": true,
-    "inactive": true,
-    "traders_remain_on_strategy_8": true
-  },
-  "normalization": "运行服务省略gridConfig:null，回读恢复默认网格对象；strategyType=ai_trading时该块不使用。所有AI配置字段一致。",
-  "traders": [
-    {
-      "id": 3,
-      "strategyId": 8,
-      "isRunning": true,
-      "executionMode": "live"
+  "name": "日内顺势回调（稳健验证）· 已保存",
+  "description": "已保存策略的再导入副本：与 intraday-trend-pullback.json 为同一份配置，用于备份或迁移到其他实例；导入后不会自动激活，也不会绑定或启动交易员。",
+  "config": {
+    "coinSource": {
+      "sourceType": "static",
+      "exchange": "gate",
+      "staticCoins": ["BTC", "ETH"],
+      "excludedCoins": [],
+      "useScore": false,
+      "scoreLimit": 5,
+      "useOiTop": false,
+      "oiTopLimit": 10,
+      "useOiLow": false,
+      "oiLowLimit": 10
     },
-    {
-      "id": 2,
-      "strategyId": 8,
-      "isRunning": false,
-      "executionMode": "live"
+    "indicators": {
+      "klines": {
+        "primaryTimeframe": "15m",
+        "primaryCount": 64,
+        "enableMultiTimeframe": true,
+        "selectedTimeframes": ["15m", "1h"]
+      },
+      "enableRawKlines": true,
+      "ema": { "enabled": true, "periods": [20, 50] },
+      "macd": { "enabled": true, "periods": [12, 26, 9] },
+      "rsi": { "enabled": true, "periods": [14] },
+      "atr": { "enabled": true, "periods": [14] },
+      "boll": { "enabled": false, "periods": [20] },
+      "vwap": { "enabled": false, "periods": [] },
+      "volume": { "enabled": true },
+      "openInterest": { "enabled": false },
+      "fundingRate": { "enabled": true }
     },
-    {
-      "id": 1,
-      "strategyId": 8,
-      "isRunning": false,
-      "executionMode": "dry"
+    "riskControl": {
+      "maxPositions": 1,
+      "btcEthLeverage": 3,
+      "altcoinLeverage": 3,
+      "btcEthPositionPct": 10,
+      "altcoinPositionPct": 10,
+      "minRiskRewardRatio": 1.5,
+      "maxMarginUsage": 15,
+      "minPositionSize": 12,
+      "minConfidence": 75,
+      "maxRiskPerTradePct": 0.5,
+      "estimatedFeePct": 0.15,
+      "estimatedSlippagePct": 0.05,
+      "estimatedFundingPct": 0.01,
+      "maxEntryDeviationPct": 0.15
+    },
+    "promptSections": {
+      "role": "你执行一套待验证的日内顺势回调策略，目标是筛选证据明确、位置合理、扣除成本后仍有空间的交易。高胜率只是设计目标，未得到成交样本验证，不得报告预测胜率。只使用给定的Gate行情、账户和交易纪律；允许长期观望。",
+      "frequency": "不设置每日最低交易笔数，预期持仓60–180分钟，仅为参考窗口，不代表系统具备定时强平。已有持仓优先管理，不加仓、不摊平、不反手补亏。连续两笔净亏损后保证金比例上限减半，任一当日连续三笔净亏损后停止新开仓至系统重置；以系统纪律状态为准，不能自行从截断历史推算。",
+      "entry": "",
+      "workflow": "先处理已有持仓的保护状态与已知结构失效；需要退出时优先close。仅在没有持仓且纪律允许开仓时评估BTC/USDT和ETH/USDT。先逐项核对默认方向、动能、位置、成本后盈亏比，再核对附加提示中的回调与震荡过滤。所有开仓条件满足才选择证据最完整的一笔；条件未知或失败则hold，触发条件保留全部未满足项。"
+    },
+    "customPrompt": "本策略保留默认四项开仓校验，以下仅进一步收紧候选，不放宽默认条件。1h为方向周期，15m为入场周期，只用已收盘K线。额外趋势过滤：1h的|EMA20-EMA50|至少为1h ATR14的0.25倍；不足视为均线缠绕，缺少对应指标则不能确认。仅做回调确认：最新已收盘15m K线的[低,高]必须与15m EMA20±0.5ATR14区域相交，多头收价≥EMA20且收价>开价，空头收价≤EMA20且收价<开价；只有突破而没有该回调确认时hold。当前参考价距15m EMA20不得超过0.75ATR14，超过则等待新回调。动能仍按默认MACD与RSI14规则判断，不允许仅凭形态开仓。止损仍为15m ATR14×1.5；如果该止损先于回调结构失效位被触及、无法保护完整结构，则放弃，不缩止损凑比例。止盈仍取默认最近有效结构位，扣除全部成本预算后的盈亏比至少为配置下限，不跳过近端阻挡。成本百分比之和记为C，止损百分比记为S；position_pct不得超过100×每笔最大风险占比/[leverage×(S+C)]，同时不超过系统仓位上限及连亏折扣。名义金额=账户资金基数×position_pct/100×leverage，低于最小金额或预计数量取整后不满足交易所要求时hold，不能提高杠杆或风险补足金额。OI和新闻不参与入场，本轮未提供时不要求它们确认；成交量与资金费只作风险补充，不臆造盘口、资金费结算时间或实际账户费率。confidence是证据评分，不是胜率。",
+    "decisionMemoryEnabled": false,
+    "newsEnabled": false,
+    "roleInstructions": {
+      "analyst": "",
+      "trader": "",
+      "risk": "",
+      "executor": "",
+      "reviewer": ""
+    },
+    "agentBudget": {
+      "analystTimeoutSeconds": 90,
+      "traderTimeoutSeconds": 90,
+      "riskTimeoutSeconds": 45,
+      "executorTimeoutSeconds": 45,
+      "cycleTimeoutSeconds": 300,
+      "analystToolLimit": 20,
+      "traderToolLimit": 14,
+      "analystToolsPerSymbol": 4,
+      "traderToolsPerSymbol": 3,
+      "riskToolLimit": 4,
+      "executorToolLimit": 6,
+      "cycleToolLimit": 45,
+      "inputTokenBudget": 150000
+    },
+    "review": {
+      "enabled": true,
+      "localTime": "00:10",
+      "maxLookbackDays": 30
     }
-  ],
-  "promptRevisionLatest": false,
-  "modelTested": false,
-  "ordersSubmitted": false
+  }
 }

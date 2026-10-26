@@ -3,16 +3,16 @@ namespace LuckyCat.Contracts;
 // 配置 JSON 契约（camelCase 出入，属性名 PascalCase，STJ web 默认大小写不敏感）
 public class StrategyConfig
 {
-    public string StrategyType { get; set; } = "ai_trading";   // ai_trading | grid_trading
     public CoinSourceConfig CoinSource { get; set; } = new();
-    public GridConfig? GridConfig { get; set; } = new();       // 切出网格类型时前端置 null
     public IndicatorSettings Indicators { get; set; } = new();
     public RiskControlConfig RiskControl { get; set; } = new();
     public PromptSectionConfig PromptSections { get; set; } = new();
     public string CustomPrompt { get; set; } = "";
     public bool DecisionMemoryEnabled { get; set; } = true;
     public bool NewsEnabled { get; set; } = true;
-    public string Variant { get; set; } = "balanced";          // balanced | aggressive | conservative | scalping
+    public RoleInstructionConfig RoleInstructions { get; set; } = new();
+    public AgentBudgetConfig AgentBudget { get; set; } = new();
+    public ReviewConfig Review { get; set; } = new();
 }
 
 public class CoinSourceConfig
@@ -29,25 +29,6 @@ public class CoinSourceConfig
     public int OiLowLimit { get; set; } = 10;
 }
 
-public class GridConfig
-{
-    public string Symbol { get; set; } = "BTC/USDT";
-    public int GridCount { get; set; } = 10;
-    public int TotalInvestment { get; set; } = 1000;
-    public int Leverage { get; set; } = 3;
-    public decimal UpperPrice { get; set; }
-    public decimal LowerPrice { get; set; }
-    public bool UseAtrBounds { get; set; } = true;
-    public decimal AtrMultiplier { get; set; } = 2.0m;
-    public string Distribution { get; set; } = "gaussian";      // uniform | gaussian | pyramid
-    public int MaxDrawdownPct { get; set; } = 10;
-    public int StopLossPct { get; set; } = 5;
-    public int DailyLossLimitPct { get; set; } = 8;
-    public bool UseMakerOnly { get; set; } = true;
-    public bool EnableDirectionAdjust { get; set; }
-    public decimal DirectionBiasRatio { get; set; } = 0.7m;
-}
-
 public class IndicatorSettings
 {
     public KlineConfig Klines { get; set; } = new();
@@ -61,7 +42,6 @@ public class IndicatorSettings
     public SentimentConfig Volume { get; set; } = new() { Enabled = true };
     public SentimentConfig OpenInterest { get; set; } = new() { Enabled = true };
     public SentimentConfig FundingRate { get; set; } = new() { Enabled = true };
-    public List<ExternalDataSource> ExternalDataSources { get; set; } = [];
 }
 
 public class KlineConfig
@@ -81,22 +61,6 @@ public class IndicatorConfig
 public class SentimentConfig
 {
     public bool Enabled { get; set; }
-}
-
-public class ExternalDataSource
-{
-    public string Name { get; set; } = "";
-    public string Method { get; set; } = "GET";                 // GET | POST
-    public string Url { get; set; } = "";
-    public string DataPath { get; set; } = "";
-    public int RefreshSecs { get; set; } = 300;
-    public List<ExternalHeader> Headers { get; set; } = [];
-}
-
-public class ExternalHeader
-{
-    public string Key { get; set; } = "";
-    public string Value { get; set; } = "";
 }
 
 public class RiskControlConfig
@@ -127,4 +91,42 @@ public class PromptSectionConfig
     public string Frequency { get; set; } = "";
     public string Entry { get; set; } = "";
     public string Workflow { get; set; } = "";
+}
+
+// 五角色附加指令：拼接在对应角色提示词末尾。
+public class RoleInstructionConfig
+{
+    public string Analyst { get; set; } = "";
+    public string Trader { get; set; } = "";
+    public string Risk { get; set; } = "";
+    public string Executor { get; set; } = "";
+    public string Reviewer { get; set; } = "";
+}
+
+// 智能体预算：阶段超时、工具调用上限与单周期输入 token 预算。
+public class AgentBudgetConfig
+{
+    public int AnalystTimeoutSeconds { get; set; } = 90;
+    public int TraderTimeoutSeconds { get; set; } = 90;
+    public int RiskTimeoutSeconds { get; set; } = 45;
+    public int ExecutorTimeoutSeconds { get; set; } = 45;
+    public int CycleTimeoutSeconds { get; set; } = 300;
+    public int AnalystToolLimit { get; set; } = 20;
+    public int TraderToolLimit { get; set; } = 14;
+    /// <summary>每多一个候选标的，分析师阶段追加的工具额度（基础额度见 <see cref="AnalystToolLimit"/>）。</summary>
+    public int AnalystToolsPerSymbol { get; set; } = 4;
+    /// <summary>每多一个候选标的，交易员阶段追加的工具额度（基础额度见 <see cref="TraderToolLimit"/>）。</summary>
+    public int TraderToolsPerSymbol { get; set; } = 3;
+    public int RiskToolLimit { get; set; } = 4;
+    public int ExecutorToolLimit { get; set; } = 6;
+    public int CycleToolLimit { get; set; } = 45;
+    public int InputTokenBudget { get; set; } = 150000;
+}
+
+// 每日复盘调度配置。
+public class ReviewConfig
+{
+    public bool Enabled { get; set; } = true;
+    public string LocalTime { get; set; } = "00:10";
+    public int MaxLookbackDays { get; set; } = 30;
 }

@@ -17,7 +17,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'deepseek',
     label: 'DeepSeek',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-flash',
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
@@ -26,7 +26,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'kimi',
     label: 'Kimi（Moonshot）',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://api.moonshot.cn/v1',
     model: 'kimi-k3',
     apiKeyUrl: 'https://platform.kimi.com/console/api-keys',
@@ -35,7 +35,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'qwen',
     label: '阿里云百炼',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen3.7-plus',
     apiKeyUrl: 'https://bailian.console.aliyun.com/?apiKey=1',
@@ -44,7 +44,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'openai',
     label: 'OpenAI',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-5.4-mini',
     apiKeyUrl: 'https://platform.openai.com/api-keys',
@@ -53,7 +53,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'glm',
     label: '智谱 GLM',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     model: 'glm-5.3-flash',
     apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
@@ -62,7 +62,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'openrouter',
     label: 'OpenRouter',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://openrouter.ai/api/v1',
     model: 'openai/gpt-5.4-mini',
     apiKeyUrl: 'https://openrouter.ai/settings/keys',
@@ -71,7 +71,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'siliconflow',
     label: '硅基流动',
-    type: 'OpenAICompatible',
+    type: 'openAICompatible',
     baseUrl: 'https://api.siliconflow.cn/v1',
     model: 'deepseek-ai/DeepSeek-V4-Flash',
     apiKeyUrl: 'https://cloud.siliconflow.cn/account/ak',
@@ -80,7 +80,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'ollama',
     label: 'Ollama',
-    type: 'Ollama',
+    type: 'ollama',
     baseUrl: 'http://localhost:11434',
     model: 'qwen3:8b',
     icon: '/icons/ollama.svg',
@@ -88,7 +88,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: 'azure',
     label: 'Azure OpenAI',
-    type: 'AzureOpenAI',
+    type: 'azureOpenAI',
     baseUrl: '',
     model: '',
     apiKeyUrl: 'https://portal.azure.com/',

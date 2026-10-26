@@ -2,7 +2,6 @@
   "name": "日内顺势回调（稳健验证）",
   "description": "Gate BTC/ETH；1h方向、15m回调确认；最多一仓、3倍杠杆、单笔含成本风险不超过0.5%。以提高入场质量为设计目标，胜率未验证。额外回调/震荡过滤由提示词约束，默认入场和资金风控保留；预期持仓60–180分钟，不具备定时强平。",
   "config": {
-    "strategyType": "ai_trading",
     "coinSource": {
       "sourceType": "static",
       "exchange": "gate",
@@ -15,7 +14,6 @@
       "useOiLow": false,
       "oiLowLimit": 10
     },
-    "gridConfig": null,
     "indicators": {
       "klines": {
         "primaryTimeframe": "15m",
@@ -32,8 +30,7 @@
       "vwap": { "enabled": false, "periods": [] },
       "volume": { "enabled": true },
       "openInterest": { "enabled": false },
-      "fundingRate": { "enabled": true },
-      "externalDataSources": []
+      "fundingRate": { "enabled": true }
     },
     "riskControl": {
       "maxPositions": 1,
@@ -60,6 +57,32 @@
     "customPrompt": "本策略保留默认四项开仓校验，以下仅进一步收紧候选，不放宽默认条件。1h为方向周期，15m为入场周期，只用已收盘K线。额外趋势过滤：1h的|EMA20-EMA50|至少为1h ATR14的0.25倍；不足视为均线缠绕，缺少对应指标则不能确认。仅做回调确认：最新已收盘15m K线的[低,高]必须与15m EMA20±0.5ATR14区域相交，多头收价≥EMA20且收价>开价，空头收价≤EMA20且收价<开价；只有突破而没有该回调确认时hold。当前参考价距15m EMA20不得超过0.75ATR14，超过则等待新回调。动能仍按默认MACD与RSI14规则判断，不允许仅凭形态开仓。止损仍为15m ATR14×1.5；如果该止损先于回调结构失效位被触及、无法保护完整结构，则放弃，不缩止损凑比例。止盈仍取默认最近有效结构位，扣除全部成本预算后的盈亏比至少为配置下限，不跳过近端阻挡。成本百分比之和记为C，止损百分比记为S；position_pct不得超过100×每笔最大风险占比/[leverage×(S+C)]，同时不超过系统仓位上限及连亏折扣。名义金额=账户资金基数×position_pct/100×leverage，低于最小金额或预计数量取整后不满足交易所要求时hold，不能提高杠杆或风险补足金额。OI和新闻不参与入场，本轮未提供时不要求它们确认；成交量与资金费只作风险补充，不臆造盘口、资金费结算时间或实际账户费率。confidence是证据评分，不是胜率。",
     "decisionMemoryEnabled": false,
     "newsEnabled": false,
-    "variant": "conservative"
+    "roleInstructions": {
+      "analyst": "",
+      "trader": "",
+      "risk": "",
+      "executor": "",
+      "reviewer": ""
+    },
+    "agentBudget": {
+      "analystTimeoutSeconds": 90,
+      "traderTimeoutSeconds": 90,
+      "riskTimeoutSeconds": 45,
+      "executorTimeoutSeconds": 45,
+      "cycleTimeoutSeconds": 300,
+      "analystToolLimit": 20,
+      "traderToolLimit": 14,
+      "analystToolsPerSymbol": 4,
+      "traderToolsPerSymbol": 3,
+      "riskToolLimit": 4,
+      "executorToolLimit": 6,
+      "cycleToolLimit": 45,
+      "inputTokenBudget": 150000
+    },
+    "review": {
+      "enabled": true,
+      "localTime": "00:10",
+      "maxLookbackDays": 30
+    }
   }
 }

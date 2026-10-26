@@ -17,7 +17,7 @@ public record TraderDto(
     string ExecutionMode,
     bool IsCrossMargin,
     int ScanIntervalMinutes,
-    decimal? InitialBalance,
+    string? InitialBalance,
     DateTime? StartedAt,
     DateTime? LastCycleAt,
     string? LastCycleStatus,
@@ -31,7 +31,7 @@ public record TraderUpsertRequest(
     int StrategyId,
     bool IsCrossMargin,
     int ScanIntervalMinutes,
-    decimal? InitialBalance,
+    string? InitialBalance,
     string? ExecutionMode = null);
 
 public record TraderClosePositionRequest(string Symbol);
@@ -41,9 +41,8 @@ public record TraderOrderDto(
     DateTime At,
     string? Symbol,
     string Action,
-    decimal? Quantity,
-    decimal? Price,
-    bool Success,
+    string? Quantity,
+    string? Price,
     string? Note,
     string? Error);
 
@@ -57,12 +56,11 @@ public record DashboardTraderInfo(
     string ExchangeLabel,
     string AccountName,
     string StrategyName,
-    string StrategyType,
     bool IsRunning,
     string ExecutionMode,
     bool IsCrossMargin,
     int ScanIntervalMinutes,
-    decimal? InitialBalance,
+    string? InitialBalance,
     DateTime? StartedAt,
     DateTime? LastCycleAt,
     string? LastCycleStatus,
@@ -73,76 +71,50 @@ public record DashboardTraderInfo(
 public record DashboardAccount(
     bool Success,
     string? Error,
-    decimal? Equity,
-    decimal? Available,
-    decimal? TotalPnl,
-    double? PnlPct,
+    string? Equity,
+    string? Available,
+    string? TotalPnl,
+    string? PnlPct,
     int PositionCount,
-    decimal? MarginUsedPct,
+    string? MarginUsedPct,
     DateTime At);
 
-public record DashboardSample(DateTime At, decimal Equity);
+public record DashboardSample(DateTime At, string Equity);
 
 public record DashboardPosition(
     string Symbol,
     string Side,
-    decimal Quantity,
-    decimal AverageOpenPrice,
-    decimal? UnrealizedPnl,
-    decimal? LiquidationPrice,
-    decimal? Leverage);
-
-public record DashboardDecision(
-    int Id,
-    DateTime At,
-    string? Action,
-    string? Symbol,
-    double? Confidence,
-    decimal? EntryPrice,
-    decimal? StopLossPct,
-    decimal? TakeProfitPct,
-    decimal? PositionPct,
-    decimal? Leverage,
-    string? Reason,
-    string? Reasoning,
-    int? InputTokens,
-    int? OutputTokens,
-    long? ElapsedMs,
-    int? TraderId,
-    string? SystemPrompt,
-    string? UserPrompt,
-    string Status = "ok",
-    string? FailureStage = null,
-    string? Error = null,
-    string? RawOutput = null,
-    string? PromptRevision = null,
-    bool? RequestSent = null);
+    string Quantity,
+    string AverageOpenPrice,
+    string? UnrealizedPnl,
+    string? LiquidationPrice,
+    string? Leverage);
 
 public record DashboardMetrics(
     int TotalTrades,
-    double WinRate,
-    decimal TotalPnl,
-    decimal TotalFee,
-    decimal NetPnl,
-    decimal ProfitFactor,
-    decimal AvgWin,
-    decimal AvgLoss,
-    double MaxDrawdownPct,
-    double Sharpe);
+    string WinRate,
+    string TotalPnl,
+    string TotalFee,
+    string NetPnl,
+    string ProfitFactor,
+    string AvgWin,
+    string AvgLoss,
+    string MaxDrawdownPct,
+    string Sharpe);
 
-public record DashboardDirectionStat(string Side, int Count, double WinRate, decimal TotalPnl, decimal AvgPnl);
+public record DashboardDirectionStat(string Side, int Count, string WinRate, string TotalPnl, string AvgPnl);
 
-public record DashboardSymbolStat(string Symbol, int Count, double WinRate, decimal TotalPnl);
+public record DashboardSymbolStat(string Symbol, int Count, string WinRate, string TotalPnl);
 
 public record DashboardHistoryRow(
     string Symbol,
     string? Side,
-    decimal? EntryPrice,
-    decimal? ExitPrice,
-    decimal? Quantity,
-    decimal? Leverage,
-    decimal RealizedPnl,
-    decimal? Fee,
+    string? EntryPrice,
+    string? ExitPrice,
+    string? Quantity,
+    string? Leverage,
+    string RealizedPnl,
+    string? Fee,
     DateTime CloseTime);
 
 public record DashboardHistory(
@@ -159,6 +131,7 @@ public record TraderDashboardDto(
     DashboardAccount? Account,
     IReadOnlyList<DashboardSample> Samples,
     IReadOnlyList<DashboardPosition> Positions,
-    IReadOnlyList<DashboardDecision> Decisions,
     DashboardHistory History,
-    IReadOnlyList<TraderOrderDto> RecentOrders);
+    IReadOnlyList<TraderOrderDto> RecentOrders,
+    // 新链路最新周期块（Task 14 B：周期/阶段/提案/裁决/订单；无周期时为 null）。
+    CycleDetailDto? LatestCycle = null);

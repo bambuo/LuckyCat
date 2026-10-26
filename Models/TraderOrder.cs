@@ -7,7 +7,7 @@ public class TraderOrder
     public int TraderId { get; set; }
     public DateTime At { get; set; }
     public string? Symbol { get; set; }
-    /// <summary>动作：buy | sell | close | skip</summary>
+    /// <summary>动作：open | close（读取兼容历史 buy | sell | skip）</summary>
     public required string Action { get; set; }
     public decimal? Quantity { get; set; }
     public decimal? Price { get; set; }
@@ -15,7 +15,25 @@ public class TraderOrder
     public decimal? StopLossPrice { get; set; }
     /// <summary>开仓时附带的止盈价（同上；可空）</summary>
     public decimal? TakeProfitPrice { get; set; }
-    public bool Success { get; set; }
+    /// <summary>订单生命周期状态：submitted | filled | partial | failed | unknown | cancelled（唯一成功口径）</summary>
+    public string? Status { get; set; }
+    /// <summary>关联周期；过渡期旧代码可写 null</summary>
+    public string? CycleId { get; set; }
+    /// <summary>交易所账户快照；合成账户试运行为 null</summary>
+    public int? ExchangeAccountId { get; set; }
+    public string? ProposalId { get; set; }
+    public string? VerdictId { get; set; }
+    /// <summary>幂等键；与 CycleId 组成唯一索引</summary>
+    public string? ClientOrderId { get; set; }
+    /// <summary>持仓方向：long | short（平仓时为被平仓方向）</summary>
+    public string? Side { get; set; }
+    public decimal? FilledQuantity { get; set; }
+    public decimal? AveragePrice { get; set; }
+    /// <summary>实际提交杠杆</summary>
+    public decimal? Leverage { get; set; }
+    /// <summary>是否演练（演练成交为 filled + simulated=true）</summary>
+    public bool Simulated { get; set; }
+    public string? ExchangeOrderId { get; set; }
     public string? Note { get; set; }
     public string? Error { get; set; }
 }

@@ -4,10 +4,12 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Polly;
+using LuckyCat.Contracts;
 using LuckyCat.Data;
 using LuckyCat.Endpoints;
+using LuckyCat.Memory;
 using LuckyCat.Services;
-using System.Text.Json.Serialization;
+using LuckyCat.Services.NewsSources;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,21 +18,67 @@ builder.WebHost.UseUrls("http://localhost:5210");
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite("Data Source=luckycat.db"));
 builder.Services.ConfigureHttpJsonOptions(options =>
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+{
+    // 请求绑定与结果序列化统一对齐 ApiJson 约定（LC-STD-03 §1.1/§1.2）：
+    // camelCase 属性与 camelCase 枚举字符串；请求体禁止未映射字段（Disallow → 400 validation_failed）。
+    // P5/P6 端点重写（Task 14）起生效；旧前端与新契约同步适配。
+    ApiJson.Configure(options.SerializerOptions);
+});
 builder.Services.AddScoped<ChatClientFactory>();
 builder.Services.AddScoped<VerificationRunner>();
 builder.Services.AddScoped<ExchangeVerificationRunner>();
 builder.Services.AddScoped<MarketSnapshotService>();
 builder.Services.AddScoped<CoinRankingService>();
 builder.Services.AddScoped<MarketSentimentService>();
-builder.Services.AddScoped<ExternalDataSourceService>();
-builder.Services.AddScoped<StrategyTestRunner>();
-builder.Services.AddScoped<DecisionMemoryService>();
+// 内置新闻源（Task 14.5/14.6/14.7）：都只依赖单例 IHttpClientFactory，自身仅持本地 TTL 缓存，不俘获 HttpClient。
+// 聚合器 scoped；注册顺序即 IEnumerable<INewsSource> 顺序，也是 get_news 轮转取条的首轮顺序
+// （limit 上限 12，内置源 11 个 → 首轮 11 个全部出场，第 12 行回到第一家继续）：
+// 金十 → 链捕手（最及时的中文快讯）→ PANews → Binance/OKX 公告 → 财经日历 → 美联储 → 四家英文媒体。
+// 财经日历没有事件时返回 Problem、不占轮转名额。
+builder.Services.AddSingleton<Jin10NewsSource>();
+builder.Services.AddSingleton<ChainCatcherNewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<Jin10NewsSource>());
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<ChainCatcherNewsSource>());
+// 通用 RSS 适配器：一个类 + 每源一条注册；PANews 301、CoinDesk 308 由 HttpClient 默认跟随重定向。
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "PANews", "https://rss.panewslab.com/zh/gtimg/rss", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddSingleton<BinanceAnnouncementsNewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<BinanceAnnouncementsNewsSource>());
+builder.Services.AddSingleton<OkxAnnouncementsNewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<OkxAnnouncementsNewsSource>());
+builder.Services.AddSingleton<ForexCalendarNewsSource>();
+builder.Services.AddSingleton<INewsSource>(sp => sp.GetRequiredService<ForexCalendarNewsSource>());
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "美联储新闻稿", "https://www.federalreserve.gov/feeds/press_all.xml", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "Cointelegraph", "https://cointelegraph.com/rss", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "The Block", "https://www.theblock.co/rss.xml", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddSingleton<INewsSource>(sp => new RssNewsSource(
+    "Decrypt", "https://decrypt.co/feed", sp.GetRequiredService<IHttpClientFactory>()));
+builder.Services.AddScoped<CryptoNewsAggregator>();
 builder.Services.AddScoped<ExchangeTradingService>();
-builder.Services.AddSingleton<TraderRunnerService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>());
+// P4 周期宿主切流（Task 14 B / R-14-5）：旧 TraderRunnerService 的宿主与旧单发演练链路已在
+// Task 18（P7）整体删除——本进程恰好一条交易调度链（TradingCycleRunner）。
+// TradingCycleRunner 仍是可解析单例而非 hosted 服务：调度循环只经端点 start 与
+// CycleStartupRecovery（先 RecoverAsync 收敛遗留 running，再为 IsRunning 交易员 Start）驱动。
+builder.Services.AddScoped<CycleRecorder>();
+builder.Services.AddSingleton<TradingCycleRunner>();
+builder.Services.AddHostedService<CycleStartupRecovery>();
+// P5 复盘（Task 13）：复盘宿主 + 每日本地时刻调度。
+// 与 R-11-6 的关系：那条禁令针对的是迁移期不得把**交易**宿主（TradingCycleRunner）注册为 hosted 调度。
+// 复盘员不下单、不改策略/风控/交易员状态（LC-STD-01 §1.35、§9「只读工具；不修改任何配置」），
+// 因此 ReviewScheduler 不构成第二条交易调度链；而 §9 的「本地时刻（默认 00:10）」定时触发
+// 只能由宿主驱动，这里必须托管。它与交易周期各用各的闸，互不占用（R-13-5）。
+builder.Services.AddSingleton<ReviewRunner>();
+builder.Services.AddHostedService<ReviewScheduler>();
 builder.Services.AddSingleton<PositionHistorySyncService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionHistorySyncService>());
+// 数据保留（LC-STD-03 §2.5）：每日本地 03:30 清理 90 天前的阶段/工具明细；
+// 只删审计明细，不触交易数据，与交易调度链无关。
+builder.Services.AddHostedService<DataRetentionService>();
 builder.Services.AddSingleton<AccountStreamService>();
 builder.Services.AddSingleton<SseEventHub>();
 // 统一弹性管道（情绪/新闻等所有经 HttpClientFactory 的请求）：突发超时最多重试 3 次、线性退避 1/2/3 秒
@@ -95,9 +143,14 @@ using (var scope = app.Services.CreateScope())
     db.Database.EnsureCreated();
 }
 
+// 未预期异常与请求体绑定失败的统一包裹（LC-STD-03 §1.2/§6；响应不含堆栈/SQL/上游地址，LC-STD-02）
+app.UseApiErrorWrapper();
+
 app.MapProviders();
 app.MapExchanges();
 app.MapStrategies();
 app.MapTraders();
+app.MapCycles();
+app.MapHealth();
 
 app.Run();

@@ -52,12 +52,10 @@ public class CoinRankingService(IHttpClientFactory httpClientFactory)
     private static readonly ConcurrentDictionary<string, (DateTime At, IReadOnlyList<UniverseEntry> Entries)> UniverseCache = new();
     private static readonly ConcurrentDictionary<string, (DateTime At, IReadOnlyList<OiMover> Movers)> OiCache = new();
 
-    /// <summary>按策略配置解析币种来源；网格类型 / 静态列表 / 来源关闭时返回 null（走原有静态路径）。
+    /// <summary>按策略配置解析币种来源；静态列表 / 来源关闭时返回 null（走原有静态路径）。
     /// 「排除币种」在此处真实生效：各来源候选在取前 N 之前先剔除排除项（按基准资产匹配）。</summary>
     public async Task<CoinSourceResolution?> ResolveAsync(StrategyConfig config, CancellationToken ct)
     {
-        if (config.StrategyType == "grid_trading") return null;
-
         var cs = config.CoinSource;
         var excluded = BuildExcludedSet(cs.ExcludedCoins);
         if (cs.SourceType == "score")

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
+using LuckyCat.Contracts;
 using LuckyCat.Data;
 using LuckyCat.Models;
 
@@ -108,12 +109,13 @@ public class PositionHistorySyncService(IServiceScopeFactory scopeFactory, SseEv
 
             var now = DateTime.UtcNow;
             var added = 0;
+            var addedRows = new List<PositionHistory>();
             foreach (var entry in result.Entries)
             {
                 var key = BuildDedupeKey(account.Id, entry);
                 if (existingKeys.Contains(key)) continue;
 
-                db.PositionHistories.Add(new PositionHistory
+                var row = new PositionHistory
                 {
                     ExchangeAccountId = account.Id,
                     DedupeKey = key,
@@ -129,7 +131,9 @@ public class PositionHistorySyncService(IServiceScopeFactory scopeFactory, SseEv
                     OpenTime = entry.OpenTime,
                     CloseTime = entry.Time,
                     SyncedAt = now,
-                });
+                };
+                db.PositionHistories.Add(row);
+                addedRows.Add(row);
                 existingKeys.Add(key);
                 added++;
             }
@@ -138,8 +142,15 @@ public class PositionHistorySyncService(IServiceScopeFactory scopeFactory, SseEv
             {
                 await db.SaveChangesAsync(ct);
                 Console.WriteLine($"[PositionSync] 账户 {account.Id} 新增 {added} 条历史仓位（累计 {existingKeys.Count} 条）");
-                // 历史发生变化：通知看板连接（由前端触发一次聚合刷新，替代轮询）
-                hub.Publish(SseChannels.Account(account.Id), new SseEvent("history", null));
+                // 历史发生变化：按 §4.2 position-history 载荷逐行通知看板连接
+                // （由前端触发一次聚合刷新，替代轮询；SaveChanges 后自增 Id 已回填）。
+                foreach (var row in addedRows)
+                {
+                    hub.Publish(SseChannels.Account(account.Id), new SseEvent("position-history",
+                        new PositionHistoryEventDto(row.Id, row.Symbol,
+                            row.RealizedPnl.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            row.CloseTime)));
+                }
             }
             return null;
         }

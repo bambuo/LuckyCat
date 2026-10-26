@@ -160,12 +160,26 @@ public class MarketSnapshotService
         }
 
         var rows = klineResult.Data
-            .Select(k => new MarketKline(k.OpenTime, k.OpenPrice, k.HighPrice, k.LowPrice, k.ClosePrice, k.Volumes?.QuantityInBaseAsset ?? 0m))
+            .Select(k => new MarketKline(k.OpenTime, k.OpenPrice, k.HighPrice, k.LowPrice, k.ClosePrice, KlineVolume(k)))
             .OrderBy(k => k.OpenTime)
             .ToList();
         return new MarketSnapshot("live", $"{symbol.BaseAsset}/{symbol.QuoteAsset}", lastPrice ?? rows[^1].Close, rows,
             tickerData?.ChangePercentage, tickerData?.HighPrice, tickerData?.LowPrice, tickerData?.Volumes?.QuantityInQuoteAsset,
             AsOfUtc: DateTime.UtcNow, TickerAvailable: tickerData is not null);
+    }
+
+    /// <summary>
+    /// K 线成交量（基准资产口径）：优先 <see cref="SharedKline.Volumes"/>，为空/0 时退回已标记过时的
+    /// <see cref="SharedKline.Volume"/>。实测 Gate 的共享适配器只回填后者，只看 <c>Volumes</c> 会让整列成交量为 0，
+    /// 模型据此判定「量能不可验证」而拒绝交易。
+    /// </summary>
+    internal static decimal KlineVolume(SharedKline kline)
+    {
+        var baseVolume = kline.Volumes?.QuantityInBaseAsset;
+        if (baseVolume is > 0) return baseVolume.Value;
+#pragma warning disable CS0618 // 保留旧字段作为 Gate 等适配器的兜底来源（见方法注释）
+        return kline.Volume;
+#pragma warning restore CS0618
     }
 
     /// <summary>大盘概览（BTC/USDT 最新价 + 24h 三件套）：供行情快照顶部「大盘」行注入；失败（含重试）如实返回 null。</summary>

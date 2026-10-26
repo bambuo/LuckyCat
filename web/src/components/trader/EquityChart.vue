@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { DashboardSample } from '../../types'
 
 const props = defineProps<{
@@ -14,7 +14,7 @@ const PAD_LEFT = 56
 const PAD_RIGHT = 12
 const PAD_TOP = 12
 const PAD_BOTTOM = 26
-const WIDTH = 720
+const FALLBACK_WIDTH = 720
 
 interface Point {
   at: string
@@ -23,6 +23,25 @@ interface Point {
 
 const hoverIndex = ref<number | null>(null)
 const hoverX = ref(0)
+
+// 视口宽度决定 viewBox 宽度：固定宽度会被等比缩放居中，导致折线只占中间一段
+const chartEl = ref<HTMLElement | null>(null)
+const chartWidth = ref(FALLBACK_WIDTH)
+let resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  if (!chartEl.value) return
+  resizeObserver = new ResizeObserver((entries) => {
+    const width = Math.round(entries[0]?.contentRect.width ?? 0)
+    if (width > 0) chartWidth.value = Math.max(320, width)
+  })
+  resizeObserver.observe(chartEl.value)
+})
+
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
 
 const points = computed<Point[]>(() => {
   const initial = props.initialBalance
@@ -51,6 +70,14 @@ const scale = computed(() => {
   const pad = (max - min) * 0.08
   min -= pad
   max += pad
+  // 采样几乎不变时（如实盘空仓、净值恒定），把定义域撑到最小跨度，
+  // 否则 4 个刻度会因整数格式化全部显示成同一个值。
+  const minSpan = Math.max(Math.abs((min + max) / 2) * 0.004, props.percentMode ? 0.2 : 0.04)
+  if (max - min < minSpan) {
+    const center = (min + max) / 2
+    min = center - minSpan / 2
+    max = center + minSpan / 2
+  }
   return { min, max }
 })
 
@@ -61,8 +88,8 @@ const referenceValue = computed(() => {
 
 function x(index: number): number {
   const count = points.value.length
-  if (count <= 1) return PAD_LEFT + (WIDTH - PAD_LEFT - PAD_RIGHT) / 2
-  return PAD_LEFT + (index / (count - 1)) * (WIDTH - PAD_LEFT - PAD_RIGHT)
+  if (count <= 1) return PAD_LEFT + (chartWidth.value - PAD_LEFT - PAD_RIGHT) / 2
+  return PAD_LEFT + (index / (count - 1)) * (chartWidth.value - PAD_LEFT - PAD_RIGHT)
 }
 
 function y(value: number): number {
@@ -112,7 +139,12 @@ const xTicks = computed(() => {
 })
 
 function formatAxis(value: number): string {
-  return props.percentMode ? `${value.toFixed(1)}%` : `$${value >= 10000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(0)}`
+  if (props.percentMode) return `${value.toFixed(1)}%`
+  if (value >= 10000) return `$${(value / 1000).toFixed(1)}k`
+  // 按当前定义域跨度选小数位：跨度小的时候必须保留小数，否则刻度会重复
+  const span = scale.value.max - scale.value.min
+  const decimals = span < 1 ? 2 : span < 20 ? 1 : 0
+  return `$${value.toFixed(decimals)}`
 }
 
 function formatTime(iso: string): string {
@@ -123,7 +155,7 @@ function formatTime(iso: string): string {
 function onMove(event: MouseEvent) {
   const target = event.currentTarget as SVGElement
   const rect = target.getBoundingClientRect()
-  const scaleX = WIDTH / rect.width
+  const scaleX = chartWidth.value / rect.width
   const px = (event.clientX - rect.left) * scaleX
   const count = points.value.length
   if (count === 0) return
@@ -137,7 +169,7 @@ function onMove(event: MouseEvent) {
     }
   }
   hoverIndex.value = best
-  hoverX.value = (x(best) / WIDTH) * rect.width
+  hoverX.value = (x(best) / chartWidth.value) * rect.width
 }
 
 function onLeave() {
@@ -154,7 +186,7 @@ const hoverPoint = computed(() => {
 </script>
 
 <template>
-  <div class="equity-chart">
+  <div ref="chartEl" class="equity-chart">
     <div v-if="!hasData" class="chart-empty">
       <div class="empty-icon">$</div>
       <div class="empty-text">暂无历史数据</div>
@@ -162,26 +194,26 @@ const hoverPoint = computed(() => {
     </div>
     <template v-else>
       <svg
-        :viewBox="`0 0 ${WIDTH} ${HEIGHT}`"
+        :viewBox="`0 0 ${chartWidth} ${HEIGHT}`"
         class="chart-svg"
         @mousemove="onMove"
         @mouseleave="onLeave"
       >
         <defs>
-          <linearGradient id="goldStroke" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="goldStroke" gradientUnits="userSpaceOnUse" x1="0" :y1="PAD_TOP" x2="0" :y2="HEIGHT - PAD_BOTTOM">
             <stop offset="0%" stop-color="#F0B90B" stop-opacity="0.95" />
             <stop offset="100%" stop-color="#FCD535" stop-opacity="0.35" />
           </linearGradient>
         </defs>
 
         <!-- 水印 -->
-        <text :x="WIDTH - PAD_RIGHT" :y="26" text-anchor="end" class="watermark">招财猫</text>
+        <text :x="chartWidth - PAD_RIGHT" :y="26" text-anchor="end" class="watermark">招财猫</text>
 
         <!-- 网格与 Y 轴 -->
         <g v-for="tick in yTicks" :key="`y-${tick.value}`">
           <line
             :x1="PAD_LEFT"
-            :x2="WIDTH - PAD_RIGHT"
+            :x2="chartWidth - PAD_RIGHT"
             :y1="tick.y"
             :y2="tick.y"
             class="grid-line"
@@ -193,12 +225,12 @@ const hoverPoint = computed(() => {
         <template v-if="referenceValue !== null && referenceValue >= scale.min && referenceValue <= scale.max">
           <line
             :x1="PAD_LEFT"
-            :x2="WIDTH - PAD_RIGHT"
+            :x2="chartWidth - PAD_RIGHT"
             :y1="y(referenceValue)"
             :y2="y(referenceValue)"
             class="reference-line"
           />
-          <text :x="WIDTH - PAD_RIGHT - 4" :y="y(referenceValue) - 5" text-anchor="end" class="reference-text">
+          <text :x="chartWidth - PAD_RIGHT - 4" :y="y(referenceValue) - 5" text-anchor="end" class="reference-text">
             {{ percentMode ? '基准 0%' : `初始余额 ${initialBalance}` }}
           </text>
         </template>
