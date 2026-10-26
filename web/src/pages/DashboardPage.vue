@@ -1293,7 +1293,7 @@ function shortCycleId(id: string): string {
             <div class="chart-footer">
               <span>初始余额：{{ fmtAmount(dashboard.trader.initialBalance) }}</span>
               <span>当前净值：{{ fmtAmount(dashboard.account?.equity) }}</span>
-              <span>历史周期：{{ dashboard.samples.length }} 个</span>
+              <span>净值采样：{{ dashboard.samples.length }} 个</span>
               <span>显示范围：{{ percentMode ? '%' : 'USDT' }}</span>
             </div>
           </a-card>
