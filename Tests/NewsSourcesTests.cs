@@ -9,8 +9,10 @@ using Xunit.Abstractions;
 namespace LuckyCat.Tests;
 
 /// <summary>
-/// 内置新闻适配器 + 新闻聚合器（Task 14.5 金十数据 / Task 14.6 链捕手）。
-/// 夹具手工按线上响应形状编写（金十 status/message/data；链捕手 result/message/data.items），
+/// 内置新闻适配器 + 新闻聚合器（Task 14.5 金十数据 / Task 14.6 链捕手 /
+/// Task 14.7 通用 RSS、Binance/OKX 公告、ForexFactory 财经日历）。
+/// 夹具手工按线上响应形状编写（金十 status/message/data；链捕手 result/message/data.items；
+/// RSS 2.0/Atom；Binance code/catalogs；OKX code/data.details；财经日历数组），
 /// 全部走假 IHttpClientFactory / HttpMessageHandler，默认不触网。
 /// </summary>
 public sealed class NewsSourcesTests(ITestOutputHelper output)
@@ -140,6 +142,346 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
       }
     }
     """;
+
+    // 通用 RSS 夹具（Task 14.7）：CDATA、HTML description、RFC 822 GMT、dc:date 覆盖 pubDate、
+    // 缺 pubDate 的条目、250 字符超长正文、条数上限。'LONG_TEXT' 由 RssBody() 替换为 250 个汉字。
+    private const string RssFixture = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <channel>
+        <title>测试 RSS</title>
+        <item>
+          <title><![CDATA[第一条 <b>标题</b>]]></title>
+          <description><![CDATA[<p>正文&nbsp;<b>加粗</b></p>]]></description>
+          <pubDate>Mon, 26 Oct 2026 01:15:26 GMT</pubDate>
+        </item>
+        <item>
+          <title>dc 时间优先</title>
+          <dc:date>2026-10-26T00:00:00Z</dc:date>
+          <pubDate>Mon, 26 Oct 2026 05:00:00 GMT</pubDate>
+          <description>dc 正文</description>
+        </item>
+        <item>
+          <title>无时间条目</title>
+          <description>缺 pubDate 应被跳过</description>
+        </item>
+        <item>
+          <title>超长正文</title>
+          <description>LONG_TEXT</description>
+          <pubDate>Sun, 25 Oct 2026 12:00:00 GMT</pubDate>
+        </item>
+        <item>
+          <title>第五条</title>
+          <description>第五条正文</description>
+          <pubDate>Sun, 25 Oct 2026 10:00:00 GMT</pubDate>
+        </item>
+      </channel>
+    </rss>
+    """;
+
+    private const string AtomFixture = """
+    <?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>Atom 测试</title>
+      <entry>
+        <title>Atom 条目</title>
+        <summary>Atom 摘要</summary>
+        <updated>2026-10-26T09:00:00Z</updated>
+      </entry>
+    </feed>
+    """;
+
+    // Binance 公告线上信封：code="000000"、data.catalogs[].articles[]；catalogs 可嵌套（线上目前为空数组）。
+    // 条目 1/2/4 有效（含嵌套 catalog 内 1 条），条目 3 releaseDate 为字符串应跳过。
+    private const string BinanceFixture = """
+    {
+      "code": "000000",
+      "message": null,
+      "data": {
+        "catalogs": [
+          {
+            "catalogName": "New Cryptocurrency Listing",
+            "articles": [
+              {"id": 1, "code": "a", "title": "Binance Will List ABC", "type": 1, "releaseDate": 1790914786000}
+            ],
+            "catalogs": [
+              {
+                "catalogName": "Nested Catalog",
+                "articles": [
+                  {"id": 2, "code": "b", "title": "Nested announcement", "type": 1, "releaseDate": 1790914700000},
+                  {"id": 3, "code": "c", "title": "String timestamp", "type": 1, "releaseDate": "1790914600000"}
+                ]
+              }
+            ]
+          },
+          {
+            "catalogName": "Delisting",
+            "articles": [
+              {"id": 4, "code": "d", "title": "Binance Will Delist XYZ", "type": 1, "releaseDate": 1790914600000}
+            ]
+          }
+        ]
+      }
+    }
+    """;
+
+    // OKX 公告线上信封：code="0"、data[].details[]；pTime 是字符串毫秒，另有一条非法时间应跳过。
+    private const string OkxFixture = """
+    {
+      "code": "0",
+      "msg": "",
+      "data": [
+        {
+          "details": [
+            {
+              "annType": "announcements-new-listings",
+              "title": "OKX to list ABC",
+              "url": "https://www.okx.com/help/okx-to-list-abc",
+              "pTime": "1790914786000"
+            },
+            {
+              "annType": "announcements-new-listings",
+              "title": "OKX maintenance notice",
+              "url": "https://www.okx.com/help/okx-maintenance",
+              "pTime": "1790914700000"
+            },
+            {
+              "annType": "latest-events",
+              "title": "Bad time",
+              "url": "https://www.okx.com/help/bad-time",
+              "pTime": "not-a-number"
+            }
+          ]
+        }
+      ]
+    }
+    """;
+
+    // ForexFactory 本周日历：date 带 -04:00 偏移；只保留 High/Medium，空字段渲染为 '-'。
+    private const string ForexFixture = """
+    [
+      {"title": "Nonfarm Payrolls", "country": "USD", "date": "2026-10-30T08:30:00-04:00", "impact": "High", "forecast": "150K", "previous": "120K"},
+      {"title": "CPI", "country": "EUR", "date": "2026-10-28T05:00:00-04:00", "impact": "Medium", "forecast": "", "previous": "2.1%"},
+      {"title": "Low impact event", "country": "JPY", "date": "2026-10-27T20:00:00-04:00", "impact": "Low", "forecast": "", "previous": ""},
+      {"title": "Holiday", "country": "NZD", "date": "2026-10-26T00:00:00-04:00", "impact": "Holiday", "forecast": "", "previous": ""}
+    ]
+    """;
+
+    [Fact]
+    public async Task Rss_fixture_parses_cdata_strips_html_and_normalizes_rfc822()
+    {
+        var (source, handler) = NewRssSource((_, _) => Task.FromResult(JsonResponse(RssBody())));
+        var result = await source.FetchAsync(3, default);
+
+        Assert.Null(result.Problem);
+        Assert.Equal("测试 RSS 源", result.Name);
+        Assert.Equal(3, result.Items.Count);
+        Assert.Equal(1, handler.Calls);
+        Assert.All(result.Items, item => Assert.EndsWith("Z", item.Time));
+
+        var first = result.Items[0];
+        Assert.Equal("第一条 标题", first.Title);
+        Assert.Equal("正文 加粗", first.Text);
+        Assert.DoesNotContain("<b>", first.Title);
+        Assert.DoesNotContain("&nbsp;", first.Text);
+        Assert.Equal("2026-10-26T01:15:26Z", first.Time);
+
+        // dc:date 优先于 pubDate（后者是 05:00:00Z）；顺序也随之按 dc 时间降到第二位
+        var second = result.Items[1];
+        Assert.Equal("dc 时间优先", second.Title);
+        Assert.Equal("2026-10-26T00:00:00Z", second.Time);
+
+        Assert.Equal("超长正文", result.Items[2].Title);
+        Assert.Equal("2026-10-25T12:00:00Z", result.Items[2].Time);
+        Assert.DoesNotContain(result.Items, item => item.Title == "无时间条目");
+        Assert.DoesNotContain(result.Items, item => item.Title == "第五条");
+    }
+
+    [Fact]
+    public async Task Rss_item_without_time_is_skipped_and_long_text_is_clamped()
+    {
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse(RssBody())));
+        var result = await source.FetchAsync(10, default);
+
+        // 5 条中 1 条缺 pubDate 被跳过，剩 4 条；maxItems=10 不会补足到 10
+        Assert.Equal(4, result.Items.Count);
+        Assert.DoesNotContain(result.Items, item => item.Title == "无时间条目");
+
+        var longItem = result.Items.Single(item => item.Title == "超长正文");
+        Assert.Equal(200, longItem.Text.Length);
+        Assert.EndsWith("…", longItem.Text);
+        Assert.Equal(new string('长', 199) + "…", longItem.Text);
+    }
+
+    [Fact]
+    public async Task Rss_max_items_caps_newest_first()
+    {
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse(RssBody())));
+        var result = await source.FetchAsync(2, default);
+
+        Assert.Equal(2, result.Items.Count);
+        Assert.Equal("第一条 标题", result.Items[0].Title);
+        Assert.Equal("dc 时间优先", result.Items[1].Title);
+    }
+
+    [Fact]
+    public async Task Rss_bom_prefixed_body_is_parsed()
+    {
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse("\uFEFF" + RssBody())));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Null(result.Problem);
+        Assert.Equal(4, result.Items.Count);
+    }
+
+    [Fact]
+    public async Task Rss_atom_entry_with_updated_is_supported()
+    {
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse(AtomFixture)));
+        var result = await source.FetchAsync(10, default);
+
+        var item = Assert.Single(result.Items);
+        Assert.Equal("Atom 条目", item.Title);
+        Assert.Equal("Atom 摘要", item.Text);
+        Assert.Equal("2026-10-26T09:00:00Z", item.Time);
+    }
+
+    [Fact]
+    public async Task Rss_repeated_calls_within_ttl_use_cache_and_trim_to_smaller_request()
+    {
+        var (source, handler) = NewRssSource((_, _) => Task.FromResult(JsonResponse(RssBody())));
+        var wide = await source.FetchAsync(10, default);
+        var narrow = await source.FetchAsync(2, default);
+
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal(4, wide.Items.Count);
+        Assert.Equal(2, narrow.Items.Count);
+        Assert.Equal(wide.Items.Take(2).Select(item => item.Title), narrow.Items.Select(item => item.Title));
+    }
+
+    [Fact]
+    public async Task Rss_failure_is_not_cached_so_the_next_cycle_retries()
+    {
+        // 刻意不合法的 XML（未闭合的 channel），而不是合法 HTML——后者会落到「暂无资讯」
+        var (source, handler) = NewRssSource((_, _) => Task.FromResult(JsonResponse("<rss><channel><item></rss>")));
+        var first = await source.FetchAsync(10, default);
+        var second = await source.FetchAsync(10, default);
+
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal("XML 解析失败", first.Problem);
+        Assert.Equal("XML 解析失败", second.Problem);
+    }
+
+    [Fact]
+    public async Task Rss_caller_cancellation_propagates_and_is_not_converted_to_problem()
+    {
+        var (source, _) = NewRssSource((_, _) => Task.FromResult(JsonResponse(RssBody())));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.FetchAsync(10, cts.Token));
+    }
+
+    [Fact]
+    public async Task Binance_fixture_flattens_nested_catalogs_and_normalizes_ms()
+    {
+        var (source, handler) = NewBinanceSource((_, _) => Task.FromResult(JsonResponse(BinanceFixture)));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Null(result.Problem);
+        Assert.Equal("Binance 公告", result.Name);
+        Assert.Equal(3, result.Items.Count);
+        Assert.Equal(1, handler.Calls);
+        Assert.All(result.Items, item => Assert.EndsWith("Z", item.Time));
+
+        var first = result.Items[0];
+        Assert.Equal("Binance Will List ABC", first.Title);
+        Assert.Equal(first.Title, first.Text);
+        Assert.Equal("2026-10-02T04:19:46Z", first.Time);
+
+        // 嵌套 catalog 里的公告也必须被展开；字符串 releaseDate 的条目被跳过
+        Assert.Contains(result.Items, item => item.Title == "Nested announcement");
+        Assert.DoesNotContain(result.Items, item => item.Title == "String timestamp");
+        Assert.Equal("2026-10-02T04:18:20Z", result.Items.Single(item => item.Title == "Nested announcement").Time);
+    }
+
+    [Fact]
+    public async Task Binance_business_error_returns_problem_without_upstream_text()
+    {
+        var (source, _) = NewBinanceSource((_, _) => Task.FromResult(JsonResponse(
+            """{"code":"100001","message":"Invalid request parameters","data":null}""")));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Empty(result.Items);
+        Assert.Equal("服务返回错误", result.Problem);
+        Assert.DoesNotContain("Invalid", result.Problem);
+    }
+
+    [Fact]
+    public async Task Binance_missing_articles_returns_problem()
+    {
+        var (source, _) = NewBinanceSource((_, _) => Task.FromResult(JsonResponse(
+            """{"code":"000000","message":null,"data":{"catalogs":[{"catalogName":"Empty","articles":[]}]}}""")));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Empty(result.Items);
+        Assert.Equal("暂无公告", result.Problem);
+    }
+
+    [Fact]
+    public async Task Okx_fixture_keeps_title_and_url_with_string_ms_time()
+    {
+        var (source, handler) = NewOkxSource((_, _) => Task.FromResult(JsonResponse(OkxFixture)));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Null(result.Problem);
+        Assert.Equal("OKX 公告", result.Name);
+        Assert.Equal(2, result.Items.Count);
+        Assert.Equal(1, handler.Calls);
+
+        var first = result.Items[0];
+        Assert.Equal("OKX to list ABC", first.Title);
+        Assert.Equal("https://www.okx.com/help/okx-to-list-abc", first.Text);
+        Assert.Equal("2026-10-02T04:19:46Z", first.Time);
+        Assert.DoesNotContain(result.Items, item => item.Title == "Bad time");
+    }
+
+    [Fact]
+    public async Task Okx_business_error_returns_problem_without_upstream_text()
+    {
+        var (source, _) = NewOkxSource((_, _) => Task.FromResult(JsonResponse(
+            """{"code":"50011","msg":"Too many requests","data":[]}""")));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Empty(result.Items);
+        Assert.Equal("服务返回错误", result.Problem);
+        Assert.DoesNotContain("Too many", result.Problem);
+    }
+
+    [Fact]
+    public async Task Forex_calendar_keeps_high_medium_sorts_ascending_and_renders_fields()
+    {
+        var (source, handler) = NewForexSource((_, _) => Task.FromResult(JsonResponse(ForexFixture)));
+        var result = await source.FetchAsync(10, default);
+
+        Assert.Null(result.Problem);
+        Assert.Equal("财经日历", result.Name);
+        Assert.Equal(2, result.Items.Count);
+        Assert.Equal(1, handler.Calls);
+
+        // 升序：CPI（10-28）在前，NFP（10-30）在后；Low/Holiday 被丢弃
+        var first = result.Items[0];
+        Assert.Equal("CPI", first.Title);
+        Assert.Equal("2026-10-28T09:00:00Z", first.Time);
+        Assert.Equal("国家=EUR 预期=- 前值=2.1%（影响=Medium）", first.Text);
+
+        var second = result.Items[1];
+        Assert.Equal("Nonfarm Payrolls", second.Title);
+        Assert.Equal("2026-10-30T12:30:00Z", second.Time);
+        Assert.Equal("国家=USD 预期=150K 前值=120K（影响=High）", second.Text);
+
+        Assert.DoesNotContain(result.Items, item => item.Title is "Low impact event" or "Holiday");
+    }
 
     [Fact]
     public async Task Fixture_is_parsed_with_caps_html_stripping_and_important_marking()
@@ -728,6 +1070,36 @@ public sealed class NewsSourcesTests(ITestOutputHelper output)
         var handler = new StubHandler(respond);
         return (new ChainCatcherNewsSource(new StubFactory(handler)), handler);
     }
+
+    private static (RssNewsSource Source, StubHandler Handler) NewRssSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+    {
+        var handler = new StubHandler(respond);
+        return (new RssNewsSource("测试 RSS 源", "https://example.invalid/rss", new StubFactory(handler)), handler);
+    }
+
+    private static (BinanceAnnouncementsNewsSource Source, StubHandler Handler) NewBinanceSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+    {
+        var handler = new StubHandler(respond);
+        return (new BinanceAnnouncementsNewsSource(new StubFactory(handler)), handler);
+    }
+
+    private static (OkxAnnouncementsNewsSource Source, StubHandler Handler) NewOkxSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+    {
+        var handler = new StubHandler(respond);
+        return (new OkxAnnouncementsNewsSource(new StubFactory(handler)), handler);
+    }
+
+    private static (ForexCalendarNewsSource Source, StubHandler Handler) NewForexSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+    {
+        var handler = new StubHandler(respond);
+        return (new ForexCalendarNewsSource(new StubFactory(handler)), handler);
+    }
+
+    private static string RssBody() => RssFixture.Replace("LONG_TEXT", new string('长', 250));
 
     private static HttpResponseMessage JsonResponse(string body, HttpStatusCode status = HttpStatusCode.OK) =>
         new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
