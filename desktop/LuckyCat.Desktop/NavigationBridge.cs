@@ -16,8 +16,20 @@ public sealed class NavigationBridge
 
     public event Action<string>? RouteChanged;
 
-    public Task NavigateAsync(string path) =>
-        _web.InvokeScript($"window.__lcNavigate && window.__lcNavigate({JsonSerializer.Serialize(path)})");
+    // 脚本桥不可用（页面未加载完或注入失败）时返回 false，由调用方回退整页导航。
+    public async Task<bool> NavigateAsync(string path)
+    {
+        try
+        {
+            await _web.InvokeScript($"window.__lcNavigate && window.__lcNavigate({JsonSerializer.Serialize(path)})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"标题栏导航失败（{path}）：{ex}");
+            return false;
+        }
+    }
 
     private void OnMessage(object? sender, WebMessageReceivedEventArgs e)
     {

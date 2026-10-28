@@ -20,8 +20,10 @@ public static class Updater
     private static int _checking;
     private static NoticeWindow? _prompt;
     private static string? _promptedVersion;
+    private static UpdateInfo? _pendingUpdate;
 
-    public static async Task CheckNowAsync(Window owner)
+    // forcePrompt：托盘手动检查时把已下载但被「稍后」关掉的提示重新弹出；定时检查仍按版本去重。
+    public static async Task CheckNowAsync(Window owner, bool forcePrompt = false)
     {
         // 托盘手动检查与定时检查可能重叠：同一时刻只跑一份，避免重复下载与重复提示。
         if (Interlocked.Exchange(ref _checking, 1) == 1) return;
@@ -31,10 +33,17 @@ public static class Updater
             // IsInstalled 读取也放在 try 内：locator 缺失等初始化异常不能逸出成未观察任务。
             if (!Manager.IsInstalled) return;
 
+            if (forcePrompt && _pendingUpdate is { } pending)
+            {
+                await Dispatcher.UIThread.InvokeAsync(() => PromptRestart(owner, pending, force: true));
+                return;
+            }
+
             var update = await Manager.CheckForUpdatesAsync();
             if (update is null) return;
 
             await Manager.DownloadUpdatesAsync(update);
+            _pendingUpdate = update;
             await Dispatcher.UIThread.InvokeAsync(() => PromptRestart(owner, update));
         }
         catch (Exception ex)
@@ -78,17 +87,21 @@ public static class Updater
         }
     }
 
-    private static void PromptRestart(Window owner, UpdateInfo update)
+    private static void PromptRestart(Window owner, UpdateInfo update, bool force = false)
     {
         var version = update.TargetFullRelease.Version.ToString();
 
-        // 同一版本只提示一次；用户关掉提示也不重置，避免每轮检查重复打扰。
-        if (version == _promptedVersion)
+        // 同一版本定时检查只提示一次；用户关掉提示后可从托盘「检查更新」强制重开。
+        if (!force && version == _promptedVersion)
         {
             Console.WriteLine("[Updater] 该版本已提示过，跳过");
             return;
         }
-        if (_prompt is { IsVisible: true }) return;
+        if (_prompt is { IsVisible: true } open)
+        {
+            open.Activate();
+            return;
+        }
 
         var window = new NoticeWindow { Title = "发现新版本" };
         window.SetNotice($"新版本 {update.TargetFullRelease.Version} 已下载", RestartMessage, null);

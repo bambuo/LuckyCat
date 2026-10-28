@@ -28,6 +28,11 @@ public static class InstanceFile
 
     public static async Task<bool> TryActivateAsync(InstanceInfo info, HttpClient client, CancellationToken ct = default)
     {
+        // instance.json 可能被手工改坏：先校验绝对 http/https 地址，不能让坏数据在启动路径上抛异常。
+        if (!Uri.TryCreate(info.Url, UriKind.Absolute, out var baseUri)
+            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+            return false;
+
         try
         {
             // instance.json 里保存的是 Uri.ToString()，带尾部斜杠；直接拼接会得到双斜杠。
@@ -35,7 +40,8 @@ public static class InstanceFile
             using var response = await client.PostAsync(url, null, ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
+                                       or UriFormatException or InvalidOperationException)
         {
             return false;
         }

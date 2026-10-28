@@ -38,8 +38,23 @@ public partial class MainWindow : Window
         {
             if (NavigationItems.Match(path) is { } item) Bar.Select(item.Path);
         };
-        Bar.SelectionChanged += path => _ = _bridge.NavigateAsync(path);
+        Bar.SelectionChanged += async path =>
+        {
+            if (await _bridge.NavigateAsync(path)) return;
+
+            // 脚本桥不可用时退回整页导航：标题栏点击不能静默失败。
+            try
+            {
+                Web.Source = new Uri(_host.Address, path);
+            }
+            catch (UriFormatException ex)
+            {
+                Console.Error.WriteLine($"标题栏回退导航失败（{path}）：{ex}");
+            }
+        };
         Web.NavigationCompleted += OnNavigationCompleted;
+        Web.NavigationStarted += OnNavigationStarted;
+        Web.NewWindowRequested += OnNewWindowRequested;
 
         Bar.Select(NavigationItems.All[0].Path);
         Web.Source = new Uri($"{host.Address}traders?desktop=1");
@@ -120,8 +135,7 @@ public partial class MainWindow : Window
         }
 
         e.Cancel = true;
-        Hide();
-        ShowCloseHintOnce();
+        HideToTray();
     }
 
     private void ShowCloseHintOnce()
@@ -193,7 +207,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RequestUpdateCheck() => _ = Updater.CheckNowAsync(this);
+    private void RequestUpdateCheck() => _ = Updater.CheckNowAsync(this, forcePrompt: true);
 
     private void ExitApplication()
     {
@@ -201,12 +215,34 @@ public partial class MainWindow : Window
         _ = ShutdownAsync();
     }
 
+    // macOS 菜单「隐藏招财猫」与 ⌘W：只隐藏，不因托盘缺失而退出进程。
+    internal void HideToTray()
+    {
+        if (_exiting) return;
+        Hide();
+        ShowCloseHintOnce();
+    }
+
+    internal void RequestExit() => ExitApplication();
+
     private async Task ShutdownAsync()
     {
         if (Interlocked.Exchange(ref _shutdownStarted, 1) == 1) return;
 
         // 先停定时检查，再释放宿主，避免检查在退出过程中继续挂起。
         _updateCts.Cancel();
+
+        try
+        {
+            // WebView 还持有 /api/traders/*/stream 的 SSE 长连接，Kestrel 要等它结束才停止。
+            // 先把 WebView 导到空白页断开连接，限时等待后释放宿主，避免退出卡约 5 秒。
+            Web.Source = new Uri("about:blank");
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"退出前断开 WebView 失败：{ex}");
+        }
 
         try
         {
@@ -250,5 +286,39 @@ public partial class MainWindow : Window
         _notice.Closed += (_, _) => _notice = null;
         _notice.SetNotice("页面加载失败", message, logDirectory);
         _notice.Show(this);
+    }
+
+    private void OnNewWindowRequested(object? sender, WebViewNewWindowRequestedEventArgs e)
+    {
+        // target="_blank" 不能在应用内开新窗口：取消并交给系统浏览器。
+        e.Handled = true;
+        OpenInSystemBrowser(e.Request);
+    }
+
+    private void OnNavigationStarted(object? sender, WebViewNavigationStartingEventArgs e)
+    {
+        if (e.Request is not { } target || IsAppAddress(target)) return;
+
+        // 应用窗口只加载本机页面；外链一律取消并交给系统浏览器。
+        e.Cancel = true;
+        OpenInSystemBrowser(target);
+    }
+
+    private static bool IsAppAddress(Uri uri) =>
+        uri.Scheme == "about"
+        || ((uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) && uri.IsLoopback);
+
+    private static void OpenInSystemBrowser(Uri? uri)
+    {
+        if (uri is null || !uri.IsAbsoluteUri || uri.Scheme == "about") return;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"打开外部链接失败（{uri}）：{ex}");
+        }
     }
 }

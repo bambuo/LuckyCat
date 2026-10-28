@@ -11,7 +11,11 @@ public partial class App : Application
     // 第二实例无法唤起首实例时的提示文案；非空时只显示提示窗并退出，不启动宿主。
     public static string? StartupNotice { get; set; }
 
-    public override void Initialize() => AvaloniaXamlLoader.Load(this);
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+        MacOSMenu.Install(ShowAbout, HideMainWindow, ExitApplication);
+    }
 
     public override void OnFrameworkInitializationCompleted()
     {
@@ -29,6 +33,28 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private static void ShowAbout()
+    {
+        var version = typeof(App).Assembly.GetName().Version?.ToString(3) ?? "未知";
+        NoticeWindow.ShowMessage("关于招财猫",
+            $"招财猫 {version}\n\n本机交易看板与 AI 交易员调度。数据与日志保存在用户数据目录，卸载应用不会删除。");
+    }
+
+    private void HideMainWindow()
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime { MainWindow: MainWindow main })
+            main.HideToTray();
+    }
+
+    private void ExitApplication()
+    {
+        if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime desktop) return;
+
+        // 主窗口负责停止管道与释放单实例锁；启动阶段（提示窗或启动窗）没有宿主，直接结束应用。
+        if (desktop.MainWindow is MainWindow main) main.RequestExit();
+        else desktop.Shutdown();
     }
 
     private static void ShowStartupNotice(IClassicDesktopStyleApplicationLifetime desktop, string notice)

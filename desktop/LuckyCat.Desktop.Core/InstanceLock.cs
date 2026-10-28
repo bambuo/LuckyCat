@@ -16,10 +16,7 @@ public sealed class InstanceLock : IDisposable
         }
         catch (IOException)
         {
-            return null;
-        }
-        catch (UnauthorizedAccessException)
-        {
+            // 锁文件被另一实例持有：这是二次启动，不是错误。
             return null;
         }
     }
