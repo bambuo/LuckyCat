@@ -65,6 +65,7 @@ internal static class Program
         catch (UnauthorizedAccessException ex)
         {
             Console.Error.WriteLine($"数据目录不可写：{ex}");
+            App.StartupNoticeTitle = "无法写入数据目录";
             App.StartupNotice =
                 $"无法写入数据目录：{dataDirectory}\n请检查目录权限，或通过 {DesktopPaths.DataDirEnvVar} 指定可写目录。";
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);

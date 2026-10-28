@@ -12,6 +12,7 @@ public partial class MainWindow : Window
 {
     // 无显示器环境无法验证托盘交互时，用该变量强制走「无托盘」关闭路径。
     private const string DisableTrayEnvVar = "LUCKYCAT_DISABLE_TRAY";
+    private static readonly TimeSpan SuppressedNavigationWindow = TimeSpan.FromSeconds(5);
 
     private readonly DesktopHost _host;
     private readonly NavigationBridge _bridge;
@@ -21,6 +22,10 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _updateCts = new();
     private bool _exiting;
     private int _shutdownStarted;
+
+    // 被取消的外链导航在部分平台仍会以 IsSuccess=false 回调；记录目标以抑制误报。
+    private Uri? _suppressedNavigationTarget;
+    private DateTimeOffset _suppressedNavigationAt;
 
     // XAML 编译器要求公共无参构造才认为资源可由运行时加载器实例化；应用只通过带宿主的重载创建窗口。
     public MainWindow() =>
@@ -47,7 +52,7 @@ public partial class MainWindow : Window
             {
                 Web.Source = new Uri(_host.Address, path);
             }
-            catch (UriFormatException ex)
+            catch (Exception ex)
             {
                 Console.Error.WriteLine($"标题栏回退导航失败（{path}）：{ex}");
             }
@@ -215,10 +220,17 @@ public partial class MainWindow : Window
         _ = ShutdownAsync();
     }
 
-    // macOS 菜单「隐藏招财猫」与 ⌘W：只隐藏，不因托盘缺失而退出进程。
+    // macOS 菜单「隐藏招财猫」与 ⌘W：托盘可用时只隐藏；没有托盘就没有恢复入口，按关窗路径退出。
     internal void HideToTray()
     {
         if (_exiting) return;
+
+        if (!TrayAvailable)
+        {
+            ExitApplication();
+            return;
+        }
+
         Hide();
         ShowCloseHintOnce();
     }
@@ -265,9 +277,12 @@ public partial class MainWindow : Window
     {
         if (e.IsSuccess) return;
 
+        var requested = e.Request ?? Web.Source;
+        if (IsSuppressedNavigation(requested)) return;
+
         // 原生 WebView 覆盖内容区，失败提示只能独立成窗；主窗口保持打开以便重试导航。
         var logDirectory = DesktopPaths.LogDirectory(_host.DataDirectory);
-        var target = e.Request?.ToString() ?? Web.Source?.ToString() ?? "未知地址";
+        var target = requested?.ToString() ?? "未知地址";
         var message =
             $"目标地址：{target}\n" +
             "错误信息：WebView 报告导航未完成（IsSuccess=False）\n" +
@@ -300,9 +315,34 @@ public partial class MainWindow : Window
         if (e.Request is not { } target || IsAppAddress(target)) return;
 
         // 应用窗口只加载本机页面；外链一律取消并交给系统浏览器。
+        // 取消后 WebView 仍可能回调 NavigationCompleted(IsSuccess=false)，记录目标用于抑制误报。
+        _suppressedNavigationTarget = target;
+        _suppressedNavigationAt = DateTimeOffset.UtcNow;
         e.Cancel = true;
         OpenInSystemBrowser(target);
     }
+
+    private bool IsSuppressedNavigation(Uri? target)
+    {
+        if (_suppressedNavigationTarget is not { } suppressed) return false;
+
+        if (DateTimeOffset.UtcNow - _suppressedNavigationAt > SuppressedNavigationWindow)
+        {
+            _suppressedNavigationTarget = null;
+            return false;
+        }
+
+        // 部分平台不回填 Request：只能按时间窗口认定这是被取消的那次导航。
+        if (target is not null && !SameNavigationTarget(target, suppressed)) return false;
+
+        _suppressedNavigationTarget = null;
+        return true;
+    }
+
+    private static bool SameNavigationTarget(Uri left, Uri right) =>
+        left.IsAbsoluteUri && right.IsAbsoluteUri
+            ? string.Equals(left.AbsoluteUri, right.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
+            : left.Equals(right);
 
     private static bool IsAppAddress(Uri uri) =>
         uri.Scheme == "about"

@@ -11,6 +11,9 @@ public partial class App : Application
     // 第二实例无法唤起首实例时的提示文案；非空时只显示提示窗并退出，不启动宿主。
     public static string? StartupNotice { get; set; }
 
+    // 提示窗标题；数据目录不可写等启动前置失败会覆盖默认标题。
+    public static string StartupNoticeTitle { get; set; } = "招财猫已在运行";
+
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -61,7 +64,7 @@ public partial class App : Application
     {
         var window = new NoticeWindow();
         desktop.MainWindow = window;
-        window.SetNotice("招财猫已在运行", notice, ResolveLogDirectory());
+        window.SetNotice(StartupNoticeTitle, notice, ResolveLogDirectory());
         window.Closed += (_, _) => desktop.Shutdown();
         window.Show();
     }
