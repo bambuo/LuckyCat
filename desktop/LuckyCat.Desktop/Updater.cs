@@ -19,16 +19,18 @@ public static class Updater
 
     private static int _checking;
     private static NoticeWindow? _prompt;
+    private static string? _promptedVersion;
 
     public static async Task CheckNowAsync(Window owner)
     {
-        if (!Manager.IsInstalled) return;
-
         // 托盘手动检查与定时检查可能重叠：同一时刻只跑一份，避免重复下载与重复提示。
         if (Interlocked.Exchange(ref _checking, 1) == 1) return;
 
         try
         {
+            // IsInstalled 读取也放在 try 内：locator 缺失等初始化异常不能逸出成未观察任务。
+            if (!Manager.IsInstalled) return;
+
             var update = await Manager.CheckForUpdatesAsync();
             if (update is null) return;
 
@@ -48,14 +50,14 @@ public static class Updater
 
     public static async Task StartPeriodic(Window owner, CancellationToken ct)
     {
-        if (!Manager.IsInstalled)
-        {
-            Console.WriteLine("[Updater] 当前不是 Velopack 安装版本，自动更新已停用。");
-            return;
-        }
-
         try
         {
+            if (!Manager.IsInstalled)
+            {
+                Console.WriteLine("[Updater] 当前不是 Velopack 安装版本，自动更新已停用。");
+                return;
+            }
+
             await Task.Delay(FirstCheckDelay, ct);
             while (!ct.IsCancellationRequested)
             {
@@ -69,10 +71,19 @@ public static class Updater
         {
             // 退出时取消定时检查属于正常路径。
         }
+        catch (Exception ex)
+        {
+            // 非取消异常不能拖死定时任务：留下日志后结束，避免更新检查静默永久停摆。
+            Console.WriteLine($"[Updater] 定时检查停止：{ex.Message}");
+        }
     }
 
     private static void PromptRestart(Window owner, UpdateInfo update)
     {
+        var version = update.TargetFullRelease.Version.ToString();
+
+        // 同一版本只提示一次；用户关掉提示也不重置，避免每轮检查重复打扰。
+        if (version == _promptedVersion) return;
         if (_prompt is { IsVisible: true }) return;
 
         var window = new NoticeWindow { Title = "发现新版本" };
@@ -80,12 +91,19 @@ public static class Updater
         window.PrimaryAction.Content = "立即重启";
         window.PrimaryAction.IsVisible = true;
         window.RestartRequested += () => ApplyAndRestart(update);
-        window.Closed += (_, _) => _prompt = null;
+        window.Closed += (_, _) =>
+        {
+            // 只清自己的引用：旧窗口关闭不能把新窗口记的提示清掉。
+            if (ReferenceEquals(_prompt, window)) _prompt = null;
+        };
         _prompt = window;
+        _promptedVersion = version;
 
-        // 定时检查常在窗口隐藏到托盘时触发；Avalonia 不允许以隐藏窗口为 owner 显示子窗。
-        if (!owner.IsVisible) owner.Show();
-        window.Show(owner);
+        // 定时检查常在窗口隐藏到托盘或最小化时触发：Avalonia 不允许以不可见窗口为 owner，
+        // 此时只显示提示窗本身，不把主窗口拉回前台。
+        var ownerVisible = owner.IsVisible && owner.WindowState != WindowState.Minimized;
+        if (ownerVisible) window.Show(owner);
+        else window.Show();
     }
 
     private static void ApplyAndRestart(UpdateInfo update)
