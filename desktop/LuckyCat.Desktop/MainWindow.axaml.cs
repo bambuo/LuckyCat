@@ -12,7 +12,7 @@ public partial class MainWindow : Window
 {
     // 无显示器环境无法验证托盘交互时，用该变量强制走「无托盘」关闭路径。
     private const string DisableTrayEnvVar = "LUCKYCAT_DISABLE_TRAY";
-    private static readonly TimeSpan SuppressedNavigationWindow = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan SuppressedNavigationWindow = TimeSpan.FromSeconds(2);
 
     private readonly DesktopHost _host;
     private readonly NavigationBridge _bridge;
@@ -332,17 +332,12 @@ public partial class MainWindow : Window
             return false;
         }
 
-        // 部分平台不回填 Request：只能按时间窗口认定这是被取消的那次导航。
-        if (target is not null && !SameNavigationTarget(target, suppressed)) return false;
-
+        // 取消回调紧随 NavigationStarted：Linux WPE 回填被取消目标，Windows WebView2 回填当前页面，
+        // 因此短窗口内出现的第一次失败按被取消的导航处理，只抑制这一次。
+        Console.WriteLine($"已忽略被取消的外链导航失败：{target}（取消目标 {suppressed}）");
         _suppressedNavigationTarget = null;
         return true;
     }
-
-    private static bool SameNavigationTarget(Uri left, Uri right) =>
-        left.IsAbsoluteUri && right.IsAbsoluteUri
-            ? string.Equals(left.AbsoluteUri, right.AbsoluteUri, StringComparison.OrdinalIgnoreCase)
-            : left.Equals(right);
 
     private static bool IsAppAddress(Uri uri) =>
         uri.Scheme == "about"
