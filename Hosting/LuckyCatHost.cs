@@ -26,10 +26,9 @@ public static class LuckyCatHost
             ContentRootPath = options.ContentRootPath,
         });
 
-        // 替换原来的硬编码 UseUrls。
         builder.WebHost.UseUrls(options.Urls);
 
-        // 替换原来的 UseSqlite("Data Source=luckycat.db")。
+        // CLI 与桌面模式共用同一构建入口，库文件落在运行期参数指定的数据目录。
         builder.Services.AddDbContext<AppDbContext>(db =>
             db.UseSqlite($"Data Source={options.DatabasePath}"));
         builder.Services.ConfigureHttpJsonOptions(jsonOptions =>
@@ -151,8 +150,9 @@ public static class LuckyCatHost
 
         var app = builder.Build();
 
-        // Task 2 会在此处插入静态托管：
-        // if (options.ServeStaticFiles) StaticFrontend.UseLuckyCatFrontend(app, options.WebRootPath);
+        // 桌面模式托管前端；CLI 开发模式由 Vite 服务前端，保持不接线。
+        if (options.ServeStaticFiles)
+            StaticFrontend.UseLuckyCatFrontend(app, options.WebRootPath);
 
         using (var scope = app.Services.CreateScope())
         {
@@ -171,8 +171,9 @@ public static class LuckyCatHost
         app.MapCycles();
         app.MapHealth();
 
-        // Task 2 会在此处插入 SPA 回退：
-        // if (options.ServeStaticFiles) StaticFrontend.MapLuckyCatFrontend(app, options.WebRootPath);
+        // 路由注册完成后才能加回退：先 JSON 404 兜底 /api，再把其余未匹配路径交给前端路由。
+        if (options.ServeStaticFiles)
+            StaticFrontend.MapLuckyCatFrontend(app, options.WebRootPath);
 
         return app;
     }
