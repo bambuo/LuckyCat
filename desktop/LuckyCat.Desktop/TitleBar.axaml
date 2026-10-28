@@ -1,0 +1,74 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="LuckyCat.Desktop.TitleBar">
+  <UserControl.Styles>
+    <Style Selector="Button.nav">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#4E5969" />
+      <Setter Property="Height" Value="28" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.nav:pointerover">
+      <Setter Property="Background" Value="#F2F3F5" />
+      <Setter Property="Foreground" Value="#1D2129" />
+    </Style>
+    <Style Selector="Button.nav.active">
+      <Setter Property="Background" Value="#FFF4D6" />
+      <Setter Property="Foreground" Value="#8A5A00" />
+    </Style>
+    <Style Selector="Button.win">
+      <Setter Property="Width" Value="36" />
+      <Setter Property="Height" Value="35" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#4E5969" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.win:pointerover">
+      <Setter Property="Background" Value="#F2F3F5" />
+    </Style>
+    <Style Selector="Button.win.close:pointerover">
+      <Setter Property="Background" Value="#E81123" />
+      <Setter Property="Foreground" Value="#FFFFFF" />
+    </Style>
+  </UserControl.Styles>
+
+  <Border Background="#FFFFFF" BorderBrush="#E5E6EB" BorderThickness="0,0,0,1"
+          PointerPressed="OnBarPointerPressed">
+    <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+      <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
+                  Margin="12,0,0,0" VerticalAlignment="Center">
+        <Image Source="avares://LuckyCat.Desktop/Assets/app.png" Width="20" Height="20" />
+        <TextBlock Text="招财猫" FontSize="13" FontWeight="SemiBold" Foreground="#1D2129"
+                   VerticalAlignment="Center" />
+      </StackPanel>
+
+      <Border Grid.Column="1" Width="1" Height="16" Background="#E5E6EB" Margin="10,0" />
+
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+        <Button Classes="nav" Tag="/traders" Content="AI 交易员" Click="OnNavClick" />
+        <Button Classes="nav" Tag="/strategy" Content="策略工作室" Click="OnNavClick" />
+        <Button Classes="nav" Tag="/cycles" Content="周期历史" Click="OnNavClick" />
+        <Button Classes="nav" Tag="/reviews" Content="复盘经验" Click="OnNavClick" />
+      </StackPanel>
+
+      <StackPanel Grid.Column="3" Orientation="Horizontal">
+        <Button Classes="win" Click="OnMinimize">
+          <Path Data="M0,5 H10" Stroke="#4E5969" StrokeThickness="1" />
+        </Button>
+        <Button Classes="win" Click="OnToggleMaximize" x:Name="MaxButton">
+          <Path Data="M0.5,0.5 H9.5 V9.5 H0.5 Z" Stroke="#4E5969" StrokeThickness="1" />
+        </Button>
+        <Button Classes="win close" Click="OnClose">
+          <Path Data="M0,0 L10,10 M10,0 L0,10" Stroke="#4E5969" StrokeThickness="1" />
+        </Button>
+      </StackPanel>
+    </Grid>
+  </Border>
+</UserControl>
