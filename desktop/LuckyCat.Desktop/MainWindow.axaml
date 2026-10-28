@@ -10,14 +10,6 @@
         ExtendClientAreaTitleBarHeightHint="36">
   <Grid RowDefinitions="36,*">
     <local:TitleBar Grid.Row="0" x:Name="Bar" />
-    <Grid Grid.Row="1">
-      <NativeWebView x:Name="Web" />
-      <Border x:Name="Splash" Background="#F5F6F8">
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
-          <TextBlock x:Name="SplashTitle" Text="正在启动招财猫…" FontSize="14" Foreground="#4E5969" />
-          <TextBlock x:Name="SplashDetail" FontSize="12" Foreground="#86909C" TextWrapping="Wrap" MaxWidth="560" />
-        </StackPanel>
-      </Border>
-    </Grid>
+    <NativeWebView Grid.Row="1" x:Name="Web" />
   </Grid>
 </Window>

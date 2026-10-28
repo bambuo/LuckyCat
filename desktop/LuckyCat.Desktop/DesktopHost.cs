@@ -12,13 +12,12 @@ namespace LuckyCat.Desktop;
 public sealed class DesktopHost : IAsyncDisposable
 {
     private readonly WebApplication _app;
-    private readonly IDisposable _consoleRedirect;
+    private int _disposed;
 
-    private DesktopHost(WebApplication app, Uri address, IDisposable consoleRedirect)
+    private DesktopHost(WebApplication app, Uri address)
     {
         _app = app;
         Address = address;
-        _consoleRedirect = consoleRedirect;
     }
 
     public Uri Address { get; }
@@ -26,17 +25,10 @@ public sealed class DesktopHost : IAsyncDisposable
     public static async Task<DesktopHost> StartAsync(string dataDirectory, CancellationToken ct = default)
     {
         Directory.CreateDirectory(dataDirectory);
-        var logDirectory = DesktopPaths.LogDirectory(dataDirectory);
-        Directory.CreateDirectory(logDirectory);
-
-        // GUI 进程没有控制台：日志文件是启动失败时唯一的诊断通道。
-        var consoleRedirect = ConsoleRedirect.ToFile(logDirectory, DateTimeOffset.Now);
 
         WebApplication? app = null;
         try
         {
-            LogRetention.DeleteOlderThan(logDirectory, DateTimeOffset.Now, 7);
-
             app = LuckyCatHost.Build([], LuckyCatHostOptions.Desktop(dataDirectory));
 
             // 二次启动唤起：仅桌面模式注册，只对回环来源生效。
@@ -55,12 +47,11 @@ public sealed class DesktopHost : IAsyncDisposable
             InstanceFile.Write(DesktopPaths.InstanceInfoPath(dataDirectory),
                 new InstanceInfo(address.ToString(), Environment.ProcessId));
 
-            return new DesktopHost(app, address, consoleRedirect);
+            return new DesktopHost(app, address);
         }
         catch
         {
             if (app is not null) await app.DisposeAsync();
-            consoleRedirect.Dispose();
             throw;
         }
     }
@@ -69,15 +60,20 @@ public sealed class DesktopHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await _app.StopAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            // 停止超时也要继续释放，否则关窗后进程无法退出。
         }
         finally
         {
             await _app.DisposeAsync();
-            _consoleRedirect.Dispose();
         }
     }
 }

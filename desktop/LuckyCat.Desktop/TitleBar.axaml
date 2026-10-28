@@ -33,9 +33,15 @@
     <Style Selector="Button.win:pointerover">
       <Setter Property="Background" Value="#F2F3F5" />
     </Style>
+    <Style Selector="Button.win Path">
+      <Setter Property="Stroke" Value="#4E5969" />
+    </Style>
     <Style Selector="Button.win.close:pointerover">
       <Setter Property="Background" Value="#E81123" />
       <Setter Property="Foreground" Value="#FFFFFF" />
+    </Style>
+    <Style Selector="Button.win.close:pointerover Path">
+      <Setter Property="Stroke" Value="#FFFFFF" />
     </Style>
   </UserControl.Styles>
 
@@ -60,13 +66,17 @@
 
       <StackPanel Grid.Column="3" Orientation="Horizontal">
         <Button Classes="win" Click="OnMinimize">
-          <Path Data="M0,5 H10" Stroke="#4E5969" StrokeThickness="1" />
+          <Path Data="M0,5 H10" StrokeThickness="1" />
         </Button>
         <Button Classes="win" Click="OnToggleMaximize" x:Name="MaxButton">
-          <Path Data="M0.5,0.5 H9.5 V9.5 H0.5 Z" Stroke="#4E5969" StrokeThickness="1" />
+          <Panel>
+            <Path x:Name="MaxIcon" Data="M0.5,0.5 H9.5 V9.5 H0.5 Z" StrokeThickness="1" />
+            <Path x:Name="RestoreIcon" Data="M2.5,0.5 H9.5 V7.5 M0.5,2.5 H7.5 V9.5 H0.5 Z"
+                  StrokeThickness="1" IsVisible="False" />
+          </Panel>
         </Button>
         <Button Classes="win close" Click="OnClose">
-          <Path Data="M0,0 L10,10 M10,0 L0,10" Stroke="#4E5969" StrokeThickness="1" />
+          <Path Data="M0,0 L10,10 M10,0 L0,10" StrokeThickness="1" />
         </Button>
       </StackPanel>
     </Grid>
