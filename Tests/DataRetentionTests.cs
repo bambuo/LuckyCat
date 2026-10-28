@@ -12,6 +12,7 @@ namespace LuckyCat.Tests;
 /// LC-STD-03 §2.5 数据保留：阶段/工具明细 90 天、每日本地 03:30 清理；订单/提案/裁决/经验永久保留。
 /// 全部使用内存 SQLite，不访问真实数据库（LC-STD-05 §2）。
 /// </summary>
+[Collection("Console")]
 public class DataRetentionTests
 {
     // 固定时钟：所有被清理行的时刻从它派生，不读当前时间（LC-STD-05 §1.5）。

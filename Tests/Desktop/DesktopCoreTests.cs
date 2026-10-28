@@ -3,6 +3,7 @@ using Xunit;
 
 namespace LuckyCat.Tests.Desktop;
 
+[Collection("Console")]
 public class DesktopCoreTests
 {
     [Fact]

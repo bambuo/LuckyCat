@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
+using Avalonia.VisualTree;
 
 namespace LuckyCat.Desktop;
 
@@ -49,7 +50,8 @@ public partial class TitleBar : UserControl
 
     private void OnBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (e.Source is Button) return;
+        if (e.Source is Visual source && source.FindAncestorOfType<Button>(includeSelf: true) is not null)
+            return;
 
         if (e.ClickCount == 2 && e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
         {
