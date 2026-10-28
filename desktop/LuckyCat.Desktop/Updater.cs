@@ -83,7 +83,11 @@ public static class Updater
         var version = update.TargetFullRelease.Version.ToString();
 
         // 同一版本只提示一次；用户关掉提示也不重置，避免每轮检查重复打扰。
-        if (version == _promptedVersion) return;
+        if (version == _promptedVersion)
+        {
+            Console.WriteLine("[Updater] 该版本已提示过，跳过");
+            return;
+        }
         if (_prompt is { IsVisible: true }) return;
 
         var window = new NoticeWindow { Title = "发现新版本" };
@@ -97,13 +101,20 @@ public static class Updater
             if (ReferenceEquals(_prompt, window)) _prompt = null;
         };
         _prompt = window;
-        _promptedVersion = version;
 
         // 定时检查常在窗口隐藏到托盘或最小化时触发：Avalonia 不允许以不可见窗口为 owner，
-        // 此时只显示提示窗本身，不把主窗口拉回前台。
+        // 此时只显示提示窗本身，不把主窗口拉回前台。没有 owner 时 CenterOwner 会退化为平台默认位置，
+        // 显式改为屏幕居中。
         var ownerVisible = owner.IsVisible && owner.WindowState != WindowState.Minimized;
         if (ownerVisible) window.Show(owner);
-        else window.Show();
+        else
+        {
+            window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            window.Show();
+        }
+
+        // Show 成功后才记录：外层 catch 只落日志，提前记录会让该版本在整个进程内被永久抑制。
+        _promptedVersion = version;
     }
 
     private static void ApplyAndRestart(UpdateInfo update)
