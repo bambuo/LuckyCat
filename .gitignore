@@ -4,6 +4,9 @@ obj/
 Tests/bin/
 Tests/obj/
 
+# 桌面打包产物
+artifacts/
+
 # 本地 SQLite 库（运行时状态，不入库）
 luckycat.db
 luckycat.db-shm
