@@ -1,7 +1,8 @@
 const DESKTOP_KEY = 'luckycat:desktop'
 
 export function parseDesktopFlag(search: string, stored: string | null): boolean {
-  return search.includes('desktop=1') || stored === '1'
+  const requested = new URLSearchParams(search).get('desktop') === '1'
+  return requested || stored === '1'
 }
 
 export function isDesktopMode(): boolean {

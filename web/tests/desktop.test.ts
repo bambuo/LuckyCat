@@ -14,6 +14,14 @@ describe('parseDesktopFlag', () => {
     expect(parseDesktopFlag('', null)).toBe(false)
     expect(parseDesktopFlag('?x=1', '0')).toBe(false)
   })
+
+  test('desktop 参数值不是 1 时不做子串匹配', () => {
+    expect(parseDesktopFlag('?desktop=10', null)).toBe(false)
+  })
+
+  test('参数名必须是 desktop 本身', () => {
+    expect(parseDesktopFlag('?xdesktop=1', null)).toBe(false)
+  })
 })
 
 describe('routeMessage', () => {
