@@ -152,7 +152,13 @@ public static class LuckyCatHost
 
         // 桌面模式托管前端；CLI 开发模式由 Vite 服务前端，保持不接线。
         if (options.ServeStaticFiles)
+        {
+            // 打包漏放前端产物时不能静默空转（GUI 无控制台，用户只见白屏）；桌面宿主在启动层展示此异常。
+            if (!Directory.Exists(options.WebRootPath))
+                throw new DirectoryNotFoundException($"前端资源目录不存在：{options.WebRootPath}");
+
             StaticFrontend.UseLuckyCatFrontend(app, options.WebRootPath);
+        }
 
         using (var scope = app.Services.CreateScope())
         {

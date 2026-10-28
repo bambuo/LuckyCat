@@ -92,6 +92,33 @@ public class StaticFrontendTests
         }
     }
 
+    [Fact]
+    public void Host_build_with_static_files_and_missing_web_root_fails_fast()
+    {
+        var contentRoot = Path.Combine(Path.GetTempPath(), "luckycat-root-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "luckycat-data-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(contentRoot);
+        Directory.CreateDirectory(dataDirectory);
+        var options = new LuckyCatHostOptions(
+            ContentRootPath: contentRoot,
+            DataDirectory: dataDirectory,
+            Urls: "http://127.0.0.1:0",
+            ServeStaticFiles: true);
+
+        try
+        {
+            // 临时内容根下没有 wwwroot：桌面模式必须在构建期失败，而不是启动后让非 API 路径裸 404。
+            var error = Assert.Throws<DirectoryNotFoundException>(() => LuckyCatHost.Build([], options));
+            Assert.Contains(options.WebRootPath, error.Message);
+            Assert.False(File.Exists(options.DatabasePath));
+        }
+        finally
+        {
+            Directory.Delete(contentRoot, recursive: true);
+            Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
     private static string RepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
