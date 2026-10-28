@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -7,9 +10,16 @@ namespace LuckyCat.Desktop;
 
 public partial class MainWindow : Window
 {
+    // 无显示器环境无法验证托盘交互时，用该变量强制走「无托盘」关闭路径。
+    private const string DisableTrayEnvVar = "LUCKYCAT_DISABLE_TRAY";
+
     private readonly DesktopHost _host;
     private readonly NavigationBridge _bridge;
+    private readonly string _dataDir;
     private NoticeWindow? _notice;
+    private TrayController? _tray;
+    private bool _exiting;
+    private int _shutdownStarted;
 
     // XAML 编译器要求公共无参构造才认为资源可由运行时加载器实例化；应用只通过带宿主的重载创建窗口。
     public MainWindow() =>
@@ -18,6 +28,8 @@ public partial class MainWindow : Window
     public MainWindow(DesktopHost host)
     {
         _host = host;
+        _dataDir = host.DataDirectory;
+
         InitializeComponent();
 
         _bridge = new NavigationBridge(Web);
@@ -30,7 +42,177 @@ public partial class MainWindow : Window
 
         Bar.Select(NavigationItems.All[0].Path);
         Web.Source = new Uri($"{host.Address}traders?desktop=1");
-        Closed += OnClosed;
+
+        _host.ActivationRequested += OnActivationRequested;
+        Opened += OnOpened;
+        Closing += OnClosing;
+    }
+
+    public string DataDirectory => _dataDir;
+
+    private bool TrayAvailable => _tray is not null;
+
+    private async void OnOpened(object? sender, EventArgs e)
+    {
+        Opened -= OnOpened;
+
+        try
+        {
+            if (Environment.GetEnvironmentVariable(DisableTrayEnvVar) == "1")
+            {
+                Console.WriteLine($"托盘已按 {DisableTrayEnvVar} 禁用：关闭窗口将直接退出。");
+                return;
+            }
+
+            var linux = OperatingSystem.IsLinux();
+            var statusNotifier = !linux || await Task.Run(StatusNotifierProbe.Available);
+            if (!TrayProbe.ShouldUseTray(linux, statusNotifier))
+            {
+                Console.WriteLine("托盘不可用：当前 Linux 会话未提供 StatusNotifier，关闭窗口将直接退出。");
+                return;
+            }
+
+            // 探测期间用户可能已经关窗，此时不再创建托盘。
+            if (_exiting) return;
+
+            _tray = TrayController.Create(this, _host.Address, OpenDataFolder, RequestUpdateCheck, ExitApplication);
+            Console.WriteLine(_tray is null
+                ? "托盘创建失败：关闭窗口将直接退出。"
+                : $"托盘已创建：关闭窗口将最小化到托盘（服务地址 {_host.Address}）。");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"初始化托盘失败：{ex}");
+        }
+    }
+
+    private void OnActivationRequested()
+    {
+        if (_exiting) return;
+
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void OnClosing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_exiting) return;
+
+        // 系统关机或应用级退出不能被拦成「隐藏到托盘」。
+        if (e.CloseReason is WindowCloseReason.ApplicationShutdown or WindowCloseReason.OSShutdown)
+        {
+            _exiting = true;
+            _ = ShutdownAsync();
+            return;
+        }
+
+        if (!TrayAvailable)
+        {
+            // Linux 无 StatusNotifier：关窗即退出，避免进程隐身。
+            _exiting = true;
+            _ = ShutdownAsync();
+            return;
+        }
+
+        e.Cancel = true;
+        Hide();
+        ShowCloseHintOnce();
+    }
+
+    private void ShowCloseHintOnce()
+    {
+        var path = DesktopPaths.SettingsPath(_dataDir);
+        if (CloseHintShown(path)) return;
+
+        try
+        {
+            Directory.CreateDirectory(_dataDir);
+            var settings = ReadSettings(path);
+            settings["closeToTrayHintShown"] = true;
+            File.WriteAllText(path, settings.ToJsonString());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 记录失败不影响本次提示，但下次关窗会再提示。
+            Console.Error.WriteLine($"写入桌面设置失败：{ex}");
+        }
+
+        NoticeWindow.ShowMessage("已最小化到托盘", "交易继续运行。点击托盘图标可恢复窗口，托盘菜单可退出。");
+    }
+
+    private static bool CloseHintShown(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                   && document.RootElement.TryGetProperty("closeToTrayHintShown", out var shown)
+                   && shown.ValueKind == JsonValueKind.True;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static JsonObject ReadSettings(string path)
+    {
+        if (!File.Exists(path)) return new JsonObject();
+
+        try
+        {
+            return JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject();
+        }
+        catch (JsonException)
+        {
+            // 设置文件损坏时直接重建，不能因此丢掉首次提示。
+            return new JsonObject();
+        }
+    }
+
+    private void OpenDataFolder()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(_dataDir) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"打开数据目录失败：{ex}");
+        }
+    }
+
+    private void RequestUpdateCheck()
+    {
+        // Task 7 接入：Updater.CheckNowAsync(this)
+    }
+
+    private void ExitApplication()
+    {
+        _exiting = true;
+        _ = ShutdownAsync();
+    }
+
+    private async Task ShutdownAsync()
+    {
+        if (Interlocked.Exchange(ref _shutdownStarted, 1) == 1) return;
+
+        try
+        {
+            await _host.DisposeAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"释放桌面宿主失败：{ex}");
+        }
+
+        _tray?.Dispose();
+        _tray = null;
+
+        (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
     }
 
     private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
@@ -58,21 +240,5 @@ public partial class MainWindow : Window
         _notice.Closed += (_, _) => _notice = null;
         _notice.SetNotice("页面加载失败", message, logDirectory);
         _notice.Show(this);
-    }
-
-    private async void OnClosed(object? sender, EventArgs e)
-    {
-        try
-        {
-            await _host.DisposeAsync();
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"释放桌面宿主失败：{ex}");
-        }
-        finally
-        {
-            (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
-        }
     }
 }

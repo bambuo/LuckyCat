@@ -30,7 +30,9 @@ public static class InstanceFile
     {
         try
         {
-            using var response = await client.PostAsync($"{info.Url}/internal/activation", null, ct);
+            // instance.json 里保存的是 Uri.ToString()，带尾部斜杠；直接拼接会得到双斜杠。
+            var url = $"{info.Url.TrimEnd('/')}/internal/activation";
+            using var response = await client.PostAsync(url, null, ct);
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)

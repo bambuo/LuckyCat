@@ -1,4 +1,5 @@
 using System.Net;
+using Avalonia.Threading;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -12,23 +13,40 @@ namespace LuckyCat.Desktop;
 public sealed class DesktopHost : IAsyncDisposable
 {
     private readonly WebApplication _app;
+    private readonly ActivationSignal _activation;
     private int _disposed;
 
-    private DesktopHost(WebApplication app, Uri address, string dataDirectory)
+    private DesktopHost(WebApplication app, Uri address, string dataDirectory, ActivationSignal activation)
     {
         _app = app;
         Address = address;
         DataDirectory = dataDirectory;
+        _activation = activation;
     }
 
     public Uri Address { get; }
 
     public string DataDirectory { get; }
 
+    // 第二个实例唤起主窗口：在 UI 线程触发，订阅方无需再调度。
+    public event Action? ActivationRequested
+    {
+        add => _activation.Requested += value;
+        remove => _activation.Requested -= value;
+    }
+
+    private sealed class ActivationSignal
+    {
+        public event Action? Requested;
+
+        public void Raise() => Requested?.Invoke();
+    }
+
     public static async Task<DesktopHost> StartAsync(string dataDirectory, CancellationToken ct = default)
     {
         Directory.CreateDirectory(dataDirectory);
 
+        var activation = new ActivationSignal();
         WebApplication? app = null;
         try
         {
@@ -36,9 +54,13 @@ public sealed class DesktopHost : IAsyncDisposable
 
             // 二次启动唤起：仅桌面模式注册，只对回环来源生效。
             app.MapPost("/internal/activation", (HttpContext context) =>
-                context.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip)
-                    ? Results.NoContent()
-                    : Results.NotFound());
+            {
+                if (context.Connection.RemoteIpAddress is not { } ip || !IPAddress.IsLoopback(ip))
+                    return Results.NotFound();
+
+                Dispatcher.UIThread.Post(activation.Raise);
+                return Results.NoContent();
+            });
 
             await app.StartAsync(ct);
 
@@ -50,7 +72,7 @@ public sealed class DesktopHost : IAsyncDisposable
             InstanceFile.Write(DesktopPaths.InstanceInfoPath(dataDirectory),
                 new InstanceInfo(address.ToString(), Environment.ProcessId));
 
-            return new DesktopHost(app, address, dataDirectory);
+            return new DesktopHost(app, address, dataDirectory, activation);
         }
         catch
         {

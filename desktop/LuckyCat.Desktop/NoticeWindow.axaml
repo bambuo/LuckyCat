@@ -10,14 +10,16 @@
         Background="#FFFFFF">
   <Border BorderBrush="#E5E6EB" BorderThickness="1">
     <StackPanel Margin="24,20" Spacing="10">
-      <TextBlock x:Name="NoticeTitle" FontSize="14" FontWeight="SemiBold" Foreground="#1D2129" />
+      <TextBlock x:Name="Heading" FontSize="14" FontWeight="SemiBold" Foreground="#1D2129" />
       <ScrollViewer MaxHeight="220" HorizontalScrollBarVisibility="Disabled"
                     VerticalScrollBarVisibility="Auto">
-        <TextBlock x:Name="NoticeBody" FontSize="12" Foreground="#4E5969"
+        <TextBlock x:Name="Body" FontSize="12" Foreground="#4E5969"
                    TextWrapping="Wrap" LineHeight="18" />
       </ScrollViewer>
       <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" Margin="0,6,0,0">
-        <Button Content="打开日志" Padding="16,6" Click="OnOpenLogs" />
+        <Button x:Name="PrimaryAction" Content="立即重启" Padding="16,6"
+                IsVisible="False" Click="OnPrimary" />
+        <Button x:Name="LogButton" Content="打开日志" Padding="16,6" Click="OnOpenLogs" />
         <Button Content="关闭" Padding="16,6" Click="OnClose" />
       </StackPanel>
     </StackPanel>

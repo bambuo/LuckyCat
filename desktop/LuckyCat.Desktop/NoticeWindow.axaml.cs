@@ -10,12 +10,24 @@ public partial class NoticeWindow : Window
 
     public NoticeWindow() => InitializeComponent();
 
-    public void SetNotice(string title, string message, string logDirectory)
+    public event Action? RestartRequested;
+
+    public static void ShowMessage(string title, string message)
+    {
+        var window = new NoticeWindow();
+        window.SetNotice(title, message, null);
+        window.Show();
+    }
+
+    public void SetNotice(string title, string message, string? logDirectory)
     {
         _logDirectory = logDirectory;
-        NoticeTitle.Text = title;
-        NoticeBody.Text = message;
+        Heading.Text = title;
+        Body.Text = message;
+        LogButton.IsVisible = logDirectory is not null;
     }
+
+    private void OnPrimary(object? sender, RoutedEventArgs e) => RestartRequested?.Invoke();
 
     private void OnOpenLogs(object? sender, RoutedEventArgs e)
     {
@@ -28,7 +40,7 @@ public partial class NoticeWindow : Window
         }
         catch (Exception ex)
         {
-            NoticeBody.Text = $"无法打开日志目录：{ex.Message}";
+            Body.Text = $"无法打开日志目录：{ex.Message}";
         }
     }
 

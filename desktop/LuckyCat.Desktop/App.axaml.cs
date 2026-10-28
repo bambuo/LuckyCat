@@ -8,6 +8,9 @@ namespace LuckyCat.Desktop;
 
 public partial class App : Application
 {
+    // 第二实例无法唤起首实例时的提示文案；非空时只显示提示窗并退出，不启动宿主。
+    public static string? StartupNotice { get; set; }
+
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
 
     public override void OnFrameworkInitializationCompleted()
@@ -15,10 +18,42 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            _ = StartAsync(desktop);
+            if (StartupNotice is { } notice)
+            {
+                ShowStartupNotice(desktop, notice);
+            }
+            else
+            {
+                _ = StartAsync(desktop);
+            }
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private static void ShowStartupNotice(IClassicDesktopStyleApplicationLifetime desktop, string notice)
+    {
+        var window = new NoticeWindow();
+        desktop.MainWindow = window;
+        window.SetNotice("招财猫已在运行", notice, ResolveLogDirectory());
+        window.Closed += (_, _) => desktop.Shutdown();
+        window.Show();
+    }
+
+    private static string? ResolveLogDirectory()
+    {
+        try
+        {
+            var dataDirectory = DesktopPaths.Resolve(
+                Environment.GetEnvironmentVariable(DesktopPaths.DataDirEnvVar),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+            return DesktopPaths.LogDirectory(dataDirectory);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"解析日志目录失败：{ex}");
+            return null;
+        }
     }
 
     private static async Task StartAsync(IClassicDesktopStyleApplicationLifetime desktop)
