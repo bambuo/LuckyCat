@@ -138,7 +138,11 @@ public partial class MainWindow : Window
             Console.Error.WriteLine($"写入桌面设置失败：{ex}");
         }
 
-        NoticeWindow.ShowMessage("已最小化到托盘", "交易继续运行。点击托盘图标可恢复窗口，托盘菜单可退出。");
+        // macOS 上 Avalonia 的 TrayIcon.Clicked 不触发，只能引导用户走菜单。
+        var message = OperatingSystem.IsMacOS()
+            ? "交易继续运行。从菜单栏托盘图标菜单中选择「打开主窗口」可恢复。"
+            : "交易继续运行。点击托盘图标可恢复窗口，托盘菜单可退出。";
+        NoticeWindow.ShowMessage("已最小化到托盘", message);
     }
 
     private static bool CloseHintShown(string path)
