@@ -392,9 +392,9 @@ public class ApiContractTests
     [Fact]
     public void Program_has_no_legacy_hosted_scheduler_and_maps_cycles_endpoints()
     {
-        // 生产 Program 是顶级语句、无法以 WebApplicationFactory 直接起宿主；
-        // 用源码扫描钉死「恰好一个调度链」的注册形状——这正是 Task 11 R-11-6 要防的双调度器缺陷面。
-        var program = ReadProductionFile("Program.cs");
+        // 生产 Program 是顶级语句、无法以 WebApplicationFactory 直接起宿主；服务注册已迁入 LuckyCatHost.Build，
+        // 源码扫描合并两份文件，钉死「恰好一个调度链」的注册形状——这正是 Task 11 R-11-6 要防的双调度器缺陷面。
+        var program = ReadProductionFile("Program.cs") + "\n" + ReadProductionFile("Hosting/LuckyCatHost.cs");
         Assert.DoesNotContain("AddSingleton<TraderRunnerService>", program, StringComparison.Ordinal);
         Assert.DoesNotContain("AddHostedService(sp => sp.GetRequiredService<TraderRunnerService>())",
             program, StringComparison.Ordinal);

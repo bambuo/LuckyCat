@@ -17,3 +17,6 @@ web/node_modules/
 .vs/
 .idea/
 .DS_Store
+
+# 隔离工作区
+.worktrees/
