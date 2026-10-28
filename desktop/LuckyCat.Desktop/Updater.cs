@@ -82,6 +82,9 @@ public static class Updater
         window.RestartRequested += () => ApplyAndRestart(update);
         window.Closed += (_, _) => _prompt = null;
         _prompt = window;
+
+        // 定时检查常在窗口隐藏到托盘时触发；Avalonia 不允许以隐藏窗口为 owner 显示子窗。
+        if (!owner.IsVisible) owner.Show();
         window.Show(owner);
     }
 
