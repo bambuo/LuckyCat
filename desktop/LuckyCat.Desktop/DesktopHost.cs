@@ -14,13 +14,16 @@ public sealed class DesktopHost : IAsyncDisposable
     private readonly WebApplication _app;
     private int _disposed;
 
-    private DesktopHost(WebApplication app, Uri address)
+    private DesktopHost(WebApplication app, Uri address, string dataDirectory)
     {
         _app = app;
         Address = address;
+        DataDirectory = dataDirectory;
     }
 
     public Uri Address { get; }
+
+    public string DataDirectory { get; }
 
     public static async Task<DesktopHost> StartAsync(string dataDirectory, CancellationToken ct = default)
     {
@@ -47,7 +50,7 @@ public sealed class DesktopHost : IAsyncDisposable
             InstanceFile.Write(DesktopPaths.InstanceInfoPath(dataDirectory),
                 new InstanceInfo(address.ToString(), Environment.ProcessId));
 
-            return new DesktopHost(app, address);
+            return new DesktopHost(app, address, dataDirectory);
         }
         catch
         {

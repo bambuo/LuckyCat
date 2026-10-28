@@ -9,6 +9,7 @@ public partial class MainWindow : Window
 {
     private readonly DesktopHost _host;
     private readonly NavigationBridge _bridge;
+    private NoticeWindow? _notice;
 
     // XAML 编译器要求公共无参构造才认为资源可由运行时加载器实例化；应用只通过带宿主的重载创建窗口。
     public MainWindow() =>
@@ -32,10 +33,31 @@ public partial class MainWindow : Window
         Closed += OnClosed;
     }
 
-    private static void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
+    private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
     {
-        // GUI 进程无控制台；失败只记录，窗口本身不做提示层（原生层会盖住 Avalonia 控件）。
-        if (!e.IsSuccess) Console.Error.WriteLine("WebView 导航未成功，请查看日志。");
+        if (e.IsSuccess) return;
+
+        // 原生 WebView 覆盖内容区，失败提示只能独立成窗；主窗口保持打开以便重试导航。
+        var logDirectory = DesktopPaths.LogDirectory(_host.DataDirectory);
+        var target = e.Request?.ToString() ?? Web.Source?.ToString() ?? "未知地址";
+        var message =
+            $"目标地址：{target}\n" +
+            "错误信息：WebView 报告导航未完成（IsSuccess=False）\n" +
+            $"日志目录：{logDirectory}";
+
+        Console.Error.WriteLine($"WebView 导航失败：{target}");
+
+        if (_notice is { IsVisible: true } open)
+        {
+            open.SetNotice("页面加载失败", message, logDirectory);
+            open.Activate();
+            return;
+        }
+
+        _notice = new NoticeWindow();
+        _notice.Closed += (_, _) => _notice = null;
+        _notice.SetNotice("页面加载失败", message, logDirectory);
+        _notice.Show(this);
     }
 
     private async void OnClosed(object? sender, EventArgs e)

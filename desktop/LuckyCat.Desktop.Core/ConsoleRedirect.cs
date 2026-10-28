@@ -9,7 +9,8 @@ public static class ConsoleRedirect
         Directory.CreateDirectory(logDirectory);
         var path = Path.Combine(logDirectory, $"app-{now:yyyyMMdd}.log");
         var writer = new StreamWriter(
-            new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read),
+            // ReadWrite 允许第二个实例同时追加同一日志（例如用户重复双击启动）。
+            new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite),
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
         {
             AutoFlush = true,

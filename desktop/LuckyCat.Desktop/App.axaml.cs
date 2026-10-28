@@ -23,22 +23,23 @@ public partial class App : Application
 
     private static async Task StartAsync(IClassicDesktopStyleApplicationLifetime desktop)
     {
-        var dataDirectory = DesktopPaths.Resolve(
-            Environment.GetEnvironmentVariable(DesktopPaths.DataDirEnvVar),
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
-
-        // NativeWebView 是原生层，启动层必须独立成窗，不能覆盖在主窗口上。
-        var splash = new SplashWindow();
         var cts = new CancellationTokenSource();
+        SplashWindow? splash = null;
         void OnSplashClosed(object? sender, EventArgs e) => cts.Cancel();
-
-        splash.Closed += OnSplashClosed;
-        desktop.MainWindow = splash;
-        splash.Show();
 
         var opened = false;
         try
         {
+            var dataDirectory = DesktopPaths.Resolve(
+                Environment.GetEnvironmentVariable(DesktopPaths.DataDirEnvVar),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+
+            // NativeWebView 是原生层，启动层必须独立成窗，不能覆盖在主窗口上。
+            splash = new SplashWindow();
+            splash.Closed += OnSplashClosed;
+            desktop.MainWindow = splash;
+            splash.Show();
+
             while (true)
             {
                 DesktopHost host;
@@ -52,6 +53,7 @@ public partial class App : Application
                 }
                 catch (Exception ex)
                 {
+                    Console.Error.WriteLine($"启动宿主失败：{ex}");
                     splash.ShowError(ex.Message, DesktopPaths.LogDirectory(dataDirectory));
                     if (!await splash.WaitForRetryAsync(cts.Token)) return;
                     continue;
@@ -78,6 +80,8 @@ public partial class App : Application
         }
         finally
         {
+            // 先退订再释放令牌：Shutdown 关闭启动窗时 Closed 仍会触发，不能撞上已释放的 CTS。
+            if (splash is not null) splash.Closed -= OnSplashClosed;
             // 启动未完成（失败、取消或用户关闭启动窗口）：退出进程。
             if (!opened) desktop.Shutdown();
             cts.Dispose();

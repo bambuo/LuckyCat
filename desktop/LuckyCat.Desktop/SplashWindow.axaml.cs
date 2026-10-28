@@ -55,6 +55,9 @@ public partial class SplashWindow : Window
         RetryRequested?.Invoke();
     }
 
+    // 无边框窗口没有系统关闭按钮：启动挂起时靠这个入口取消，Closed 会取消启动令牌。
+    private void OnCancel(object? sender, RoutedEventArgs e) => Close();
+
     private void OnOpenLogs(object? sender, RoutedEventArgs e)
     {
         if (_logDirectory is null) return;
