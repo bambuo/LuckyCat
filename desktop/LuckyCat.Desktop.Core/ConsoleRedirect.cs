@@ -15,10 +15,13 @@ public static class ConsoleRedirect
             AutoFlush = true,
         };
 
+        // Out 与 Error 共用一个同步包装，避免多线程并发写同一 writer；只释放底层 writer。
+        var sync = TextWriter.Synchronized(writer);
+
         var originalOut = Console.Out;
         var originalError = Console.Error;
-        Console.SetOut(writer);
-        Console.SetError(writer);
+        Console.SetOut(sync);
+        Console.SetError(sync);
 
         return new Restore(() =>
         {

@@ -31,8 +31,10 @@ public class DesktopCoreTests
         Assert.NotNull(first);
         Assert.Null(InstanceLock.TryAcquire(path));
         first!.Dispose();
-        using var second = InstanceLock.TryAcquire(path);
-        Assert.NotNull(second);
+        using (var second = InstanceLock.TryAcquire(path))
+        {
+            Assert.NotNull(second);
+        }
         Directory.Delete(dir, recursive: true);
     }
 
