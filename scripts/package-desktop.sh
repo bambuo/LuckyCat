@@ -24,7 +24,9 @@ MISSING=()
 
 case "$RID" in
   win-x64)   CHANNEL=win;   ICON="$ASSETS/app.ico"; MAIN_EXE="LuckyCat.Desktop.exe" ;;
-  osx-arm64) CHANNEL=osx;   ICON="$ASSETS/app.icns" ;;
+  osx-arm64) CHANNEL=osx;   ICON="$ASSETS/app.icns"
+             # vpk 默认拼成 com.<packId>.<packId>；显式给反向域名，避免首版后再改断更新链。
+             PACK_ARGS+=(--bundleId com.bambuo.luckycat) ;;
   linux-x64) CHANNEL=linux ;;
   *) echo "unsupported RID: $RID" >&2; exit 1 ;;
 esac
@@ -69,13 +71,15 @@ rm -rf "$PUBLISH"
 dotnet publish "$ROOT/desktop/LuckyCat.Desktop/LuckyCat.Desktop.csproj" \
   -c Release -r "$RID" --self-contained -p:PublishSingleFile=false -o "$PUBLISH"
 
-vpk pack -u LuckyCat -v "$VERSION" -p "$PUBLISH" -o "$ROOT/artifacts/releases" \
+vpk pack -u bambuo.LuckyCat -v "$VERSION" -p "$PUBLISH" -o "$ROOT/artifacts/releases" \
   -c "$CHANNEL" --mainExe "$MAIN_EXE" --packTitle "招财猫" --icon "$ICON" ${PACK_ARGS[@]+"${PACK_ARGS[@]}"}
 
 if (( UPLOAD )); then
   UPLOAD_ARGS=(upload github --repoUrl https://github.com/bambuo/LuckyCat --token "$GH_TOKEN" \
     --outputDir "$ROOT/artifacts/releases" --channel "$CHANNEL" --publish)
-  # 同一版本的多平台发布需要 --merge 合并到已有 Release
-  if vpk upload github -H 2>&1 | grep -q -- '--merge'; then UPLOAD_ARGS+=(--merge); fi
+  # 同一版本的多平台发布需要 --merge 合并到已有 Release。
+  # 先整段取帮助再判断：直接管道给 grep -q 会在 pipefail 下因 SIGPIPE 误判。
+  UPLOAD_HELP="$(vpk upload github -H 2>&1 || true)"
+  if grep -q -- '--merge' <<<"$UPLOAD_HELP"; then UPLOAD_ARGS+=(--merge); fi
   vpk "${UPLOAD_ARGS[@]}"
 fi

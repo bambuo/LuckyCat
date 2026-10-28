@@ -1,4 +1,4 @@
-# 构建 web 与桌面程序，并用 Velopack 生成 Windows 安装包。
+﻿# 构建 web 与桌面程序，并用 Velopack 生成 Windows 安装包。
 # 用法：./scripts/package-desktop.ps1 [-Upload]
 # -Upload 会创建 GitHub Release，需要 $env:GH_TOKEN。
 param([switch]$Upload)
@@ -45,7 +45,7 @@ dotnet publish "$Root\desktop\LuckyCat.Desktop\LuckyCat.Desktop.csproj" -c Relea
 Assert-NativeSuccess 'dotnet publish'
 
 $packArgs = @(
-  'pack', '-u', 'LuckyCat', '-v', $Version, '-p', $Publish, '-o', "$Root\artifacts\releases",
+  'pack', '-u', 'bambuo.LuckyCat', '-v', $Version, '-p', $Publish, '-o', "$Root\artifacts\releases",
   '-c', 'win', '--mainExe', 'LuckyCat.Desktop.exe', '--packTitle', '招财猫', '--icon', $Icon
 )
 # vpk 1.3.39 仍不提供 --framework；缺少 spec 要求的元数据时硬失败
