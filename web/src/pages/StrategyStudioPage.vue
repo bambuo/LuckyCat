@@ -1053,11 +1053,11 @@ onMounted(load)
 </template>
 
 <style scoped>
-/* 三栏固定布局：页面不滚动，列内滚动（设计稿「视口高固定」；项目顶栏 56px） */
+/* 三栏固定布局：页面不滚动，列内滚动（设计稿「视口高固定」；顶栏高由 --app-header-height 提供，桌面模式为 0） */
 .studio {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 56px);
+  height: calc(100vh - var(--app-header-height, 56px));
   overflow: hidden;
   background: var(--color-bg-1);
 }

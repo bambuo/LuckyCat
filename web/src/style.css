@@ -1,3 +1,7 @@
+:root {
+  --app-header-height: 56px;
+}
+
 body {
   margin: 0;
   background: #f5f6f8;
