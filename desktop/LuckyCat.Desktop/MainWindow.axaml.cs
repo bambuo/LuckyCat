@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private readonly string _dataDir;
     private NoticeWindow? _notice;
     private TrayController? _tray;
+    private readonly CancellationTokenSource _updateCts = new();
     private bool _exiting;
     private int _shutdownStarted;
 
@@ -55,6 +56,9 @@ public partial class MainWindow : Window
     private async void OnOpened(object? sender, EventArgs e)
     {
         Opened -= OnOpened;
+
+        // 宿主已就绪：托盘是否可用不影响自动更新检查。
+        _ = Updater.StartPeriodic(this, _updateCts.Token);
 
         try
         {
@@ -189,10 +193,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void RequestUpdateCheck()
-    {
-        // Task 7 接入：Updater.CheckNowAsync(this)
-    }
+    private void RequestUpdateCheck() => _ = Updater.CheckNowAsync(this);
 
     private void ExitApplication()
     {
@@ -203,6 +204,9 @@ public partial class MainWindow : Window
     private async Task ShutdownAsync()
     {
         if (Interlocked.Exchange(ref _shutdownStarted, 1) == 1) return;
+
+        // 先停定时检查，再释放宿主，避免检查在退出过程中继续挂起。
+        _updateCts.Cancel();
 
         try
         {
@@ -215,6 +219,8 @@ public partial class MainWindow : Window
 
         _tray?.Dispose();
         _tray = null;
+
+        _updateCts.Dispose();
 
         (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
     }
