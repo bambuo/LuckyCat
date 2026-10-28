@@ -100,6 +100,37 @@ bun install
 bun run dev           # http://localhost:5173，/api 已代理到 5210
 ```
 
+### 桌面版
+
+桌面版是单进程应用：Avalonia 窗口内嵌 WebView，后端与前端由同进程的 Kestrel 只在 `127.0.0.1` 的随机端口提供，与 `dotnet run` 形态互不影响。安装包由 Velopack 生成：
+
+```bash
+# macOS
+RID=osx-arm64 ./scripts/package-desktop.sh
+# Windows
+powershell -File scripts/package-desktop.ps1
+```
+
+产物在 `artifacts/releases/`（不入库）。macOS 实测文件为 `LuckyCat-osx-Setup.pkg`（安装包）、`LuckyCat-osx-Portable.zip`（解压得到 `招财猫.app`）与 `LuckyCat-0.1.0-osx-full.nupkg`，另有 `RELEASES-osx`、`assets.osx.json`、`releases.osx.json` 供自动更新使用；Windows 与 Linux 按同一 channel 规则命名（`LuckyCat-win-*`、`LuckyCat-linux-*`，本机未打包）。文件名不含版本号，nupkg 文件名与 `releases.osx.json` 中才有版本。已发布的版本从 GitHub Releases 下载同名文件；在本地打包可用 `--upload` 上传（需要 `GH_TOKEN`）。
+
+Windows 与 Linux 打包目前会因 vpk 缺少 `--framework webview2` / `--categories Finance` 而停止，确认接受后设置 `LUCKYCAT_ALLOW_MISSING_WEBVIEW2=1` 才能继续，产物不含 WebView2 运行时依赖声明与 Finance 分类（详见交付说明的偏差登记）。
+
+macOS 包未签名、未公证，首次打开需在「系统设置 → 隐私与安全性」中放行，或先移除隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/招财猫.app
+```
+
+桌面版数据位于用户数据目录，与仓库根的 `luckycat.db` 相互独立，不读取也不复制既有库：
+
+| 平台 | 数据目录 |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\LuckyCat` |
+| macOS | `~/Library/Application Support/LuckyCat` |
+| Linux | `~/.local/share/LuckyCat` |
+
+日志在数据目录的 `logs/app-YYYYMMDD.log`，保留 7 天。Linux 需要 WebKitGTK 4.1（`libwebkit2gtk-4.1-0`）、GTK3（`libgtk-3-0`）、FUSE 2，以及提供 StatusNotifier 的托盘宿主；缺少托盘宿主时关闭窗口即退出。运行细节见运维手册「桌面模式」。
+
 ### 首次使用
 
 1. **AI 交易员** → 添加模型：选择预设或填写 Base URL / 模型名 / API Key，点击「验证」确认四项检查通过（试运行与正式周期需要工具调用验证通过）；
@@ -137,7 +168,7 @@ LuckyCat/
 ## 测试
 
 ```bash
-dotnet test Tests/LuckyCat.Tests.csproj   # 468 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
+dotnet test Tests/LuckyCat.Tests.csproj   # 480 项：工作流路由、硬闸、风控边界、契约与记忆隔离等
 cd web && bun test                        # 前端纯函数单测（SSE 帧解析等）
 cd web && bun run build                   # 前端类型检查与构建
 ```
