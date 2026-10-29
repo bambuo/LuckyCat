@@ -6,29 +6,54 @@
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="Foreground" Value="#4E5969" />
       <Setter Property="Height" Value="28" />
-      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="MinHeight" Value="28" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="Padding" Value="8,0" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="CornerRadius" Value="6" />
       <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
       <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.nav Path">
+      <Setter Property="Stroke" Value="#4E5969" />
+    </Style>
+    <Style Selector="Button.nav TextBlock">
+      <Setter Property="Foreground" Value="#4E5969" />
+      <Setter Property="FontSize" Value="13" />
     </Style>
     <Style Selector="Button.nav:pointerover">
       <Setter Property="Background" Value="#F2F3F5" />
+      <Setter Property="Foreground" Value="#1D2129" />
+    </Style>
+    <Style Selector="Button.nav:pointerover Path">
+      <Setter Property="Stroke" Value="#1D2129" />
+    </Style>
+    <Style Selector="Button.nav:pointerover TextBlock">
       <Setter Property="Foreground" Value="#1D2129" />
     </Style>
     <Style Selector="Button.nav.active">
       <Setter Property="Background" Value="#FFF4D6" />
       <Setter Property="Foreground" Value="#8A5A00" />
     </Style>
+    <Style Selector="Button.nav.active Path">
+      <Setter Property="Stroke" Value="#8A5A00" />
+    </Style>
+    <Style Selector="Button.nav.active TextBlock">
+      <Setter Property="Foreground" Value="#8A5A00" />
+    </Style>
     <Style Selector="Button.win">
       <Setter Property="Width" Value="36" />
       <Setter Property="Height" Value="35" />
+      <Setter Property="Margin" Value="0" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Foreground" Value="#4E5969" />
       <Setter Property="CornerRadius" Value="0" />
       <Setter Property="HorizontalContentAlignment" Value="Center" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Stretch" />
     </Style>
     <Style Selector="Button.win:pointerover">
       <Setter Property="Background" Value="#F2F3F5" />
@@ -50,21 +75,55 @@
     <Grid ColumnDefinitions="Auto,Auto,*,Auto">
       <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
                   Margin="12,0,0,0" VerticalAlignment="Center">
-        <Image Source="avares://LuckyCat.Desktop/Assets/app.png" Width="20" Height="20" />
+        <Image Source="avares://LuckyCat.Desktop/Assets/app.png" Width="20" Height="20"
+               VerticalAlignment="Center" />
         <TextBlock Text="招财猫" FontSize="13" FontWeight="SemiBold" Foreground="#1D2129"
                    VerticalAlignment="Center" />
       </StackPanel>
 
-      <Border Grid.Column="1" Width="1" Height="16" Background="#E5E6EB" Margin="10,0" />
+      <Border Grid.Column="1" Width="1" Height="16" Background="#E5E6EB" Margin="10,0"
+              VerticalAlignment="Center" />
 
       <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-        <Button Classes="nav" Tag="/traders" Content="AI 交易员" Click="OnNavClick" />
-        <Button Classes="nav" Tag="/strategy" Content="策略工作室" Click="OnNavClick" />
-        <Button Classes="nav" Tag="/cycles" Content="周期历史" Click="OnNavClick" />
-        <Button Classes="nav" Tag="/reviews" Content="复盘经验" Click="OnNavClick" />
+        <Button Classes="nav" Tag="/traders" Click="OnNavClick">
+          <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Path Width="14" Height="14" Stretch="Uniform" StrokeThickness="1.2"
+                  StrokeLineCap="Round" StrokeJoin="Round"
+                  Data="M5 6h6a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z M8 3v3 M5.5 10h1 M9.5 10h1"
+                  VerticalAlignment="Center" />
+            <TextBlock Text="AI 交易员" VerticalAlignment="Center" />
+          </StackPanel>
+        </Button>
+        <Button Classes="nav" Tag="/strategy" Click="OnNavClick">
+          <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Path Width="14" Height="14" Stretch="Uniform" StrokeThickness="1.2"
+                  StrokeLineCap="Round" StrokeJoin="Round"
+                  Data="M3 4h10 M3 8h10 M3 12h10 M6 2v4 M10 6v4 M8 10v4"
+                  VerticalAlignment="Center" />
+            <TextBlock Text="策略工作室" VerticalAlignment="Center" />
+          </StackPanel>
+        </Button>
+        <Button Classes="nav" Tag="/cycles" Click="OnNavClick">
+          <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Path Width="14" Height="14" Stretch="Uniform" StrokeThickness="1.2"
+                  StrokeLineCap="Round" StrokeJoin="Round"
+                  Data="M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z M8 5v3.5l2.5 1.5"
+                  VerticalAlignment="Center" />
+            <TextBlock Text="周期历史" VerticalAlignment="Center" />
+          </StackPanel>
+        </Button>
+        <Button Classes="nav" Tag="/reviews" Click="OnNavClick">
+          <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Path Width="14" Height="14" Stretch="Uniform" StrokeThickness="1.2"
+                  StrokeLineCap="Round" StrokeJoin="Round"
+                  Data="M3 3h4a2 2 0 0 1 2 2v8a2 2 0 0 0-2-2H3z M13 3H9a2 2 0 0 0-2 2v8a2 2 0 0 1 2-2h4z"
+                  VerticalAlignment="Center" />
+            <TextBlock Text="复盘经验" VerticalAlignment="Center" />
+          </StackPanel>
+        </Button>
       </StackPanel>
 
-      <StackPanel Grid.Column="3" Orientation="Horizontal">
+      <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Stretch">
         <Button Classes="win" Click="OnMinimize">
           <Path Data="M0,5 H10" StrokeThickness="1" />
         </Button>
