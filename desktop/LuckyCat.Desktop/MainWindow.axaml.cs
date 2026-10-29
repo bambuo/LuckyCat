@@ -77,6 +77,9 @@ public partial class MainWindow : Window
     {
         Opened -= OnOpened;
 
+        // 圆角依赖原生窗口句柄，Opened 时句柄已可用。
+        WindowCorners.Apply(this);
+
         // 宿主已就绪：托盘是否可用不影响自动更新检查。
         _ = Updater.StartPeriodic(this, _updateCts.Token);
 
