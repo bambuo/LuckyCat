@@ -81,6 +81,9 @@ dotnet publish "$ROOT/desktop/LuckyCat.Desktop/LuckyCat.Desktop.csproj" \
 vpk pack -u bambuo.LuckyCat -v "$VERSION" -p "$PUBLISH" -o "$ROOT/artifacts/releases" \
   -c "$CHANNEL" -r "$RID" --mainExe "$MAIN_EXE" --packTitle "招财猫" --icon "$ICON" ${PACK_ARGS[@]+"${PACK_ARGS[@]}"}
 
+# vpk 不给安装器/AppImage 带版本号，统一改名并同步 feed，保证三平台命名一致。
+bash "$ROOT/scripts/rename-artifacts.sh" "$VERSION" "$ROOT/artifacts/releases" "$CHANNEL"
+
 if (( UPLOAD )); then
   UPLOAD_ARGS=(upload github --repoUrl https://github.com/bambuo/LuckyCat --token "$GH_TOKEN" \
     --outputDir "$ROOT/artifacts/releases" --channel "$CHANNEL" --publish)

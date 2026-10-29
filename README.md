@@ -111,7 +111,7 @@ RID=osx-arm64 ./scripts/package-desktop.sh
 powershell -File scripts/package-desktop.ps1
 ```
 
-产物在 `artifacts/releases/`（不入库）。macOS 实测文件为 `bambuo.LuckyCat-osx-Setup.pkg`（安装包）、`bambuo.LuckyCat-osx-Portable.zip`（解压得到 `招财猫.app`）与 `bambuo.LuckyCat-0.1.0-osx-full.nupkg`；Linux 实测为 `bambuo.LuckyCat.AppImage`（x64）与 `bambuo.LuckyCat-linux-arm64.AppImage`（arm64），各自带 nupkg 与 `releases.linux*.json`。安装器与便携包文件名不含版本号；版本在 nupkg 文件名与 `releases.*.json` 中。0.1.0 已发布到 GitHub Releases，在本地打包可用 `--upload` 上传（需要 `GH_TOKEN`）。
+产物在 `artifacts/releases/`（不入库），统一命名为 `bambuo.LuckyCat-<version>-<channel>...`：macOS 为 `bambuo.LuckyCat-0.1.1-osx-Setup.pkg`、`bambuo.LuckyCat-0.1.1-osx-Portable.zip`（解压得到 `招财猫.app`）与 `bambuo.LuckyCat-0.1.1-osx-full.nupkg`；Linux 为 `bambuo.LuckyCat-0.1.1-linux.AppImage`（x64）与 `bambuo.LuckyCat-0.1.1-linux-arm64.AppImage`（arm64），各自带 nupkg 与 `releases.linux*.json`。vpk 原始产物不带版本号，打包脚本会调用 `scripts/rename-artifacts.sh` 改名并同步 feed。0.1.1 已发布到 GitHub Releases（10 个资产），在本地打包可用 `--upload` 上传（需要 `GH_TOKEN`）。
 
 Windows 的安装根为 `%LOCALAPPDATA%\bambuo.LuckyCat`，与数据目录 `%LOCALAPPDATA%\LuckyCat` 分离；卸载应用不会删除交易库与日志。macOS 的 Bundle ID 固定为 `com.bambuo.luckycat`（打包脚本的 `--bundleId`），后续发布不可再改。
 
