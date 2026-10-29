@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # 构建 web 与桌面程序，并用 Velopack 生成安装包。
-# 用法：RID=win-x64|osx-arm64|linux-x64 ./scripts/package-desktop.sh [--upload]
+# 用法：RID=win-x64|osx-arm64|linux-x64|linux-arm64 ./scripts/package-desktop.sh [--upload]
+# Linux 包需在 Linux 主机或 Linux 容器内打包：macOS 的 vpk 只能生成 macOS 包。
 # --upload 会创建 GitHub Release，需要 GH_TOKEN。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RID="${RID:?set RID=win-x64|osx-arm64|linux-x64}"
+RID="${RID:?set RID=win-x64|osx-arm64|linux-x64|linux-arm64}"
 VERSION="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$ROOT/Directory.Build.props" | head -1)"
 [[ -n "$VERSION" ]] || { echo "cannot read <Version> from Directory.Build.props" >&2; exit 1; }
 
@@ -28,6 +29,8 @@ case "$RID" in
              # vpk 默认拼成 com.<packId>.<packId>；显式给反向域名，避免首版后再改断更新链。
              PACK_ARGS+=(--bundleId com.bambuo.luckycat) ;;
   linux-x64) CHANNEL=linux ;;
+  # 同 OS 不同架构共用 channel 会撞产物名，arm64 单独一条更新链。
+  linux-arm64) CHANNEL=linux-arm64 ;;
   *) echo "unsupported RID: $RID" >&2; exit 1 ;;
 esac
 
@@ -37,7 +40,7 @@ export PATH="$HOME/.dotnet/tools:$DOTNET_ROOT:$PATH"
 command -v vpk >/dev/null || { echo "missing vpk: dotnet tool install -g vpk --version 1.3.39-g8d2844f" >&2; exit 1; }
 [[ -f "$ICON" ]] || { echo "missing icon: $ICON (run ./scripts/make-icons.sh first)" >&2; exit 1; }
 
-# vpk 1.3.39 仍不提供 --framework/--categories；缺少 spec 要求的元数据时硬失败
+# vpk 在 macOS 主机上不暴露 --framework/--categories，Linux 主机才暴露 --categories。
 VPK_HELP="$(vpk pack -H 2>&1 || true)"
 case "$RID" in
   win-x64)
@@ -47,7 +50,7 @@ case "$RID" in
       MISSING+=("--framework webview2（Windows 安装器声明 WebView2 依赖）")
     fi
     ;;
-  linux-x64)
+  linux-x64|linux-arm64)
     if grep -q -- '--categories' <<<"$VPK_HELP"; then
       PACK_ARGS+=(--categories Finance)
     else
@@ -61,6 +64,10 @@ if (( ${#MISSING[@]} > 0 )); then
     echo "警告：当前 vpk 不支持 ${MISSING[*]}，产物将缺少该元数据，仅用于临时验证。" >&2
   else
     echo "错误：当前 vpk 不支持 ${MISSING[*]}。" >&2
+    if [[ "$RID" == linux-* && "$(uname -s)" == "Darwin" ]]; then
+      echo "错误：macOS 的 vpk 不能交叉打 Linux 包；请在 Linux 主机或容器（如 mcr.microsoft.com/dotnet/sdk:10.0 + squashfs-tools）内执行。" >&2
+      exit 1
+    fi
     echo "错误：请升级 vpk；确认可接受后设 LUCKYCAT_ALLOW_MISSING_WEBVIEW2=1 继续。" >&2
     exit 1
   fi
@@ -72,7 +79,7 @@ dotnet publish "$ROOT/desktop/LuckyCat.Desktop/LuckyCat.Desktop.csproj" \
   -c Release -r "$RID" --self-contained -p:PublishSingleFile=false -o "$PUBLISH"
 
 vpk pack -u bambuo.LuckyCat -v "$VERSION" -p "$PUBLISH" -o "$ROOT/artifacts/releases" \
-  -c "$CHANNEL" --mainExe "$MAIN_EXE" --packTitle "招财猫" --icon "$ICON" ${PACK_ARGS[@]+"${PACK_ARGS[@]}"}
+  -c "$CHANNEL" -r "$RID" --mainExe "$MAIN_EXE" --packTitle "招财猫" --icon "$ICON" ${PACK_ARGS[@]+"${PACK_ARGS[@]}"}
 
 if (( UPLOAD )); then
   UPLOAD_ARGS=(upload github --repoUrl https://github.com/bambuo/LuckyCat --token "$GH_TOKEN" \
