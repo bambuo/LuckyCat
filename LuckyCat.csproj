@@ -10,6 +10,9 @@
     <Compile Remove="Tests/**" />
     <Content Remove="Tests/**" />
     <None Remove="Tests/**" />
+    <Compile Remove="desktop/**" />
+    <Content Remove="desktop/**" />
+    <None Remove="desktop/**" />
     <InternalsVisibleTo Include="LuckyCat.Tests" />
   </ItemGroup>
 

@@ -1,0 +1,95 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.LogicalTree;
+using Avalonia.VisualTree;
+
+namespace LuckyCat.Desktop;
+
+public partial class TitleBar : UserControl
+{
+    private Window? _window;
+
+    public event Action<string>? SelectionChanged;
+
+    public TitleBar() => InitializeComponent();
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        _window = TopLevel.GetTopLevel(this) as Window;
+        if (_window is not null) _window.PropertyChanged += OnWindowPropertyChanged;
+        UpdateMaximizeIcon();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        if (_window is not null) _window.PropertyChanged -= OnWindowPropertyChanged;
+        _window = null;
+        base.OnDetachedFromVisualTree(e);
+    }
+
+    public void Select(string path)
+    {
+        // 构造函数里窗口尚未挂到可视树，按逻辑树遍历才能在首次导航前设置选中态。
+        foreach (var button in this.GetLogicalDescendants().OfType<Button>()
+                     .Where(b => b.Classes.Contains("nav")))
+        {
+            var active = string.Equals(button.Tag as string, path, StringComparison.OrdinalIgnoreCase);
+            button.Classes.Set("active", active);
+        }
+    }
+
+    private void OnNavClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string path }) return;
+        Select(path);
+        SelectionChanged?.Invoke(path);
+    }
+
+    private void OnBarPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (e.Source is Visual source && source.FindAncestorOfType<Button>(includeSelf: true) is not null)
+            return;
+
+        if (e.ClickCount == 2 && e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            ToggleMaximize();
+            return;
+        }
+
+        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+            (TopLevel.GetTopLevel(this) as Window)?.BeginMoveDrag(e);
+    }
+
+    private void OnMinimize(object? sender, RoutedEventArgs e)
+    {
+        if (TopLevel.GetTopLevel(this) is Window window) window.WindowState = WindowState.Minimized;
+    }
+
+    private void OnToggleMaximize(object? sender, RoutedEventArgs e) => ToggleMaximize();
+
+    private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Window.WindowStateProperty) UpdateMaximizeIcon();
+    }
+
+    private void UpdateMaximizeIcon()
+    {
+        var maximized = _window?.WindowState == WindowState.Maximized;
+        MaxIcon.IsVisible = !maximized;
+        RestoreIcon.IsVisible = maximized;
+    }
+
+    private void ToggleMaximize()
+    {
+        if (TopLevel.GetTopLevel(this) is not Window window) return;
+        window.WindowState = window.WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+    }
+
+    private void OnClose(object? sender, RoutedEventArgs e) =>
+        (TopLevel.GetTopLevel(this) as Window)?.Close();
+}

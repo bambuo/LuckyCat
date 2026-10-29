@@ -2,6 +2,10 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import CatTransition from './components/trader/CatTransition.vue'
+import { isDesktopMode } from './desktop'
+
+const desktop = isDesktopMode()
+if (desktop) document.documentElement.style.setProperty('--app-header-height', '0px')
 
 const route = useRoute()
 const router = useRouter()
@@ -15,7 +19,7 @@ function onMenuClick(key: string) {
 
 <template>
   <a-layout class="app-layout">
-    <a-layout-header class="app-header">
+    <a-layout-header v-if="!desktop" class="app-header">
       <div class="app-brand">
         <img class="brand-icon" src="/logo.svg" alt="" />
         <span>招财猫</span>

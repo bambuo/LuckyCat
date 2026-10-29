@@ -6,6 +6,7 @@ import TradersPage from './pages/TradersPage.vue'
 import DashboardPage from './pages/DashboardPage.vue'
 import CyclesPage from './pages/CyclesPage.vue'
 import ReviewsPage from './pages/ReviewsPage.vue'
+import { notifyRoute } from './desktop'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -21,5 +22,7 @@ const router = createRouter({
     { path: '/', redirect: '/traders' },
   ],
 })
+
+router.afterEach((to) => notifyRoute(to.path))
 
 export default router
